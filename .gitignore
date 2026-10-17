@@ -1,0 +1,26 @@
+.idea/
+# Local agent guidance and implementation prompts are not public project docs.
+/AGENTS.md
+/CODEX_FIRST_PROMPT.md
+/codexfirstpromt.md
+/docs/
+.agents/
+.codex/
+.tools/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log
