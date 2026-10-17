@@ -10,9 +10,8 @@ application foundation. The full assistant is planned and is not available yet.
 
 ## Engineering workflow
 
-This is a personal portfolio project, publicly visible so employers can review
-the code, tests, and development history. External contributions
-are not being accepted.
+This is a personal project with publicly available code, tests, and development
+history. External contributions are not being accepted.
 
 Development proceeds in small, testable changes. GitHub Actions is configured for
 backend tests/lint/types and frontend lint/build. Results are available in the
