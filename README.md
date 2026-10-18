@@ -5,8 +5,8 @@
 An independent, unofficial Mazda6 information assistant in early development.
 Unaffiliated with Mazda.
 
-**Status: early development.** This repository currently contains the local
-application foundation. The full assistant is planned and is not available yet.
+**Status: early development.** The frontend and API health-check foundation
+are deployed at [askm6.com](https://askm6.com). The full assistant is not available yet.
 
 ## Engineering workflow
 
@@ -14,19 +14,23 @@ This is a personal project with publicly available code, tests, and development
 history. External contributions are not being accepted.
 
 Development proceeds in small, testable changes. GitHub Actions is configured for
-backend tests/lint/types and frontend lint/build. Results are available in the
+backend tests/lint/types and frontend tests/lint/build. Results are available in the
 [Actions tab](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions).
 
 ## Working now
 
 - React/TypeScript/Vite/Tailwind development page with live API connectivity status.
 - FastAPI `GET /api/v1/health` with a typed JSON contract.
-- Backend contract test, Python lint/type checks, frontend lint/type/build checks.
+- Docker Compose PostgreSQL/pgvector for local development.
+- Configurable SQLAlchemy database pooling with remote TLS verification.
+- `GET /api/v1/ready` checks database connectivity, returning 200 or 503.
+- Tests for database configuration, readiness, timeouts, and pool lifecycle.
+- Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Chat, authentication, persistence, vehicle selection, retrieval, and AI calls are
-not implemented. No API keys, database, Docker, or cloud account are required for
-this first slice. Embeddings are planned with OpenAI `text-embedding-3-small`
-(1536 dimensions); answer generation is planned with Groq.
+Chat, authentication, conversation persistence, vehicle selection, retrieval,
+and AI calls are not implemented. Alembic migrations are not configured yet.
+Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
+answer generation is planned with Groq.
 
 ## Windows local setup
 
@@ -71,14 +75,54 @@ at http://127.0.0.1:8000/docs. The health response checks process liveness only.
 
 Vite forwards `/api` to `127.0.0.1:8000`; no broad CORS permission is needed.
 Both servers bind to loopback. The production build does not supply an API server;
-same-origin production hosting will be configured in a later deployment task.
+production uses Cloudflare Pages, a health-only Pages Function proxy,
+and a FastAPI backend on Render. The proxy currently permits only
+`GET /api/v1/health`; readiness is available directly on the backend.
 
 For PyCharm, use `backend/.venv/Scripts/python.exe` after `uv sync`, with `backend`
 as the working directory. The pre-existing root `.venv` is not used by this setup.
 
-The current slice requires no `.env`. Keep future credentials in ignored backend
-environment files, never in frontend `VITE_*` variables. `.env.example` contains
-guidance only, with no secrets.
+## Database configuration
+
+For the optional local database, create an ignored root `.env` using the root
+`.env.example` and set a strong local `POSTGRES_PASSWORD`. From the repository
+root, run `docker compose up -d --wait db`. PostgreSQL binds to
+`127.0.0.1:15432` and stores data in the `postgres_data` Docker volume.
+
+Backend configuration is documented in `backend/.env.example`. Settings read
+`backend/.env` and environment variables; environment variables take precedence.
+Without `DATABASE_URL`, `/api/v1/health` returns 200 and `/api/v1/ready` returns 503.
+The health endpoint checks process liveness; readiness executes `SELECT 1` and
+checks connectivity, not migration status or application-table permissions.
+
+Database URLs use `postgresql+psycopg://`. Remote connections require
+`sslmode=verify-full` and an `sslrootcert` path pointing to the downloaded CA
+certificate. Local Docker connections use port 15432. The application pool
+defaults to two connections per process, with no overflow.
+
+Keep real credentials in ignored backend environment files or Render environment
+variables, never in frontend `VITE_*` variables. Use a restricted application
+database role; administrator or migration credentials are managed separately.
+Construct URLs with SQLAlchemy `URL.create()` or percent-encode reserved
+characters in passwords when building a URL manually.
+
+For an explicitly configured Supabase connectivity test, create an ignored
+`backend/.env.supabase` containing the database URL and run from `backend`:
+
+```powershell
+uv run uvicorn app.main:app --reload --loop asyncio --env-file .env.supabase --host 127.0.0.1 --port 8000
+```
+
+The Windows development command uses reload with the asyncio loop so Psycopg
+runs with a compatible Selector event loop. Keep normal local development on
+Docker rather than using the production database for development data.
+
+For Render, provide the CA certificate as a secret file named `supabase-ca.crt`
+and use `/etc/secrets/supabase-ca.crt` as the URL's `sslrootcert` value. Configure
+`DATABASE_URL` as a server-side environment variable, without dotenv quotes or
+the `DATABASE_URL=` prefix. The native Python service uses root directory
+`backend`, build command `uv sync --locked --no-dev`, and start command
+`.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`.
 
 ## Checks
 
@@ -95,6 +139,7 @@ From `frontend`:
 
 ```powershell
 npm run lint
+npm test
 npm run build
 ```
 
@@ -102,8 +147,7 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-The next focused task is PostgreSQL/pgvector setup, database migrations, and a
-database readiness check.
+The next focused task is Alembic migrations and application data modeling.
 
 ## License
 
