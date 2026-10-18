@@ -3,9 +3,9 @@ import { useEffect, useState } from 'react'
 type ApiStatus = 'checking' | 'connected' | 'unavailable'
 
 const statusMessages: Record<ApiStatus, string> = {
-  checking: 'Checking API connection…',
+  checking: 'Checking API connection… The server may take about a minute to wake up.',
   connected: 'API connected',
-  unavailable: 'API unavailable. Start the backend and try again.',
+  unavailable: 'API unavailable. Please try again shortly.',
 }
 
 export default function App() {
@@ -14,7 +14,7 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 5000)
+    const timeout = window.setTimeout(() => controller.abort(), 75_000)
     let active = true
 
     async function checkHealth() {
