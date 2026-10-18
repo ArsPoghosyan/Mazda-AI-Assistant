@@ -25,6 +25,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: opt-in tests requiring the migrated local PostgreSQL test database",
+]
 
 [tool.ruff]
 target-version = "py312"

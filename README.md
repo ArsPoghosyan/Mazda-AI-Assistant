@@ -25,10 +25,13 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Configurable SQLAlchemy database pooling with remote TLS verification.
 - `GET /api/v1/ready` checks database connectivity, returning 200 or 503.
 - Tests for database configuration, readiness, timeouts, and pool lifecycle.
+- Alembic migration setup and initial account/guest tables verified on local PostgreSQL.
+- Opt-in PostgreSQL tests for identity constraints and restricted-role permissions.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Chat, authentication, conversation persistence, vehicle selection, retrieval,
-and AI calls are not implemented. Alembic migrations are not configured yet.
+and AI calls are not implemented. Guest expiry enforcement and history cleanup
+are not implemented; the identity schema includes timestamps for these later steps.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
 answer generation is planned with Groq.
 
@@ -133,7 +136,29 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+uv run mypy migrations
 ```
+
+PostgreSQL integration tests are skipped unless `TEST_DATABASE_URL` is explicitly
+configured. They require the migrated local `askm6_test` database and the
+`askm6_app` role. The test URL must use `postgresql+psycopg://`, administrator
+`mazda6_admin`, host `127.0.0.1`, port `15432`, database `askm6_test`, and no query
+parameters. Use the local bootstrap credentials configured through the root
+ignored `.env`. Construct the URL with `URL.create()` so password characters are
+encoded correctly, and store it as `TEST_DATABASE_URL` in an ignored
+`backend/.env.integration.local` file.
+
+From `backend`, after preparing the local database and applying the migrations:
+
+```powershell
+uv run --env-file .env.integration.local pytest tests/integration -p no:cacheprovider
+```
+
+Tests verify the database identity and migration revision before writing, execute
+as `askm6_app` through `SET LOCAL ROLE`, and roll back each test's transaction.
+They do not create tables automatically or apply migrations. These tests exercise
+database permissions, not login, token verification, or application ownership checks.
+Keep test administrator credentials separate from the running web service.
 
 From `frontend`:
 
@@ -147,7 +172,7 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-The next focused task is Alembic migrations and application data modeling.
+The next focused task is secure identity handling using the account/guest schema.
 
 ## License
 
