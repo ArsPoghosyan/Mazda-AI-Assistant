@@ -54,9 +54,14 @@ export async function onRequest({
   try {
     const upstream = await fetch(new URL('/api/v1/health', origin), {
       headers: { Accept: 'application/json' },
-      redirect: 'error',
+      redirect: 'manual',
       signal: AbortSignal.timeout(65_000),
     })
+
+    if (upstream.status >= 300 && upstream.status < 400) {
+      await upstream.body?.cancel()
+      return errorResponse('Unexpected backend redirect.', 502)
+    }
 
     return new Response(upstream.body, {
       status: upstream.status,

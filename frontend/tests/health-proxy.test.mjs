@@ -17,7 +17,7 @@ function context(path = '/api/v1/health', method = 'GET') {
 test('forwards health requests to the configured backend', async (t) => {
   const upstream = t.mock.method(globalThis, 'fetch', async (url, options) => {
     assert.equal(url.toString(), 'https://backend.example/api/v1/health')
-    assert.equal(options.redirect, 'error')
+    assert.equal(options.redirect, 'manual')
     assert.ok(options.signal instanceof AbortSignal)
     return Response.json(health)
   })
@@ -30,6 +30,31 @@ test('forwards health requests to the configured backend', async (t) => {
   assert.deepEqual(await response.json(), health)
   assert.equal(response.headers.get('Cache-Control'), 'no-store')
   assert.equal(upstream.mock.callCount(), 1)
+})
+
+test('rejects backend redirects without forwarding their location', async (t) => {
+  const statuses = [301, 302, 303, 307, 308]
+  let redirectStatus
+  const upstream = t.mock.method(globalThis, 'fetch', async () => {
+    return new Response('Redirecting', {
+      status: redirectStatus,
+      headers: { Location: 'https://untrusted.example' },
+    })
+  })
+
+  for (const status of statuses) {
+    redirectStatus = status
+    const response = await onRequest(context())
+
+    assert.equal(response.status, 502)
+    assert.deepEqual(await response.json(), {
+      error: 'Unexpected backend redirect.',
+    })
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('Cache-Control'), 'no-store')
+  }
+
+  assert.equal(upstream.mock.callCount(), statuses.length)
 })
 
 test('unknown API routes never contact the backend', async (t) => {
