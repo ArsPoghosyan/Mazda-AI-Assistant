@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
     db_readiness_timeout_seconds: int = Field(default=8, ge=1, le=30)
     guest_session_inactivity_days: int = Field(default=30, ge=1)
+    guest_cookie_secure: bool = True
+    csrf_trusted_origins: tuple[str, ...] = ()
+    guest_session_api_enabled: bool = False
 
 
 class MigrationSettings(Settings):

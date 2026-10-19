@@ -27,11 +27,14 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Tests for database configuration, readiness, timeouts, and pool lifecycle.
 - Alembic migration setup and initial account/guest tables verified on local PostgreSQL.
 - Opt-in PostgreSQL tests for identity constraints and restricted-role permissions.
+- Guest session creation and expiry-safe refresh with configurable inactivity expiry.
+- A default-disabled guest session endpoint with exact Origin checks and HttpOnly cookies.
+- Guest HTTP tests for session reuse, invalid/expired cookies, and database failures.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Chat, authentication, conversation persistence, vehicle selection, retrieval,
-and AI calls are not implemented. Guest expiry enforcement and history cleanup
-are not implemented; the identity schema includes timestamps for these later steps.
+Account authentication, the frontend guest flow, chat, conversation persistence,
+vehicle selection, retrieval, and AI calls are not implemented. Expired guest
+sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
 answer generation is planned with Groq.
 
@@ -127,6 +130,31 @@ the `DATABASE_URL=` prefix. The native Python service uses root directory
 `backend`, build command `uv sync --locked --no-dev`, and start command
 `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`.
 
+## Guest session endpoint
+
+`POST /api/v1/guest/session` creates a guest session or refreshes an existing,
+unexpired one. Missing, malformed, unknown, and expired cookies result in a new
+session. Only the token hash is stored in PostgreSQL. The token is issued in an
+HttpOnly cookie after the transaction commits, and is never returned in JSON.
+Successful responses contain `status` and `expires_at` and use `Cache-Control: no-store`.
+Database failures return a generic 503 without issuing a cookie.
+
+The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
+Keep public guest access disabled until Turnstile and abuse controls are ready.
+The Cloudflare Pages proxy still forwards only health requests; frontend guest
+integration and production cookie forwarding are not implemented.
+
+Requests require exactly one Origin matching `CSRF_TRUSTED_ORIGINS`, configured
+as a JSON array such as `["https://askm6.com"]`. Missing, null, duplicate, and
+unlisted origins return 403 before session database work. The default allowlist
+is empty. Local Vite development uses `["http://127.0.0.1:5173"]`; origins have
+no trailing slash. Origin validation complements authentication and abuse controls.
+
+`GUEST_COOKIE_SECURE=true` uses the host-only `__Host-askm6_guest` cookie with
+Secure, HttpOnly, SameSite=Lax, and Path=/. Set it false only for local HTTP
+development, which uses the separate `askm6_guest` name. Guest inactivity expiry
+defaults to 30 days through `GUEST_SESSION_INACTIVITY_DAYS`.
+
 ## Checks
 
 From `backend`:
@@ -154,10 +182,19 @@ From `backend`, after preparing the local database and applying the migrations:
 uv run --env-file .env.integration.local pytest tests/integration -p no:cacheprovider
 ```
 
+To run the complete backend suite, including local PostgreSQL integration tests:
+
+```powershell
+uv run --env-file .env.integration.local pytest -p no:cacheprovider
+```
+
 Tests verify the database identity and migration revision before writing, execute
-as `askm6_app` through `SET LOCAL ROLE`, and roll back each test's transaction.
-They do not create tables automatically or apply migrations. These tests exercise
-database permissions, not login, token verification, or application ownership checks.
+application operations as `askm6_app` through `SET LOCAL ROLE`, and normally roll
+back test transactions. HTTP lifecycle and lock-wait tests commit synthetic rows
+where necessary and delete only their own test rows in cleanup. Administrative
+connections are used for setup, inspection, and cleanup. Tests do not create
+tables automatically or apply migrations. They cover guest token/session behavior
+and database permissions, not managed account login or conversation ownership.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:
@@ -172,7 +209,8 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-The next focused task is secure identity handling using the account/guest schema.
+The next focused task is local frontend guest integration. Managed account login,
+Turnstile, and abuse controls remain prerequisites for public guest/account access.
 
 ## License
 

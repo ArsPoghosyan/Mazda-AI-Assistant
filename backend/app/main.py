@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
+from app.guest_routes import router as guest_router
 
 
 class HealthResponse(BaseModel):
@@ -43,6 +44,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    application.include_router(guest_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
