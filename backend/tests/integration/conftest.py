@@ -1,7 +1,8 @@
 """Opt-in PostgreSQL fixtures restricted to the local migrated test database."""
 
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.exc import ArgumentError
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 
@@ -79,3 +81,34 @@ def app_connection(integration_engine: Engine) -> Iterator[Connection]:
             yield connection
         finally:
             transaction.rollback()
+
+
+@pytest.fixture
+def async_app_connection_factory(
+    integration_engine: Engine,
+) -> Callable[[], AbstractAsyncContextManager[AsyncConnection]]:
+    """Provide asynchronous application connections with automatic rollback."""
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[AsyncConnection]:
+        engine = create_async_engine(
+            integration_engine.url,
+            poolclass=NullPool,
+            connect_args={"connect_timeout": 5, "hostaddr": "127.0.0.1"},
+            echo=False,
+            hide_parameters=True,
+        )
+        try:
+            async with engine.connect() as connection:
+                transaction = await connection.begin()
+                try:
+                    await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+                    await connection.execute(text("SET LOCAL ROLE askm6_app"))
+                    assert await connection.scalar(text("SELECT current_user")) == "askm6_app"
+                    yield connection
+                finally:
+                    await transaction.rollback()
+        finally:
+            await engine.dispose()
+
+    return connect
