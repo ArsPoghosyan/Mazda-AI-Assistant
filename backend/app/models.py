@@ -125,7 +125,10 @@ class AccountSession(Base):
         LargeBinary,
         unique=True,
     )
-    provider_session_id: Mapped[UUID] = mapped_column(Uuid)
+    provider_session_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        unique=True,
+    )
     access_token_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     refresh_token_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     access_token_expires_at: Mapped[datetime] = mapped_column(

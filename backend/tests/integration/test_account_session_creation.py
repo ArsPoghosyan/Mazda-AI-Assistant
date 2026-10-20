@@ -18,12 +18,19 @@ from jwt.algorithms import ECAlgorithm
 from psycopg.errors import UniqueViolation
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.account_key_cache import AccountKeyCache
-from app.account_sessions import AccountSessionUnavailable, create_account_session
+from app.account_sessions import (
+    AccountSessionAlreadyExists,
+    AccountSessionUnavailable,
+    CreatedAccountSession,
+    create_account_session,
+)
 from app.account_token_encryption import AccountTokenCipher
 from app.account_tokens import InvalidAccountToken, VerifiedAccount
 from app.config import Settings
@@ -486,3 +493,256 @@ def test_token_expired_after_verification_rolls_back_new_profile(
             )
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_repeated_creation_preserves_existing_session(
+    async_app_connection_factory: ConnectionFactory,
+    material: AuthMaterial,
+) -> None:
+    async def check() -> None:
+        async with async_app_connection_factory() as connection:
+            created = await create_account_session(
+                connection,
+                material.settings,
+                access_token=material.access_token,
+                refresh_token=material.refresh_token,
+                key_cache=material.cache,
+            )
+            statement = select(AccountSession).where(AccountSession.id == created.session_id)
+            original = (await connection.execute(statement)).one()
+            profile_statement = select(UserProfile).where(UserProfile.id == material.user_id)
+            original_profile = (await connection.execute(profile_statement)).one()
+
+            with pytest.raises(AccountSessionAlreadyExists) as caught:
+                await create_account_session(
+                    connection,
+                    material.settings,
+                    access_token=material.access_token,
+                    refresh_token=material.refresh_token,
+                    key_cache=material.cache,
+                )
+
+            assert str(caught.value) == "Account session already exists."
+            assert (await connection.execute(statement)).one() == original
+            assert (await connection.execute(profile_statement)).one() == original_profile
+
+            session_ids = (
+                await connection.scalars(
+                    select(AccountSession.id).where(
+                        AccountSession.provider_session_id == material.provider_session_id
+                    )
+                )
+            ).all()
+            assert session_ids == [created.session_id]
+            material.download.assert_awaited_once()
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_provider_conflict_rolls_back_new_profile_and_preserves_other_account(
+    async_app_connection_factory: ConnectionFactory,
+    material: AuthMaterial,
+) -> None:
+    existing_user_id = uuid4()
+    existing_session_id = uuid4()
+
+    async def check() -> None:
+        async with async_app_connection_factory() as connection:
+            key = material.settings.account_session_encryption_key
+            assert key is not None
+            cipher = AccountTokenCipher(key)
+            now = datetime.now(UTC)
+
+            await connection.execute(insert(UserProfile).values(id=existing_user_id))
+            await connection.execute(
+                insert(AccountSession).values(
+                    id=existing_session_id,
+                    user_id=existing_user_id,
+                    token_hash=sha256(b"synthetic-existing-browser-token").digest(),
+                    provider_session_id=material.provider_session_id,
+                    access_token_ciphertext=cipher.encrypt(SecretStr("existing-access")),
+                    refresh_token_ciphertext=cipher.encrypt(SecretStr("existing-refresh")),
+                    access_token_expires_at=now + timedelta(hours=1),
+                    created_at=now,
+                    last_seen_at=now,
+                    idle_expires_at=now + timedelta(days=7),
+                    absolute_expires_at=now + timedelta(days=30),
+                )
+            )
+            statement = select(AccountSession).where(AccountSession.id == existing_session_id)
+            original = (await connection.execute(statement)).one()
+            profile_statement = select(UserProfile).where(UserProfile.id == existing_user_id)
+            original_profile = (await connection.execute(profile_statement)).one()
+
+            await assert_no_account_rows(connection, material.user_id)
+
+            with pytest.raises(AccountSessionAlreadyExists) as caught:
+                await create_account_session(
+                    connection,
+                    material.settings,
+                    access_token=material.access_token,
+                    refresh_token=material.refresh_token,
+                    key_cache=material.cache,
+                )
+
+            assert str(caught.value) == "Account session already exists."
+            await assert_no_account_rows(connection, material.user_id)
+            assert (await connection.execute(statement)).one() == original
+            assert (await connection.execute(profile_statement)).one() == original_profile
+            material.download.assert_awaited_once()
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+@pytest.mark.parametrize("commit_first", [True, False])
+def test_concurrent_creation_respects_first_transaction(
+    integration_engine: Engine,
+    async_app_connection_factory: ConnectionFactory,
+    material: AuthMaterial,
+    commit_first: bool,
+) -> None:
+    # Commit only the synthetic profile so both attempts reach the session insert.
+    with integration_engine.begin() as connection:
+        connection.execute(insert(UserProfile).values(id=material.user_id))
+
+    async def check() -> None:
+        engine = create_async_engine(
+            integration_engine.url,
+            poolclass=NullPool,
+            connect_args={"connect_timeout": 5, "hostaddr": "127.0.0.1"},
+            echo=False,
+            hide_parameters=True,
+        )
+
+        async def use_app_role(connection: AsyncConnection) -> None:
+            await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+            await connection.execute(text("SET LOCAL ROLE askm6_app"))
+            assert await connection.scalar(text("SELECT current_user")) == "askm6_app"
+
+        try:
+            async with asyncio.timeout(10):
+                async with async_app_connection_factory() as observer:
+                    ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+                    async def attempt_second() -> CreatedAccountSession | None:
+                        try:
+                            async with engine.begin() as second:
+                                await use_app_role(second)
+                                pid = await second.scalar(text("SELECT pg_backend_pid()"))
+                                assert isinstance(pid, int)
+                                ready.set_result(pid)
+
+                                return await create_account_session(
+                                    second,
+                                    material.settings,
+                                    access_token=material.access_token,
+                                    refresh_token=material.refresh_token,
+                                    key_cache=material.cache,
+                                )
+                        except AccountSessionAlreadyExists:
+                            return None
+
+                    async with asyncio.TaskGroup() as group:
+                        async with engine.connect() as first:
+                            transaction = await first.begin()
+                            try:
+                                await use_app_role(first)
+                                first_pid = await first.scalar(text("SELECT pg_backend_pid()"))
+                                assert isinstance(first_pid, int)
+
+                                first_created = await create_account_session(
+                                    first,
+                                    material.settings,
+                                    access_token=material.access_token,
+                                    refresh_token=material.refresh_token,
+                                    key_cache=material.cache,
+                                )
+                                first_snapshot = (
+                                    await first.execute(
+                                        select(AccountSession).where(
+                                            AccountSession.id == first_created.session_id
+                                        )
+                                    )
+                                ).one()
+
+                                second_task = group.create_task(attempt_second())
+                                second_pid = await ready
+
+                                while True:
+                                    blocked = await observer.scalar(
+                                        text("SELECT :first = ANY(pg_blocking_pids(:second))"),
+                                        {
+                                            "first": first_pid,
+                                            "second": second_pid,
+                                        },
+                                    )
+                                    if blocked:
+                                        break
+                                    await asyncio.sleep(0.01)
+
+                                if commit_first:
+                                    await transaction.commit()
+                                else:
+                                    await transaction.rollback()
+
+                                second_created = await second_task
+                                rows = (
+                                    await observer.execute(
+                                        select(AccountSession).where(
+                                            AccountSession.provider_session_id
+                                            == material.provider_session_id
+                                        )
+                                    )
+                                ).all()
+                                assert len(rows) == 1
+                                stored = rows[0]
+
+                                if commit_first:
+                                    assert second_created is None
+                                    winner = first_created
+                                    assert stored == first_snapshot
+                                else:
+                                    assert second_created is not None
+                                    winner = second_created
+                                    assert winner.session_id != first_created.session_id
+
+                                assert stored.id == winner.session_id
+                                assert stored.user_id == material.user_id
+                                assert (
+                                    stored.token_hash
+                                    == sha256(
+                                        winner.token.get_secret_value().encode("ascii")
+                                    ).digest()
+                                )
+                                assert stored.idle_expires_at == winner.idle_expires_at
+                                assert stored.absolute_expires_at == winner.absolute_expires_at
+
+                                key = material.settings.account_session_encryption_key
+                                assert key is not None
+                                cipher = AccountTokenCipher(key)
+                                assert (
+                                    cipher.decrypt(stored.access_token_ciphertext)
+                                    == material.access_token
+                                )
+                                assert (
+                                    cipher.decrypt(stored.refresh_token_ciphertext)
+                                    == material.refresh_token
+                                )
+                                material.download.assert_awaited_once()
+                            finally:
+                                if transaction.is_active:
+                                    await transaction.rollback()
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+    finally:
+        with integration_engine.begin() as connection:
+            connection.execute(
+                delete(AccountSession).where(
+                    AccountSession.user_id == material.user_id,
+                    AccountSession.provider_session_id == material.provider_session_id,
+                )
+            )
+            connection.execute(delete(UserProfile).where(UserProfile.id == material.user_id))

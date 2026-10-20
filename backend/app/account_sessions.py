@@ -8,7 +8,7 @@ from secrets import token_urlsafe
 from uuid import UUID
 
 from pydantic import SecretStr
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -22,6 +22,10 @@ from app.models import AccountSession, UserProfile
 
 class AccountSessionUnavailable(RuntimeError):
     """Account-session creation is not currently available."""
+
+
+class AccountSessionAlreadyExists(ValueError):
+    """The provider session already has an application session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +104,7 @@ async def create_account_session(
             raise AccountSessionUnavailable("Account sessions are unavailable.") from None
 
         session_id = await connection.scalar(
-            insert(AccountSession)
+            pg_insert(AccountSession)
             .values(
                 user_id=account.user_id,
                 token_hash=token_hash,
@@ -113,8 +117,12 @@ async def create_account_session(
                 idle_expires_at=idle_expires_at,
                 absolute_expires_at=absolute_expires_at,
             )
+            .on_conflict_do_nothing(constraint="uq_account_sessions_provider_session_id")
             .returning(AccountSession.id)
         )
+        if session_id is None:
+            raise AccountSessionAlreadyExists("Account session already exists.")
+
         assert isinstance(session_id, UUID)
 
     return CreatedAccountSession(

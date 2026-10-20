@@ -324,3 +324,79 @@ def test_application_has_no_extra_session_table_privileges(
     )
 
     assert allowed is False
+
+
+@pytest.mark.parametrize("same_account", [True, False])
+def test_duplicate_provider_session_preserves_original(
+    app_connection: Connection,
+    cipher: AccountTokenCipher,
+    same_account: bool,
+) -> None:
+    provider_session_id = uuid4()
+    user_id, session_id = insert_account_session(
+        app_connection,
+        cipher,
+        provider_session_id=provider_session_id,
+    )
+    statement = select(AccountSession).where(AccountSession.id == session_id)
+    original = app_connection.execute(statement).one()
+
+    duplicate_user_id = user_id
+    if not same_account:
+        duplicate_user_id = uuid4()
+        app_connection.execute(insert(UserProfile).values(id=duplicate_user_id))
+
+    duplicate = dict(original._mapping)
+    duplicate.update(
+        id=uuid4(),
+        user_id=duplicate_user_id,
+        token_hash=token_bytes(32),
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        with app_connection.begin_nested():
+            app_connection.execute(insert(AccountSession).values(**duplicate))
+
+    assert isinstance(caught.value.orig, UniqueViolation)
+    assert caught.value.orig.diag.constraint_name == ("uq_account_sessions_provider_session_id")
+    assert app_connection.execute(statement).one() == original
+    assert app_connection.scalars(
+        select(AccountSession.id).where(AccountSession.provider_session_id == provider_session_id)
+    ).all() == [session_id]
+
+
+def test_same_account_can_have_distinct_provider_sessions(
+    app_connection: Connection,
+    cipher: AccountTokenCipher,
+) -> None:
+    first_provider_id = uuid4()
+    user_id, first_session_id = insert_account_session(
+        app_connection,
+        cipher,
+        provider_session_id=first_provider_id,
+    )
+    original = app_connection.execute(
+        select(AccountSession).where(AccountSession.id == first_session_id)
+    ).one()
+
+    second_session_id = uuid4()
+    second_provider_id = uuid4()
+    second = dict(original._mapping)
+    second.update(
+        id=second_session_id,
+        provider_session_id=second_provider_id,
+        token_hash=token_bytes(32),
+    )
+    app_connection.execute(insert(AccountSession).values(**second))
+
+    assert set(
+        app_connection.scalars(
+            select(AccountSession.id).where(AccountSession.user_id == user_id)
+        ).all()
+    ) == {first_session_id, second_session_id}
+
+    assert set(
+        app_connection.scalars(
+            select(AccountSession.provider_session_id).where(AccountSession.user_id == user_id)
+        ).all()
+    ) == {first_provider_id, second_provider_id}

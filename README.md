@@ -44,6 +44,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   foreign keys, bounded ciphertext fields, expiry constraints, and restricted grants.
 - Internal account-session creation with verified identity, encrypted provider
   credentials, browser-token hashing, capped deadlines, and transactional recovery.
+- One application session per provider session, enforced by a database constraint,
+  with controlled duplicate rejection and concurrent creation tests.
 - Internal account-session lookup with expiry checks after row-lock acquisition
   and activity updates capped at the stored absolute deadline.
 - Internal provider-token refresh adapter with bounded HTTP requests, masked
@@ -273,6 +275,13 @@ absolute expiry. These constraints do not encrypt data or verify token identity.
 Deleting an account profile cascades to its sessions; deleting a session preserves
 the account profile.
 
+Migration `08cad124d60b` adds the unique constraint
+`uq_account_sessions_provider_session_id`, allowing one application session per
+provider session. An account can still have multiple application sessions when
+each has a distinct provider session ID. Existing duplicates require review before
+applying this migration; it does not delete or merge rows. Session creation
+requires this migration because its conflict handling names the constraint.
+
 The application role can select, insert, and delete session rows. Updates are
 limited to encrypted provider tokens, access-token expiry, last activity, and
 inactivity expiry. Session identity, ownership, creation time, and the absolute
@@ -293,6 +302,15 @@ expiry against fresh database time after any wait on profile creation. A savepoi
 makes profile/session creation atomic within the caller's transaction. The caller
 must commit successfully before issuing the browser token.
 
+If the provider session already exists, creation raises
+`AccountSessionAlreadyExists` without returning a browser token. The existing
+session's credentials, ownership, token hash, and deadlines remain unchanged;
+any new profile inserted by the failed attempt is rolled back with its savepoint.
+Only the provider-session uniqueness conflict is handled this way; other database
+errors are not silently ignored. The stored browser-token hash cannot reconstruct
+the original token, so a future login flow may require a fresh sign-in if the
+initial response is lost before the browser receives its credential.
+
 The refresh token must come from the same trusted provider authentication response.
 The service validates its format but does not independently verify refresh-token
 ownership. No provider login adapter or account-session HTTP endpoint is connected.
@@ -300,6 +318,12 @@ ownership. No provider login adapter or account-session HTTP endpoint is connect
 Local PostgreSQL tests cover encrypted storage, verified identity, configurable
 deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
 outer-transaction rollback, and savepoint recovery after an insertion failure.
+Schema tests reject duplicate provider sessions within and across accounts while
+allowing distinct provider sessions for one account. Service tests verify duplicate
+rejection preserves existing rows and rolls back a newly inserted profile. Real
+two-connection tests observe PostgreSQL blocking before committing or rolling back
+the first creation attempt: after commit the second attempt reports a duplicate;
+after rollback it can create the sole committed session.
 Tests use generated credentials and mocked signing-key retrieval; the
 post-verification expiry test also mocks the verified identity to simulate expiry.
 
