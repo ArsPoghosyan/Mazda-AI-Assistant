@@ -48,6 +48,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   with controlled duplicate rejection and concurrent creation tests.
 - Internal account-session lookup with expiry checks after row-lock acquisition
   and activity updates capped at the stored absolute deadline.
+- Non-mutating locked session loading and stored access-token verification against
+  the recorded account, provider session, and token expiry.
 - Internal provider-token refresh adapter with bounded HTTP requests, masked
   credentials, and distinct credential-rejection and unavailability errors.
 - Refreshed access-token verification against the expected account and provider
@@ -343,6 +345,33 @@ cover malformed and unknown tokens and transaction requirements. Local PostgreSQ
 tests cover activity updates, expiry rejection, rollback, unchanged credentials
 and other sessions, and expiry during a real row-lock wait.
 
+The internal `load_locked_account_session` helper locks the matching row and
+checks application-session expiry using fresh database statement time after any
+lock wait. It returns an internal snapshot without changing activity or encrypted
+credentials. Missing, malformed, or unknown browser tokens and expired application
+sessions return no snapshot. An expired provider access token does not prevent
+loading an otherwise active application session for subsequent refresh. The caller
+owns the transaction;
+the snapshot does not prove that its row lock remains held after the transaction
+ends. Ciphertext fields are omitted from its ordinary representation.
+
+`verify_locked_account_access` decrypts only the stored access token and uses the
+existing JWT verifier and signing-key cache. Verified account ID, provider session
+ID, and token expiry must match the stored metadata, and token expiry must be later
+than the snapshot's database check time. Invalid ciphertext, invalid JWTs, metadata
+mismatches, or unavailable configuration/signing keys fail with a generic
+authentication-unavailable error. Refresh credentials remain encrypted. This helper
+does not update the database or complete application-session authentication: a
+combined service must retain the row lock and freshly recheck application-session
+and access-token deadlines after verification before authorizing or updating
+activity. That combined service is not implemented yet.
+
+Offline tests cover loader input guards and stored-token verification using
+generated encryption/signing keys and mocked signing-key downloads. Local
+PostgreSQL tests cover unchanged rows, expired sessions, and real lock waits that
+commit expiry or replacement credentials before loading resumes. No live provider
+requests are required.
+
 HttpOnly account cookies, database-coordinated provider-token refresh, logout,
 automated session cleanup, and encryption-key rotation are not implemented.
 Account-session lookup is not yet connected to HTTP authentication.
@@ -357,9 +386,9 @@ replacing it without a rotation process makes existing ciphertext unreadable.
 `SUPABASE_AUTH_PUBLISHABLE_KEY` is optional and documented in
 `backend/.env.example`. Missing or empty environment values leave it unconfigured.
 The setting requires the `sb_publishable_` prefix and a nonempty suffix, limits the
-complete key to 512 printable ASCII characters without whitespace, and uses `SecretStr` to mask
-ordinary display. These are configuration sanity checks, not verification that
-the key belongs to the configured project.
+complete key to 512 printable ASCII characters without whitespace, and uses
+`SecretStr` to mask ordinary display. These are configuration sanity checks, not
+verification that the key belongs to the configured project.
 
 The internal `refresh_account_tokens` adapter posts a refresh token to the
 configured issuer's `/token?grant_type=refresh_token` endpoint using the publishable
