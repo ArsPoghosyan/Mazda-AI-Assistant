@@ -1,8 +1,8 @@
-# Mazda6 AI Assistant
+# Mazda 6 AI Assistant
 
 [![Checks](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions/workflows/ci.yml)
 
-An independent, unofficial Mazda6 information assistant in early development.
+An independent, unofficial Mazda 6 information assistant in early development.
 Unaffiliated with Mazda.
 
 **Status: early development.** The frontend and API health-check foundation
@@ -19,7 +19,7 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 
 ## Working now
 
-- React/TypeScript/Vite/Tailwind development page with live API connectivity status.
+- React/TypeScript/Vite/Tailwind landing page with live API connectivity status.
 - FastAPI `GET /api/v1/health` with a typed JSON contract.
 - Docker Compose PostgreSQL/pgvector for local development.
 - Configurable SQLAlchemy database pooling with remote TLS verification.
@@ -30,10 +30,12 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Guest session creation and expiry-safe refresh with configurable inactivity expiry.
 - A default-disabled guest session endpoint with exact Origin checks and HttpOnly cookies.
 - Guest HTTP tests for session reuse, invalid/expired cookies, and database failures.
+- Development-only frontend guest session creation/refresh with loading, success,
+  error/retry feedback, request cancellation, and a bounded timeout.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account authentication, the frontend guest flow, chat, conversation persistence,
-vehicle selection, retrieval, and AI calls are not implemented. Expired guest
+Account authentication, chat, conversation persistence, vehicle selection,
+retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
 answer generation is planned with Groq.
@@ -141,8 +143,9 @@ Database failures return a generic 503 without issuing a cookie.
 
 The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
 Keep public guest access disabled until Turnstile and abuse controls are ready.
-The Cloudflare Pages proxy still forwards only health requests; frontend guest
-integration and production cookie forwarding are not implemented.
+The Cloudflare Pages proxy still forwards only health requests; production guest
+route and cookie forwarding are not implemented. The frontend guest action is
+enabled only in Vite development and remains disabled in normal production builds.
 
 Requests require exactly one Origin matching `CSRF_TRUSTED_ORIGINS`, configured
 as a JSON array such as `["https://askm6.com"]`. Missing, null, duplicate, and
@@ -154,6 +157,29 @@ no trailing slash. Origin validation complements authentication and abuse contro
 Secure, HttpOnly, SameSite=Lax, and Path=/. Set it false only for local HTTP
 development, which uses the separate `askm6_guest` name. Guest inactivity expiry
 defaults to 30 days through `GUEST_SESSION_INACTIVITY_DAYS`.
+
+### Local frontend guest flow
+
+The local guest flow requires a running, migrated local database and a backend
+`DATABASE_URL` using the restricted application role. In the ignored `backend/.env`,
+enable the endpoint and use the exact frontend origin:
+
+```ini
+GUEST_SESSION_API_ENABLED=true
+GUEST_COOKIE_SECURE=false
+CSRF_TRUSTED_ORIGINS=["http://127.0.0.1:5173"]
+```
+
+Run the backend and `npm run dev`, then open `http://127.0.0.1:5173` and select
+**Try as Guest**. The browser manages the HttpOnly cookie; the frontend does not
+read or store its token. Reloading the page alone does not submit a guest-session
+request. Selecting the action again after reload refreshes an unexpired session.
+
+Success confirms that a guest session was established; it does not open a working
+chat. A failed request allows an explicit retry. The action remains disabled in
+`npm run preview`, which serves the production build. The development UI gate is
+not an authorization control; the backend's independent checks still apply.
+Keep insecure cookies and this local endpoint configuration out of production.
 
 ## Checks
 
@@ -209,8 +235,10 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-The next focused task is local frontend guest integration. Managed account login,
-Turnstile, and abuse controls remain prerequisites for public guest/account access.
+Frontend automated tests cover the guest API helper and health proxy, not rendered
+button interactions or hook lifecycle behavior. Public guest access still requires
+Turnstile, abuse controls, and production guest-route/cookie forwarding. Managed
+account login remains unimplemented.
 
 ## License
 
