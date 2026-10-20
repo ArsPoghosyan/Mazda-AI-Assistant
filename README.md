@@ -46,6 +46,10 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   credentials, browser-token hashing, capped deadlines, and transactional recovery.
 - Internal account-session lookup with expiry checks after row-lock acquisition
   and activity updates capped at the stored absolute deadline.
+- Internal provider-token refresh adapter with bounded HTTP requests, masked
+  credentials, and distinct credential-rejection and unavailability errors.
+- Refreshed access-token verification against the expected account and provider
+  session, tested with generated signing keys and mocked provider requests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -315,14 +319,55 @@ cover malformed and unknown tokens and transaction requirements. Local PostgreSQ
 tests cover activity updates, expiry rejection, rollback, unchanged credentials
 and other sessions, and expiry during a real row-lock wait.
 
-HttpOnly account cookies, provider-token refresh, logout, automated session cleanup,
-and encryption-key rotation are not implemented. Account-session lookup is not yet
-connected to HTTP authentication.
+HttpOnly account cookies, database-coordinated provider-token refresh, logout,
+automated session cleanup, and encryption-key rotation are not implemented.
+Account-session lookup is not yet connected to HTTP authentication.
 Decryption does not verify a provider token's identity or expiry; the existing
 account-token verifier remains a separate authentication step. Keep real encryption
 keys in ignored backend environment files or a server-side secret manager, never
 in frontend variables or Git. Retain the key while encrypted data depends on it;
 replacing it without a rotation process makes existing ciphertext unreadable.
+
+## Provider refresh foundation
+
+`SUPABASE_AUTH_PUBLISHABLE_KEY` is optional and documented in
+`backend/.env.example`. Missing or empty environment values leave it unconfigured.
+The setting requires the `sb_publishable_` prefix and a nonempty suffix, limits the
+complete key to 512 printable ASCII characters without whitespace, and uses `SecretStr` to mask
+ordinary display. These are configuration sanity checks, not verification that
+the key belongs to the configured project.
+
+The internal `refresh_account_tokens` adapter posts a refresh token to the
+configured issuer's `/token?grant_type=refresh_token` endpoint using the publishable
+key. It disables redirects, applies a five-second total request/body deadline,
+and accepts only uncompressed JSON responses of at most 64 KiB. Returned access
+and refresh tokens must be nonempty printable ASCII strings of at most 8,192
+characters with a Bearer token type; both are wrapped in `SecretStr`.
+
+Recognized credential-rejection codes on supported client-error responses produce
+`AccountRefreshRejected`. Rate limits, server/transport failures, malformed
+responses, and other errors produce generic `AccountRefreshUnavailable` errors
+without provider response details. The adapter performs no automatic retries.
+Caller cancellation propagates, and response streams close on failure or
+cancellation. A returned token pair still requires identity verification.
+
+`verify_refreshed_account_tokens` uses the existing JWT verifier and signing-key
+cache, then requires both the verified account ID and provider session ID to match
+the expected stored session. Expected IDs must come from server-side session
+records, not browser-supplied ownership fields. Identity and expiry come from the
+verified JWT, not other JSON fields in the refresh response. Invalid JWTs, identity
+mismatches, and unavailable signing keys produce `AccountRefreshUnavailable`.
+The opaque refresh token's ownership is not independently verified; both tokens
+must originate from the same trusted provider exchange.
+
+These helpers do not write to the database or extend application-session
+deadlines. Coordinating concurrent refresh attempts, encrypted credential
+replacement, recovery after an interrupted exchange, and session-expiry checks
+around the provider request remain pending. No refresh HTTP endpoint is connected.
+Tests use synthetic credentials, generated ES256 keys, mocked HTTP transport and
+signing-key downloads, and no live Supabase requests. They cover response and token
+bounds, error classification, deadlines, cancellation, forged signatures, identity
+mismatches, and the adapter-to-verifier flow.
 
 ## Checks
 
@@ -366,9 +411,8 @@ tables automatically or apply migrations. They cover guest token/session behavio
 account-session storage and encrypted-token round trips, account-deletion cascades,
 expiry-safe account-session activity updates, invalid session fields and timestamps,
 and restricted-role permissions. Direct session updates and deletions in schema
-tests do not implement provider-token
-refresh or logout endpoints. Managed account login and conversation ownership
-are not covered by these database tests.
+tests do not implement provider-token refresh or logout endpoints. Managed account
+login and conversation ownership are not covered by these database tests.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:

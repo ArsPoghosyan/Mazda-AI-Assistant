@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     csrf_trusted_origins: tuple[str, ...] = ()
     guest_session_api_enabled: bool = False
     supabase_auth_issuer: HttpUrl | None = None
+    supabase_auth_publishable_key: SecretStr | None = None
     supabase_auth_audience: str = Field(
         default="authenticated",
         min_length=1,
@@ -33,6 +34,30 @@ class Settings(BaseSettings):
     account_session_encryption_key: SecretStr | None = None
     account_session_inactivity_days: int = Field(default=7, ge=1)
     account_session_absolute_lifetime_days: int = Field(default=30, ge=1)
+
+    @field_validator("supabase_auth_publishable_key")
+    @classmethod
+    def validate_supabase_auth_publishable_key(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+
+        raw_key = value.get_secret_value()
+        prefix = "sb_publishable_"
+
+        if (
+            not raw_key.startswith(prefix)
+            or len(raw_key) <= len(prefix)
+            or len(raw_key) > 512
+            or any(ord(character) < 33 or ord(character) > 126 for character in raw_key)
+        ):
+            raise ValueError(
+                "Supabase Auth requires a publishable key without whitespace or control characters."
+            )
+
+        return value
 
     @field_validator("account_session_encryption_key")
     @classmethod
