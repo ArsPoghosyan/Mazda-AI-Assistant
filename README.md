@@ -70,6 +70,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   tests using generated credentials and mocked provider responses.
 - An internal email/password sign-in adapter with bounded requests, masked token
   results, generic provider errors, and mocked HTTP/timeout/cancellation tests.
+- An internal sign-in service connecting that adapter to verified, encrypted
+  account-session creation, with results returned only after database commit.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Browser account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -331,9 +333,9 @@ initial response is lost before the browser receives its credential.
 
 The refresh token must come from the same trusted provider authentication response.
 The service validates its format but does not independently verify refresh-token
-ownership. The internal provider sign-in adapter is not yet connected to account-
-session creation or an HTTP sign-in endpoint. The session-check endpoint
-authenticates existing sessions only.
+ownership. The internal sign-in service connects the provider adapter to this
+creation flow, but no HTTP sign-in endpoint is implemented. The session-check
+endpoint authenticates existing sessions only.
 
 Local PostgreSQL tests cover encrypted storage, verified identity, configurable
 deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
@@ -478,6 +480,38 @@ headers/body, credential preservation, missing configuration, input guards,
 provider error classification, malformed/missing response fields, token and
 response-size boundaries, response cleanup, transport failures, total deadlines,
 and cancellation. They require no live Supabase requests or database access.
+
+## Internal sign-in service
+
+`sign_in_account` checks that the Auth issuer, publishable key, session encryption
+key, and signing-key cache are configured before sending credentials. It performs
+the provider password exchange before opening a database transaction, then passes
+the token pair directly to `create_account_session`. That existing helper verifies
+the access JWT, creates or reuses the verified account profile, encrypts provider
+credentials, and stores a hash of the new random browser token. Signing-key
+retrieval may still occur during JWT verification inside the transaction.
+
+The service returns `CreatedAccountSession` only after the outer transaction has
+committed and the connection has been released. Provider rejection, verification
+failures, duplicate sessions, database errors, and cancellation propagate without
+automatic retries. No browser credential is returned when session creation or
+commit fails. The service does not issue cookies, enable routes, or change the
+existing account-session check endpoint.
+
+A database rollback cannot undo a successful provider sign-in. Provider-session
+cleanup and recovery from an uncertain database commit are not implemented here;
+callers must not assume that failure means the provider created no session.
+The provider adapter's deadline does not bound the entire service operation.
+Public HTTP integration still needs a total request deadline and abuse controls.
+
+Unit tests cover configuration preflight, operation ordering, exact token-pair
+forwarding, rejection, verification/persistence failures, cancellation, and commit
+failure. Two opt-in local PostgreSQL cases use generated ES256 credentials and
+mocked provider/JWKS responses to exercise the actual verification and storage
+flow. They confirm committed encrypted credentials and hashed browser tokens, or
+rollback of both newly inserted profile and session rows after a deliberate SQL
+error before commit completes. These tests do not simulate an uncertain network
+failure during commit and make no live Supabase requests.
 
 ## Account session endpoint
 
