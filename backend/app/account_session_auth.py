@@ -2,12 +2,12 @@
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
 
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.account_auth import (
@@ -140,3 +140,85 @@ async def verify_locked_account_access(
         raise AccountAuthenticationUnavailable("Account authentication is unavailable.")
 
     return account
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedAccountSession:
+    """Verified account identity and current application-session deadlines."""
+
+    session_id: UUID
+    account: VerifiedAccount
+    idle_expires_at: datetime
+    absolute_expires_at: datetime
+
+
+async def authenticate_stored_account_session(
+    connection: AsyncConnection,
+    token: SecretStr | None,
+    *,
+    settings: Settings,
+    key_cache: AccountKeyCache | None,
+) -> AuthenticatedAccountSession | None:
+    """Authenticate using stored access credentials in the caller's transaction.
+
+    This path requires a valid stored access token; it does not refresh tokens.
+    The caller must commit successfully before using the result outside the
+    transaction.
+    """
+    session = await load_locked_account_session(connection, token)
+    if session is None:
+        return None
+
+    account = await verify_locked_account_access(
+        session,
+        settings=settings,
+        key_cache=key_cache,
+    )
+
+    try:
+        inactivity_period = timedelta(
+            days=settings.account_session_inactivity_days,
+        )
+    except OverflowError:
+        raise AccountAuthenticationUnavailable("Account authentication is unavailable.") from None
+
+    # This statement starts after verification, including any signing-key fetch.
+    # Keep the row lock held so other requests cannot change this session first.
+    checked_at = func.statement_timestamp()
+    activity_at = func.greatest(AccountSession.last_seen_at, checked_at)
+
+    result = await connection.execute(
+        update(AccountSession)
+        .where(
+            AccountSession.id == session.session_id,
+            AccountSession.user_id == account.user_id,
+            AccountSession.provider_session_id == account.session_id,
+            AccountSession.access_token_expires_at == account.access_token_expires_at,
+            AccountSession.access_token_expires_at > checked_at,
+            AccountSession.idle_expires_at > checked_at,
+            AccountSession.absolute_expires_at > checked_at,
+        )
+        .values(
+            last_seen_at=activity_at,
+            idle_expires_at=func.least(
+                AccountSession.absolute_expires_at,
+                activity_at + inactivity_period,
+            ),
+        )
+        .returning(
+            AccountSession.id,
+            AccountSession.idle_expires_at,
+            AccountSession.absolute_expires_at,
+        )
+    )
+
+    row = result.one_or_none()
+    if row is None:
+        return None
+
+    return AuthenticatedAccountSession(
+        session_id=row.id,
+        account=account,
+        idle_expires_at=row.idle_expires_at,
+        absolute_expires_at=row.absolute_expires_at,
+    )

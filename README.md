@@ -50,6 +50,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   and activity updates capped at the stored absolute deadline.
 - Non-mutating locked session loading and stored access-token verification against
   the recorded account, provider session, and token expiry.
+- Internal authentication using stored access credentials, with expiry rechecks
+  after verification and guarded activity updates in the caller's transaction.
 - Internal provider-token refresh adapter with bounded HTTP requests, masked
   credentials, and distinct credential-rejection and unavailability errors.
 - Refreshed access-token verification against the expected account and provider
@@ -351,9 +353,9 @@ lock wait. It returns an internal snapshot without changing activity or encrypte
 credentials. Missing, malformed, or unknown browser tokens and expired application
 sessions return no snapshot. An expired provider access token does not prevent
 loading an otherwise active application session for subsequent refresh. The caller
-owns the transaction;
-the snapshot does not prove that its row lock remains held after the transaction
-ends. Ciphertext fields are omitted from its ordinary representation.
+owns the transaction; the snapshot does not prove that its row lock remains held
+after the transaction ends. Ciphertext fields are omitted from its ordinary
+representation.
 
 `verify_locked_account_access` decrypts only the stored access token and uses the
 existing JWT verifier and signing-key cache. Verified account ID, provider session
@@ -361,10 +363,8 @@ ID, and token expiry must match the stored metadata, and token expiry must be la
 than the snapshot's database check time. Invalid ciphertext, invalid JWTs, metadata
 mismatches, or unavailable configuration/signing keys fail with a generic
 authentication-unavailable error. Refresh credentials remain encrypted. This helper
-does not update the database or complete application-session authentication: a
-combined service must retain the row lock and freshly recheck application-session
-and access-token deadlines after verification before authorizing or updating
-activity. That combined service is not implemented yet.
+does not update the database or complete application-session authentication on its
+own.
 
 Offline tests cover loader input guards and stored-token verification using
 generated encryption/signing keys and mocked signing-key downloads. Local
@@ -372,14 +372,40 @@ PostgreSQL tests cover unchanged rows, expired sessions, and real lock waits tha
 commit expiry or replacement credentials before loading resumes. No live provider
 requests are required.
 
+The internal `authenticate_stored_account_session` service combines locked loading
+and stored access-token verification. Its final SQL update uses fresh database
+statement time after verification, including any signing-key download. The update
+requires matching account/provider identity and recorded token expiry, and requires
+both application-session deadlines and access-token expiry to remain in the future.
+Missing or expired application sessions return no result; verification failures
+raise the existing generic authentication-unavailable error. If a deadline expires
+after verification, the guarded update returns no result without changing the row.
+
+Successful authentication updates only last activity and inactivity expiry. Activity
+cannot move backward, inactivity expiry is capped at the stored absolute deadline,
+and provider credentials remain unchanged. The result contains verified identity
+and session deadlines, with no provider tokens. The caller retains control of the
+transaction and must commit successfully before using the result outside it. This
+path requires a valid stored access token and does not refresh expired credentials.
+
+Offline orchestration tests cover missing sessions, verification failure and
+cancellation, and returned database results. Local PostgreSQL tests use real
+encryption and JWT verification with mocked signing-key retrieval. They check
+activity updates, unchanged credentials and other accounts' rows, caller savepoint
+rollback, and unchanged rows on verification failure. Post-verification expiry
+tests change a synthetic inactivity deadline or simulate a later final SQL check
+time. Access-token and absolute-boundary cases cover the exact deadline and one
+second afterward; at the absolute boundary, inactivity expiry coincides with the
+absolute deadline as required by the schema.
+
 HttpOnly account cookies, database-coordinated provider-token refresh, logout,
 automated session cleanup, and encryption-key rotation are not implemented.
-Account-session lookup is not yet connected to HTTP authentication.
-Decryption does not verify a provider token's identity or expiry; the existing
-account-token verifier remains a separate authentication step. Keep real encryption
-keys in ignored backend environment files or a server-side secret manager, never
-in frontend variables or Git. Retain the key while encrypted data depends on it;
-replacing it without a rotation process makes existing ciphertext unreadable.
+Account-session authentication is not yet connected to HTTP routes.
+Provider identity and expiry require JWT verification in addition to ciphertext
+decryption. Keep real encryption keys in ignored backend environment files or a
+server-side secret manager, never in frontend variables or Git. Retain the key
+while encrypted data depends on it; replacing it without a rotation process makes
+existing ciphertext unreadable.
 
 ## Provider refresh foundation
 
@@ -462,9 +488,10 @@ where necessary and delete only their own test rows in cleanup. Administrative
 connections are used for setup, inspection, and cleanup. Tests do not create
 tables automatically or apply migrations. They cover guest token/session behavior,
 account-session storage and encrypted-token round trips, account-deletion cascades,
-expiry-safe account-session activity updates, invalid session fields and timestamps,
-and restricted-role permissions. Direct session updates and deletions in schema
-tests do not implement provider-token refresh or logout endpoints. Managed account
+expiry-safe account-session activity updates, stored-session authentication,
+invalid session fields and timestamps, and restricted-role permissions. Direct
+session updates and deletions in schema tests do not implement provider-token
+refresh or logout endpoints. Managed account
 login and conversation ownership are not covered by these database tests.
 Keep test administrator credentials separate from the running web service.
 
