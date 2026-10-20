@@ -68,9 +68,11 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled account-session HTTP endpoint with exact Origin checks,
   committed authentication, cookie renewal, controlled failures, and PostgreSQL
   tests using generated credentials and mocked provider responses.
+- An internal email/password sign-in adapter with bounded requests, masked token
+  results, generic provider errors, and mocked HTTP/timeout/cancellation tests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
+Browser account sign-in/sign-up, chat, conversation persistence, vehicle selection,
 retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
@@ -329,8 +331,9 @@ initial response is lost before the browser receives its credential.
 
 The refresh token must come from the same trusted provider authentication response.
 The service validates its format but does not independently verify refresh-token
-ownership. No provider login adapter or account-session creation HTTP endpoint
-is connected. The session-check endpoint authenticates existing sessions only.
+ownership. The internal provider sign-in adapter is not yet connected to account-
+session creation or an HTTP sign-in endpoint. The session-check endpoint
+authenticates existing sessions only.
 
 Local PostgreSQL tests cover encrypted storage, verified identity, configurable
 deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
@@ -411,7 +414,7 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-Account sign-in/session creation, logout, automated session cleanup, and
+HTTP account sign-in/session creation, logout, automated session cleanup, and
 encryption-key rotation are not implemented. Cookie-authenticated session checking
 is available through the default-disabled endpoint described below.
 Provider identity and expiry require JWT verification in addition to ciphertext
@@ -440,6 +443,41 @@ The helpers do not calculate or enforce database deadlines themselves. Offline
 tests cover header policy, malformed tokens, expiry conversion, matching deletion
 scope, and HTTP/HTTPS cookie round trips in an in-memory test application. These
 tests make no database or provider requests and do not enable account endpoints.
+
+## Provider sign-in adapter
+
+The internal `sign_in_with_password` adapter exchanges email/password credentials
+once at the configured Auth issuer's `/token?grant_type=password` endpoint, using
+the configured publishable key and a caller-owned HTTP client. Requests have a
+five-second total deadline, do not follow redirects, and make no automatic retry.
+Only uncompressed JSON responses up to 64 KiB are accepted.
+
+Email and password inputs use `SecretStr`, must be representable as UTF-8, and
+are limited to 1–320 and 1–1,024 characters respectively. Input values, including
+password whitespace and Unicode, are sent unchanged. These are resource bounds;
+the adapter does not validate complete email syntax or define password-strength
+policy. Returned access and refresh tokens must be nonempty printable ASCII,
+at most 8,192 characters each, with a bearer token type. `SignedInAccountTokens`
+keeps both values masked in its ordinary representation.
+
+Recognized invalid-credential, unconfirmed-email, banned-user, and input-validation
+responses produce the same generic `AccountSignInRejected` error. Missing
+configuration, unknown provider errors, rate limits, server/transport failures,
+timeouts, and malformed responses produce `AccountSignInUnavailable`. Provider
+messages are not included in these errors. Responses close on success, failure,
+and caller cancellation; cancellation propagates to the caller.
+
+The adapter does not persist passwords, verify JWT identity, create database
+sessions, or issue browser cookies. The returned pair must still pass the existing
+JWT-verification/session-creation flow before establishing an application session.
+Public sign-in routes, CAPTCHA/abuse integration, signup, email verification,
+password recovery, Google sign-in, and frontend sign-in remain unimplemented.
+
+Offline tests use synthetic credentials and mocked HTTP. They cover request
+headers/body, credential preservation, missing configuration, input guards,
+provider error classification, malformed/missing response fields, token and
+response-size boundaries, response cleanup, transport failures, total deadlines,
+and cancellation. They require no live Supabase requests or database access.
 
 ## Account session endpoint
 
