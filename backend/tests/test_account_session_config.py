@@ -1,4 +1,4 @@
-"""Account-session encryption configuration; no persisted keys or live services."""
+"""Account-session configuration without private files or live services."""
 
 from base64 import urlsafe_b64encode
 
@@ -20,6 +20,8 @@ def clear_session_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ACCOUNT_SESSION_ENCRYPTION_KEY",
         "SUPABASE_AUTH_ISSUER",
         "SUPABASE_AUTH_AUDIENCE",
+        "ACCOUNT_SESSION_INACTIVITY_DAYS",
+        "ACCOUNT_SESSION_ABSOLUTE_LIFETIME_DAYS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -101,3 +103,59 @@ def test_validation_messages_hide_invalid_key(
     assert raw_key not in str(caught.value)
     assert raw_key not in repr(caught.value)
     assert raw_key not in caught.value.json(include_input=False)
+
+
+def test_account_session_expiry_defaults() -> None:
+    settings = IsolatedSessionSettings()
+
+    assert settings.account_session_inactivity_days == 7
+    assert settings.account_session_absolute_lifetime_days == 30
+
+
+@pytest.mark.parametrize(
+    ("inactivity_days", "absolute_days"),
+    [(1, 1), (14, 60)],
+)
+def test_account_session_expiry_can_be_configured(
+    inactivity_days: int,
+    absolute_days: int,
+) -> None:
+    settings = IsolatedSessionSettings.model_validate(
+        {
+            "account_session_inactivity_days": inactivity_days,
+            "account_session_absolute_lifetime_days": absolute_days,
+        }
+    )
+
+    assert settings.account_session_inactivity_days == inactivity_days
+    assert settings.account_session_absolute_lifetime_days == absolute_days
+
+
+def test_account_session_expiry_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ACCOUNT_SESSION_INACTIVITY_DAYS", "14")
+    monkeypatch.setenv("ACCOUNT_SESSION_ABSOLUTE_LIFETIME_DAYS", "60")
+
+    settings = IsolatedSessionSettings()
+
+    assert settings.account_session_inactivity_days == 14
+    assert settings.account_session_absolute_lifetime_days == 60
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "account_session_inactivity_days",
+        "account_session_absolute_lifetime_days",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1, 1.5, "invalid"])
+def test_invalid_account_session_expiry_is_rejected(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        IsolatedSessionSettings.model_validate({field: value})
+
+    assert any(error["loc"] == (field,) for error in caught.value.errors())

@@ -40,6 +40,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   account identity, generic 401/503 responses, and no-store caching headers.
 - Optional validated account-session encryption key and a standalone Fernet
   helper for provider tokens, with tamper detection and generated-key tests.
+- Account-session model and migration verified on local PostgreSQL, with account
+  foreign keys, bounded ciphertext fields, expiry constraints, and restricted grants.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -231,7 +233,7 @@ failures. They require no Supabase requests, real user tokens, or database acces
 An HTTP test exercises real authentication and caching with generated signed
 tokens, mocks only the key download, and verifies rejection of forged signatures.
 
-## Account-session encryption foundation
+## Account-session encryption and schema foundation
 
 `ACCOUNT_SESSION_ENCRYPTION_KEY` is an optional backend-only Fernet key, documented
 in `backend/.env.example`. Missing or empty environment values leave it
@@ -244,12 +246,33 @@ exclude inputs before being logged or returned.
 provider tokens of up to 8,192 characters into bytes. Decryption verifies integrity,
 limits ciphertext input to 12,288 bytes, and returns a `SecretStr`. Wrong keys,
 tampered or malformed ciphertext, and invalid decrypted content produce a generic
-error without including token values. Tests use temporary keys and synthetic
+error without including token values. Encryption tests use temporary keys and synthetic
 tokens, with no private environment files, database, or provider requests.
 
-The helper is not connected to account authentication or persistence yet.
-Account-session tables, HttpOnly account cookies, provider-token refresh, logout,
-session expiry enforcement, and encryption-key rotation are not implemented.
+The `app.account_sessions` model and migration `b87f3f661f93` provide storage for a
+unique 32-byte browser-token hash, an account-profile reference, a provider session
+ID, encrypted access/refresh tokens, and timezone-aware activity and expiry
+timestamps. Database constraints require nonempty ciphertext fields of at most
+12,288 bytes and consistent timestamps, including inactivity expiry no later than
+absolute expiry. These constraints do not encrypt data or verify token identity.
+Deleting an account profile cascades to its sessions; deleting a session preserves
+the account profile.
+
+The application role can select, insert, and delete session rows. Updates are
+limited to encrypted provider tokens, access-token expiry, last activity, and
+inactivity expiry. Session identity, ownership, creation time, and the absolute
+deadline cannot be updated by that role. These grants do not isolate accounts
+from each other; backend authorization remains necessary.
+
+`ACCOUNT_SESSION_INACTIVITY_DAYS` defaults to 7 and
+`ACCOUNT_SESSION_ABSOLUTE_LIFETIME_DAYS` defaults to 30; both accept positive
+integers. They configure the planned session policy but do not enforce it yet.
+The session service will need to reject either expired deadline before extending
+activity, and cap inactivity expiry at the absolute deadline.
+
+The schema and encryption helper are not connected to account authentication yet.
+HttpOnly account cookies, provider-token refresh, logout, session expiry
+enforcement, automated session cleanup, and encryption-key rotation are not implemented.
 Decryption does not verify a provider token's identity or expiry; the existing
 account-token verifier remains a separate authentication step. Keep real encryption
 keys in ignored backend environment files or a server-side secret manager, never
@@ -294,8 +317,12 @@ application operations as `askm6_app` through `SET LOCAL ROLE`, and normally rol
 back test transactions. HTTP lifecycle and lock-wait tests commit synthetic rows
 where necessary and delete only their own test rows in cleanup. Administrative
 connections are used for setup, inspection, and cleanup. Tests do not create
-tables automatically or apply migrations. They cover guest token/session behavior
-and database permissions, not managed account login or conversation ownership.
+tables automatically or apply migrations. They cover guest token/session behavior,
+account-session storage and encrypted-token round trips, account-deletion cascades,
+invalid session fields and timestamps, and restricted-role permissions. Direct
+session updates and deletions in schema tests do not implement provider-token
+refresh or logout endpoints. Managed account login and conversation ownership
+are not covered by these database tests.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:

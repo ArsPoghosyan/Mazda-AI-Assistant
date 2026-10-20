@@ -31,6 +31,8 @@ class Settings(BaseSettings):
         max_length=128,
     )
     account_session_encryption_key: SecretStr | None = None
+    account_session_inactivity_days: int = Field(default=7, ge=1)
+    account_session_absolute_lifetime_days: int = Field(default=30, ge=1)
 
     @field_validator("account_session_encryption_key")
     @classmethod
