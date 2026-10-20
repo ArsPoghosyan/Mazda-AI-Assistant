@@ -63,6 +63,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   tests for concurrent requests, rollback recovery, and rejected recovery.
 - An internal authentication transaction boundary that commits and releases the
   connection before returning identity, with commit-failure and rollback tests.
+- Internal account-cookie helpers for setting, reading, and clearing opaque
+  browser tokens, with independent HTTPS defaults and offline policy tests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -405,7 +407,7 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-HttpOnly account cookies, provider-token refresh HTTP endpoints, logout,
+Account-cookie HTTP integration, provider-token refresh HTTP endpoints, logout,
 automated session cleanup, and encryption-key rotation are not implemented.
 Account-session authentication is not yet connected to HTTP routes.
 Provider identity and expiry require JWT verification in addition to ciphertext
@@ -413,6 +415,27 @@ decryption. Keep real encryption keys in ignored backend environment files or a
 server-side secret manager, never in frontend variables or Git. Retain the key
 while encrypted data depends on it; replacing it without a rotation process makes
 existing ciphertext unreadable.
+
+The internal `app.account_cookies` helpers set, read, and clear the opaque browser
+token. `ACCOUNT_COOKIE_SECURE=true` is the default and selects
+`__Host-askm6_account`; `false` selects `askm6_account` for local HTTP development
+only. This setting is independent of guest-cookie configuration. Cookies use
+`HttpOnly`, `SameSite=Lax`, `Path=/`, no Domain attribute, and `Secure` when enabled.
+Setting and clearing a cookie also mark the response `Cache-Control: no-store`.
+
+The reader accepts only the configured cookie name and a 43-character ASCII
+URL-safe token, returned as a `SecretStr`. Missing or malformed tokens return no
+result; guest cookies and the alternative account-cookie name are ignored.
+Format validation does not authenticate a session. Database lookup, expiry checks,
+and provider-credential verification remain necessary.
+
+Cookie issuance requires a valid token and timezone-aware expiry, normalized to
+UTC. The caller must supply the committed database session's inactivity deadline,
+already capped at its absolute deadline, and issue the cookie only after commit.
+The helpers do not calculate or enforce database deadlines themselves. Offline
+tests cover header policy, malformed tokens, expiry conversion, matching deletion
+scope, and HTTP/HTTPS cookie round trips in an in-memory test application. These
+tests make no database or provider requests and do not enable account endpoints.
 
 ## Provider refresh foundation
 
@@ -508,8 +531,8 @@ during network work also occupies a database connection.
 the coordinator. It returns identity only after successful commit and connection
 release, so subsequent protected application work can use a separate transaction.
 Authentication errors, cancellation, and database errors propagate without
-automatic retries. The helper is internal; account cookies and HTTP integration
-remain pending.
+automatic retries. The helper is internal; HTTP account-cookie integration remains
+pending.
 
 Offline tests model successful transaction completion, no authenticated result,
 commit failure, authentication errors, and cancellation. PostgreSQL tests run
