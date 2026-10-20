@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,36 @@ class Settings(BaseSettings):
     guest_cookie_secure: bool = True
     csrf_trusted_origins: tuple[str, ...] = ()
     guest_session_api_enabled: bool = False
+    supabase_auth_issuer: HttpUrl | None = None
+    supabase_auth_audience: str = Field(
+        default="authenticated",
+        min_length=1,
+        max_length=128,
+    )
+
+    @field_validator("supabase_auth_issuer")
+    @classmethod
+    def validate_supabase_auth_issuer(
+        cls,
+        value: HttpUrl | None,
+    ) -> HttpUrl | None:
+        if value is None:
+            return None
+
+        if (
+            value.scheme != "https"
+            or value.username is not None
+            or value.password is not None
+            or value.query is not None
+            or value.fragment is not None
+            or value.path != "/auth/v1"
+        ):
+            raise ValueError(
+                "Supabase issuer must be an HTTPS URL ending in /auth/v1 "
+                "without credentials, query parameters, or a fragment"
+            )
+
+        return value
 
 
 class MigrationSettings(Settings):

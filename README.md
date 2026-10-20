@@ -32,10 +32,12 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Guest HTTP tests for session reuse, invalid/expired cookies, and database failures.
 - Development-only frontend guest session creation/refresh with loading, success,
   error/retry feedback, request cancellation, and a bounded timeout.
+- Offline ES256 account-token verification with typed identity claims and
+  generated-key tests for invalid signatures, claims, algorithms, and token sizes.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account authentication, chat, conversation persistence, vehicle selection,
-retrieval, and AI calls are not implemented. Expired guest
+Account sign-in/sign-up, live signing-key retrieval, chat, conversation persistence,
+vehicle selection, retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
 answer generation is planned with Groq.
@@ -180,6 +182,24 @@ chat. A failed request allows an explicit retry. The action remains disabled in
 `npm run preview`, which serves the production build. The development UI gate is
 not an authorization control; the backend's independent checks still apply.
 Keep insecure cookies and this local endpoint configuration out of production.
+
+## Account-token verification foundation
+
+The backend provides an offline account-token verifier using PyJWT and
+cryptography. Its caller supplies a trusted P-256 public key and the expected
+issuer and audience. It accepts only ES256, validates required identity and time
+claims, rejects anonymous/non-account identities, and limits token length.
+
+`SUPABASE_AUTH_ISSUER` configures the expected HTTPS Auth issuer ending in
+`/auth/v1`; `SUPABASE_AUTH_AUDIENCE` defaults to `authenticated`.
+The issuer remains optional while account authentication is not connected.
+
+This verifier is not connected to an HTTP authentication endpoint. It does not
+fetch signing keys, check live session revocation or account suspension, or grant
+resource ownership or administrator permissions.
+
+Tests generate temporary signing keys in memory and require no Supabase requests,
+real user tokens, or database access.
 
 ## Checks
 
