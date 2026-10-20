@@ -235,10 +235,20 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-Frontend automated tests cover the guest API helper and health proxy, not rendered
-button interactions or hook lifecycle behavior. Public guest access still requires
-Turnstile, abuse controls, and production guest-route/cookie forwarding. Managed
-account login remains unimplemented.
+`npm test` runs the Node API/proxy tests followed by Vitest React tests in jsdom.
+UI tests render the app under Strict Mode and verify that loading the page checks
+API health without creating a guest session. They also cover a guest-button click,
+the disabled loading state, prevention of repeat requests while pending, success,
+and recovery after a failed request. A fake-clock test checks that a stalled
+request is still pending at 14,999 ms, aborts at 15,000 ms, and enables retry.
+An unmount test verifies that leaving the page aborts a pending guest request
+and clears its timeout. Another test simulates development being disabled and
+verifies that the guest button stays disabled without sending a session request.
+Requests are mocked; the backend and database are not needed. These jsdom tests
+do not replace browser checks of cookies, layout, or the built production bundle.
+
+Public guest access still requires Turnstile, abuse controls, and production
+guest-route/cookie forwarding. Managed account login remains unimplemented.
 
 ## License
 
