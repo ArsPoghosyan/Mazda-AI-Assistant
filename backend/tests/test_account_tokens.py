@@ -13,6 +13,7 @@ from pydantic import SecretStr
 from app.account_tokens import (
     InvalidAccountToken,
     VerifiedAccount,
+    get_account_token_key_id,
     verify_account_token,
 )
 
@@ -259,3 +260,127 @@ def test_rejects_oversized_signed_token(
 
     with pytest.raises(InvalidAccountToken, match="Invalid account token"):
         verify_for_test(token, signing_key.public_key())
+
+
+def token_with_test_header(header: object) -> str:
+    """Build a JWT-shaped test value with an intentionally invalid signature."""
+
+    encoded_header = (
+        urlsafe_b64encode(json.dumps(header).encode("utf-8")).rstrip(b"=").decode("ascii")
+    )
+    invalid_signature = urlsafe_b64encode(bytes(64)).rstrip(b"=").decode("ascii")
+
+    return f"{encoded_header}.e30.{invalid_signature}"
+
+
+@pytest.mark.parametrize("key_id", ["current-key", "x" * 128])
+def test_header_extracts_valid_key_id(
+    signing_key: ec.EllipticCurvePrivateKey,
+    claims: dict[str, object],
+    key_id: str,
+) -> None:
+    token = jwt.encode(
+        claims,
+        signing_key,
+        algorithm="ES256",
+        headers={"kid": key_id},
+    )
+
+    assert get_account_token_key_id(SecretStr(token)) == key_id
+
+
+@pytest.mark.parametrize("missing_field", ["alg", "kid"])
+def test_header_rejects_missing_required_fields(missing_field: str) -> None:
+    header = {"alg": "ES256", "kid": "current-key"}
+    del header[missing_field]
+    token = token_with_test_header(header)
+
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        get_account_token_key_id(SecretStr(token))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "incorrect_value"),
+    [
+        ("alg", "HS256"),
+        ("alg", "RS256"),
+        ("alg", "none"),
+        ("alg", None),
+        ("kid", None),
+        ("kid", 123),
+        ("kid", ""),
+        ("kid", "x" * 129),
+        ("jku", "https://untrusted.example.test/keys"),
+        ("jwk", {"kty": "EC"}),
+        ("x5u", "https://untrusted.example.test/certificate"),
+        ("crit", ["unsupported-extension"]),
+        ("b64", False),
+        ("b64", 1),
+        ("b64", "true"),
+    ],
+)
+def test_header_rejects_unsupported_metadata(
+    field_name: str,
+    incorrect_value: object,
+) -> None:
+    header: dict[str, object] = {
+        "alg": "ES256",
+        "kid": "current-key",
+    }
+    header[field_name] = incorrect_value
+    token = token_with_test_header(header)
+
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        get_account_token_key_id(SecretStr(token))
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "not-a-token", "a.b.c", "a.b.c.d", "\N{SNOWMAN}"],
+)
+def test_header_rejects_malformed_token(token: str) -> None:
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        get_account_token_key_id(SecretStr(token))
+
+
+@pytest.mark.parametrize("header", [None, [], "not-an-object"])
+def test_header_rejects_non_object_json(header: object) -> None:
+    token = token_with_test_header(header)
+
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        get_account_token_key_id(SecretStr(token))
+
+
+def test_header_rejects_oversized_token() -> None:
+    token = token_with_test_header(
+        {
+            "alg": "ES256",
+            "kid": "current-key",
+            "padding": "x" * 8192,
+        }
+    )
+
+    assert len(token) > 8192
+
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        get_account_token_key_id(SecretStr(token))
+
+
+def test_header_extraction_does_not_establish_authenticity(
+    signing_key: ec.EllipticCurvePrivateKey,
+    claims: dict[str, object],
+) -> None:
+    signed_token = jwt.encode(
+        claims,
+        signing_key,
+        algorithm="ES256",
+        headers={"kid": "current-key"},
+    )
+    header, payload, _ = signed_token.split(".")
+    invalid_signature = urlsafe_b64encode(bytes(64)).rstrip(b"=").decode("ascii")
+    tampered_token = f"{header}.{payload}.{invalid_signature}"
+
+    assert get_account_token_key_id(SecretStr(tampered_token)) == "current-key"
+
+    with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+        verify_for_test(tampered_token, signing_key.public_key())

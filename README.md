@@ -34,10 +34,14 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   error/retry feedback, request cancellation, and a bounded timeout.
 - Offline ES256 account-token verification with typed identity claims and
   generated-key tests for invalid signatures, claims, algorithms, and token sizes.
+- Bounded HTTPS signing-key retrieval, P-256 key selection, and a shared
+  process-local cache with lazy fetching and application-managed cleanup.
+- Protected `GET /api/v1/account/me` with Bearer-token verification, typed
+  account identity, generic 401/503 responses, and no-store caching headers.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account sign-in/sign-up, live signing-key retrieval, chat, conversation persistence,
-vehicle selection, retrieval, and AI calls are not implemented. Expired guest
+Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
+retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
 answer generation is planned with Groq.
@@ -192,14 +196,38 @@ claims, rejects anonymous/non-account identities, and limits token length.
 
 `SUPABASE_AUTH_ISSUER` configures the expected HTTPS Auth issuer ending in
 `/auth/v1`; `SUPABASE_AUTH_AUDIENCE` defaults to `authenticated`.
-The issuer remains optional while account authentication is not connected.
+The issuer remains optional. When configured, FastAPI creates one dedicated HTTP
+client and key cache per application lifespan. Startup and health checks do not
+fetch signing keys. Shutdown closes
+the client and disposes the database engine, including when later startup work fails.
 
-This verifier is not connected to an HTTP authentication endpoint. It does not
-fetch signing keys, check live session revocation or account suspension, or grant
-resource ownership or administrator permissions.
+The separate key fetcher uses the configured issuer's `/.well-known/jwks.json`
+endpoint, rejects redirects and compressed responses, and requires a successful
+JSON response within five seconds and 64 KiB. Key selection accepts P-256 public
+keys for ES256 verification and rejects ambiguous IDs and private-key material.
 
-Tests generate temporary signing keys in memory and require no Supabase requests,
-real user tokens, or database access.
+The cache retains one downloaded key set for five minutes and permits refreshes
+at most once every 30 seconds. Concurrent lookups share refresh work. Failed
+refreshes do not extend key expiry; expired cached keys are not used. Unknown
+keys may be rejected during the cooldown. Provider-side caching also affects
+key rotation and revocation; local caching does not provide immediate revocation.
+
+`GET /api/v1/account/me` requires exactly one Authorization header containing a
+Bearer token. Successful verification returns only the verified `user_id`.
+Missing or invalid credentials return 401 with `WWW-Authenticate: Bearer`;
+unconfigured or unavailable verification returns 503. Successful responses and
+these authentication failures use `Cache-Control: no-store`. Tokens in query
+parameters or cookies are not accepted.
+
+This endpoint does not implement sign-up/sign-in UI, create account profiles,
+check live session revocation or account suspension, or grant resource ownership
+or administrator permissions. The Cloudflare Pages proxy still forwards only
+health requests; production account-route forwarding is not implemented.
+
+Tests generate temporary signing keys in memory and mock downloads and lifecycle
+failures. They require no Supabase requests, real user tokens, or database access.
+An HTTP test exercises real authentication and caching with generated signed
+tokens, mocks only the key download, and verifies rejection of forged signatures.
 
 ## Checks
 

@@ -1,13 +1,17 @@
 """Application entry point and operational health endpoints."""
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Literal, cast
 
+import httpx2
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.account_key_cache import AccountKeyCache
+from app.account_key_fetch import fetch_account_key_set
+from app.account_routes import router as account_router
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
 from app.guest_routes import router as guest_router
@@ -27,16 +31,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         configuration = settings if settings is not None else Settings()
-        engine = create_database_engine(configuration)
 
         application.state.settings = configuration
-        application.state.database_engine = engine
+        application.state.database_engine = None
+        application.state.account_key_cache = None
 
         try:
-            yield
+            async with AsyncExitStack() as resources:
+                engine = create_database_engine(configuration)
+
+                if engine is not None:
+                    resources.push_async_callback(engine.dispose)
+
+                application.state.database_engine = engine
+
+                if configuration.supabase_auth_issuer is not None:
+                    client = await resources.enter_async_context(
+                        httpx2.AsyncClient(
+                            timeout=5.0,
+                            follow_redirects=False,
+                            trust_env=False,
+                            limits=httpx2.Limits(
+                                max_connections=1,
+                                max_keepalive_connections=1,
+                            ),
+                        )
+                    )
+
+                    async def download_account_keys() -> dict[str, object]:
+                        return await fetch_account_key_set(
+                            configuration,
+                            client=client,
+                        )
+
+                    application.state.account_key_cache = AccountKeyCache(download_account_keys)
+
+                yield
         finally:
-            if engine is not None:
-                await engine.dispose()
+            application.state.account_key_cache = None
             application.state.database_engine = None
 
     application = FastAPI(
@@ -46,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     application.include_router(guest_router)
+    application.include_router(account_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
