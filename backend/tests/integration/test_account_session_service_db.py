@@ -19,8 +19,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from jwt.algorithms import ECAlgorithm
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
-from sqlalchemy import delete, func, insert, select, text
-from sqlalchemy.engine import Engine
+from sqlalchemy import delete, event, func, insert, select, text
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -32,6 +33,9 @@ from app.account_refresh import (
 )
 from app.account_session_auth import AuthenticatedAccountSession
 from app.account_session_service import authenticate_account_session
+from app.account_session_transactions import (
+    authenticate_account_session_transaction,
+)
 from app.account_token_encryption import AccountTokenCipher
 from app.config import Settings
 from app.models import AccountSession, UserProfile
@@ -639,4 +643,181 @@ def test_concurrent_requests_respect_first_refresh_transaction(
         # Remove only the synthetic rows created by this test.
         with integration_engine.begin() as connection:
             connection.execute(delete(AccountSession).where(AccountSession.id == session_id))
+            connection.execute(delete(UserProfile).where(UserProfile.id == material.user_id))
+
+
+@pytest.mark.parametrize(
+    "access_expired",
+    [False, True],
+    ids=["current-access", "refreshed-access"],
+)
+@pytest.mark.parametrize(
+    "rollback_after_auth",
+    [False, True],
+    ids=["commit", "rollback"],
+)
+def test_transaction_boundary_preserves_commit_and_rollback(
+    integration_engine: Engine,
+    async_app_connection_factory: ConnectionFactory,
+    material: ServiceMaterial,
+    access_expired: bool,
+    rollback_after_auth: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        engine = create_async_engine(
+            integration_engine.url,
+            poolclass=NullPool,
+            connect_args={
+                "connect_timeout": 5,
+                "hostaddr": "127.0.0.1",
+            },
+            echo=False,
+            hide_parameters=True,
+        )
+
+        # Apply the restricted application role to every test transaction,
+        # including transactions opened inside the helper.
+        @event.listens_for(engine.sync_engine, "begin")
+        def restrict_transaction(connection: Connection) -> None:
+            connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
+            connection.exec_driver_sql("SET LOCAL ROLE askm6_app")
+            assert connection.scalar(text("SELECT current_user")) == "askm6_app"
+
+        try:
+            async with asyncio.timeout(10):
+                async with engine.begin() as connection:
+                    session_id, token = await seed_session(
+                        connection,
+                        material,
+                        access_expired=access_expired,
+                    )
+                    statement = select(AccountSession).where(AccountSession.id == session_id)
+                    before = (await connection.execute(statement)).one()
+
+                failure_calls = 0
+
+                async def authenticate_then_fail(
+                    connection: AsyncConnection,
+                    token: SecretStr | None,
+                    *,
+                    settings: Settings,
+                    client: httpx2.AsyncClient,
+                    key_cache: AccountKeyCache | None,
+                ) -> AuthenticatedAccountSession | None:
+                    nonlocal failure_calls
+                    failure_calls += 1
+
+                    result = await authenticate_account_session(
+                        connection,
+                        token,
+                        settings=settings,
+                        client=client,
+                        key_cache=key_cache,
+                    )
+                    assert result is not None
+
+                    during = (await connection.execute(statement)).one()
+                    assert during.last_seen_at > before.last_seen_at
+
+                    if access_expired:
+                        assert during.access_token_ciphertext != before.access_token_ciphertext
+                        assert during.refresh_token_ciphertext != before.refresh_token_ciphertext
+
+                    # A real PostgreSQL error after authentication writes.
+                    await connection.execute(text("SELECT 1 / 0"))
+                    raise AssertionError("Expected PostgreSQL division by zero")
+
+                if rollback_after_auth:
+                    monkeypatch.setattr(
+                        "app.account_session_transactions.authenticate_account_session",
+                        authenticate_then_fail,
+                    )
+
+                requests: list[httpx2.Request] = []
+
+                def handler(request: httpx2.Request) -> httpx2.Response:
+                    requests.append(request)
+                    assert access_expired
+                    assert len(requests) == 1
+                    assert json.loads(request.content) == {"refresh_token": OLD_REFRESH}
+                    return replacement_response(material)
+
+                async with httpx2.AsyncClient(
+                    transport=httpx2.MockTransport(handler),
+                    trust_env=False,
+                ) as client:
+                    authenticated: AuthenticatedAccountSession | None = None
+
+                    if rollback_after_auth:
+                        with pytest.raises(SQLAlchemyError):
+                            await authenticate_account_session_transaction(
+                                engine,
+                                token,
+                                settings=material.settings,
+                                client=client,
+                                key_cache=material.cache,
+                            )
+                    else:
+                        authenticated = await authenticate_account_session_transaction(
+                            engine,
+                            token,
+                            settings=material.settings,
+                            client=client,
+                            key_cache=material.cache,
+                        )
+
+                # This independent connection can see only committed changes.
+                async with async_app_connection_factory() as observer:
+                    after = (await observer.execute(statement)).one()
+
+                if rollback_after_auth:
+                    assert authenticated is None
+                    assert failure_calls == 1
+                    assert dict(after._mapping) == dict(before._mapping)
+                    assert len(requests) == int(access_expired)
+                    material.download.assert_awaited_once()
+                    return
+
+                assert authenticated is not None
+                assert authenticated.session_id == session_id
+                assert authenticated.account.user_id == material.user_id
+                assert authenticated.account.session_id == material.provider_session_id
+
+                assert after.last_seen_at > before.last_seen_at
+                assert after.idle_expires_at == min(
+                    after.last_seen_at + timedelta(days=7),
+                    before.absolute_expires_at,
+                )
+                assert authenticated.idle_expires_at == after.idle_expires_at
+                assert (
+                    authenticated.account.access_token_expires_at == after.access_token_expires_at
+                )
+
+                expected_access = (
+                    material.replacement.access_token if access_expired else material.current_access
+                )
+                expected_refresh = (
+                    material.replacement.refresh_token if access_expired else SecretStr(OLD_REFRESH)
+                )
+
+                assert material.cipher.decrypt(after.access_token_ciphertext) == expected_access
+                assert material.cipher.decrypt(after.refresh_token_ciphertext) == expected_refresh
+
+                assert after.token_hash == before.token_hash
+                assert after.created_at == before.created_at
+                assert after.absolute_expires_at == before.absolute_expires_at
+                assert len(requests) == int(access_expired)
+                material.download.assert_awaited_once()
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+    finally:
+        # Remove only rows belonging to this test's synthetic account.
+        with integration_engine.begin() as connection:
+            connection.execute(
+                delete(AccountSession).where(AccountSession.user_id == material.user_id)
+            )
             connection.execute(delete(UserProfile).where(UserProfile.id == material.user_id))

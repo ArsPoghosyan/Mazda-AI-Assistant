@@ -61,6 +61,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Internal account-session authentication coordinating current-token verification
   or one provider refresh attempt under a caller-owned row lock, with PostgreSQL
   tests for concurrent requests, rollback recovery, and rejected recovery.
+- An internal authentication transaction boundary that commits and releases the
+  connection before returning identity, with commit-failure and rollback tests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -499,9 +501,24 @@ cancellation, and database errors propagate without automatic retries.
 The caller retains the row lock throughout verification, any bounded provider
 request, and storage, and owns commit or rollback. The current-token path reloads
 the same locked row to reuse the existing service. An authentication result must
-be discarded if its transaction rolls back or commit fails. HTTP integration and
-its transaction boundary remain pending; holding the lock during network work
-also occupies a database connection.
+be discarded if its transaction rolls back or commit fails. Holding the lock
+during network work also occupies a database connection.
+
+`authenticate_account_session_transaction` supplies a short transaction around
+the coordinator. It returns identity only after successful commit and connection
+release, so subsequent protected application work can use a separate transaction.
+Authentication errors, cancellation, and database errors propagate without
+automatic retries. The helper is internal; account cookies and HTTP integration
+remain pending.
+
+Offline tests model successful transaction completion, no authenticated result,
+commit failure, authentication errors, and cancellation. PostgreSQL tests run
+authentication as the restricted application role and use an independent
+connection to confirm committed activity and replacement credentials. Rollback
+cases cause a real SQL error after successful authentication writes and verify
+that the entire original session row is restored. Both current-token and
+refreshed-token paths are covered. Commit failure itself is mocked; these tests
+do not simulate a lost connection during commit.
 
 Offline coordinator tests cover branch selection, failure propagation, and caller
 transaction ownership. Local PostgreSQL tests use generated signing/encryption
@@ -560,10 +577,11 @@ tables automatically or apply migrations. They cover guest token/session behavio
 account-session storage and encrypted-token round trips, account-deletion cascades,
 expiry-safe account-session activity updates, stored-session authentication,
 guarded refresh credential storage, concurrent authentication and recovery,
-invalid session fields and timestamps, and
-restricted-role permissions. Direct session updates and deletions in schema tests
-do not implement provider-token refresh or logout endpoints. Managed account login
-and conversation ownership are not covered by these database tests.
+authentication transaction commit and rollback, invalid session fields and
+timestamps, and restricted-role permissions. Direct session updates and deletions
+in schema tests do not implement provider-token refresh or logout endpoints.
+Managed account login and conversation ownership are not covered by these
+database tests.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:
