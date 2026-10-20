@@ -44,6 +44,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   foreign keys, bounded ciphertext fields, expiry constraints, and restricted grants.
 - Internal account-session creation with verified identity, encrypted provider
   credentials, browser-token hashing, capped deadlines, and transactional recovery.
+- Internal account-session lookup with expiry checks after row-lock acquisition
+  and activity updates capped at the stored absolute deadline.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -278,8 +280,7 @@ from each other; backend authorization remains necessary.
 integers. These application-session deadlines are separate from provider
 access-token expiry.
 Session creation uses these settings to calculate deadlines and caps inactivity
-expiry at the absolute deadline. Session lookup and expiry-safe activity updates
-are not implemented yet.
+expiry at the absolute deadline.
 
 The internal `create_account_session` service verifies the provider access token,
 encrypts provider credentials, generates a random browser token, and stores only
@@ -298,8 +299,25 @@ outer-transaction rollback, and savepoint recovery after an insertion failure.
 Tests use generated credentials and mocked signing-key retrieval; the
 post-verification expiry test also mocks the verified identity to simulate expiry.
 
-HttpOnly account cookies, provider-token refresh, logout, session lookup and expiry
-enforcement, automated session cleanup, and encryption-key rotation are not implemented.
+The internal `touch_account_session` service validates and hashes the browser
+token, locks the matching row, and checks both application-session deadlines using
+fresh statement time after acquiring the lock. Expired sessions are rejected
+without updates, including when expiry occurs during a lock wait. For active
+sessions, last activity cannot move backward, and inactivity expiry is recalculated
+from the configured period, capped at the stored absolute deadline. The caller
+controls commit and rollback.
+
+Lookup returns internal session metadata, including provider access-token expiry;
+it does not decrypt, verify, or refresh provider credentials, or establish a
+completed authentication result. An active application session can still need
+provider-token refresh before authorizing a protected operation. Offline tests
+cover malformed and unknown tokens and transaction requirements. Local PostgreSQL
+tests cover activity updates, expiry rejection, rollback, unchanged credentials
+and other sessions, and expiry during a real row-lock wait.
+
+HttpOnly account cookies, provider-token refresh, logout, automated session cleanup,
+and encryption-key rotation are not implemented. Account-session lookup is not yet
+connected to HTTP authentication.
 Decryption does not verify a provider token's identity or expiry; the existing
 account-token verifier remains a separate authentication step. Keep real encryption
 keys in ignored backend environment files or a server-side secret manager, never
@@ -346,8 +364,9 @@ where necessary and delete only their own test rows in cleanup. Administrative
 connections are used for setup, inspection, and cleanup. Tests do not create
 tables automatically or apply migrations. They cover guest token/session behavior,
 account-session storage and encrypted-token round trips, account-deletion cascades,
-invalid session fields and timestamps, and restricted-role permissions. Direct
-session updates and deletions in schema tests do not implement provider-token
+expiry-safe account-session activity updates, invalid session fields and timestamps,
+and restricted-role permissions. Direct session updates and deletions in schema
+tests do not implement provider-token
 refresh or logout endpoints. Managed account login and conversation ownership
 are not covered by these database tests.
 Keep test administrator credentials separate from the running web service.
