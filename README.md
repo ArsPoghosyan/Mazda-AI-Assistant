@@ -42,6 +42,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   helper for provider tokens, with tamper detection and generated-key tests.
 - Account-session model and migration verified on local PostgreSQL, with account
   foreign keys, bounded ciphertext fields, expiry constraints, and restricted grants.
+- Internal account-session creation with verified identity, encrypted provider
+  credentials, browser-token hashing, capped deadlines, and transactional recovery.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -240,7 +242,7 @@ failures. They require no Supabase requests, real user tokens, or database acces
 An HTTP test exercises real authentication and caching with generated signed
 tokens, mocks only the key download, and verifies rejection of forged signatures.
 
-## Account-session encryption and schema foundation
+## Account-session foundation
 
 `ACCOUNT_SESSION_ENCRYPTION_KEY` is an optional backend-only Fernet key, documented
 in `backend/.env.example`. Missing or empty environment values leave it
@@ -273,12 +275,30 @@ from each other; backend authorization remains necessary.
 
 `ACCOUNT_SESSION_INACTIVITY_DAYS` defaults to 7 and
 `ACCOUNT_SESSION_ABSOLUTE_LIFETIME_DAYS` defaults to 30; both accept positive
-integers. They configure the planned session policy but do not enforce it yet.
-The session service will need to reject either expired deadline before extending
-activity, and cap inactivity expiry at the absolute deadline.
+integers. These application-session deadlines are separate from provider
+access-token expiry.
+Session creation uses these settings to calculate deadlines and caps inactivity
+expiry at the absolute deadline. Session lookup and expiry-safe activity updates
+are not implemented yet.
 
-The schema and encryption helper are not connected to account authentication yet.
-HttpOnly account cookies, provider-token refresh, logout, session expiry
+The internal `create_account_session` service verifies the provider access token,
+encrypts provider credentials, generates a random browser token, and stores only
+its hash. It creates or reuses the verified account profile and checks access-token
+expiry against fresh database time after any wait on profile creation. A savepoint
+makes profile/session creation atomic within the caller's transaction. The caller
+must commit successfully before issuing the browser token.
+
+The refresh token must come from the same trusted provider authentication response.
+The service validates its format but does not independently verify refresh-token
+ownership. No provider login adapter or account-session HTTP endpoint is connected.
+
+Local PostgreSQL tests cover encrypted storage, verified identity, configurable
+deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
+outer-transaction rollback, and savepoint recovery after an insertion failure.
+Tests use generated credentials and mocked signing-key retrieval; the
+post-verification expiry test also mocks the verified identity to simulate expiry.
+
+HttpOnly account cookies, provider-token refresh, logout, session lookup and expiry
 enforcement, automated session cleanup, and encryption-key rotation are not implemented.
 Decryption does not verify a provider token's identity or expiry; the existing
 account-token verifier remains a separate authentication step. Keep real encryption
