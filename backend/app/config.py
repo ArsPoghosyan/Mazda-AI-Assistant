@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,6 +30,29 @@ class Settings(BaseSettings):
         min_length=1,
         max_length=128,
     )
+    account_session_encryption_key: SecretStr | None = None
+
+    @field_validator("account_session_encryption_key")
+    @classmethod
+    def validate_account_session_encryption_key(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+
+        raw_key = value.get_secret_value()
+        error_message = "Account session encryption key must be a valid Fernet key."
+
+        if len(raw_key) != 44 or not raw_key.isascii():
+            raise ValueError(error_message)
+
+        try:
+            Fernet(raw_key.encode("ascii"))
+        except ValueError:
+            raise ValueError(error_message) from None
+
+        return value
 
     @field_validator("supabase_auth_issuer")
     @classmethod

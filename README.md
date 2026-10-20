@@ -38,6 +38,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   process-local cache with lazy fetching and application-managed cleanup.
 - Protected `GET /api/v1/account/me` with Bearer-token verification, typed
   account identity, generic 401/503 responses, and no-store caching headers.
+- Optional validated account-session encryption key and a standalone Fernet
+  helper for provider tokens, with tamper detection and generated-key tests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -228,6 +230,31 @@ Tests generate temporary signing keys in memory and mock downloads and lifecycle
 failures. They require no Supabase requests, real user tokens, or database access.
 An HTTP test exercises real authentication and caching with generated signed
 tokens, mocks only the key download, and verifies rejection of forged signatures.
+
+## Account-session encryption foundation
+
+`ACCOUNT_SESSION_ENCRYPTION_KEY` is an optional backend-only Fernet key, documented
+in `backend/.env.example`. Missing or empty environment values leave it
+unconfigured; malformed keys fail settings validation. Configured keys use
+`SecretStr` to mask ordinary settings display and JSON serialization. Human-readable
+validation messages omit input values; structured validation errors must explicitly
+exclude inputs before being logged or returned.
+
+`AccountTokenCipher` accepts an explicitly supplied key and encrypts nonempty ASCII
+provider tokens of up to 8,192 characters into bytes. Decryption verifies integrity,
+limits ciphertext input to 12,288 bytes, and returns a `SecretStr`. Wrong keys,
+tampered or malformed ciphertext, and invalid decrypted content produce a generic
+error without including token values. Tests use temporary keys and synthetic
+tokens, with no private environment files, database, or provider requests.
+
+The helper is not connected to account authentication or persistence yet.
+Account-session tables, HttpOnly account cookies, provider-token refresh, logout,
+session expiry enforcement, and encryption-key rotation are not implemented.
+Decryption does not verify a provider token's identity or expiry; the existing
+account-token verifier remains a separate authentication step. Keep real encryption
+keys in ignored backend environment files or a server-side secret manager, never
+in frontend variables or Git. Retain the key while encrypted data depends on it;
+replacing it without a rotation process makes existing ciphertext unreadable.
 
 ## Checks
 
