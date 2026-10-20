@@ -57,8 +57,10 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Refreshed access-token verification against the expected account and provider
   session, tested with generated signing keys and mocked provider requests.
 - Internal stored-refresh exchange and encrypted replacement helpers, with
-  configuration, identity, stale-snapshot, and expiry guards. Combined refresh
-  orchestration is still pending.
+  configuration, identity, stale-snapshot, and expiry guards.
+- Internal account-session authentication coordinating current-token verification
+  or one provider refresh attempt under a caller-owned row lock, with PostgreSQL
+  tests for concurrent requests, rollback recovery, and rejected recovery.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -401,7 +403,7 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-HttpOnly account cookies, database-coordinated provider-token refresh, logout,
+HttpOnly account cookies, provider-token refresh HTTP endpoints, logout,
 automated session cleanup, and encryption-key rotation are not implemented.
 Account-session authentication is not yet connected to HTTP routes.
 Provider identity and expiry require JWT verification in addition to ciphertext
@@ -486,10 +488,35 @@ expiry cases simulate the final SQL check at and one second after each deadline.
 At the absolute boundary, inactivity expiry coincides with the absolute deadline
 as required by the schema. These tests make no live provider requests.
 
-The combined refresh coordinator, concurrent-request refresh tests, recovery after
-an interrupted exchange, and HTTP integration remain pending. PostgreSQL rollback
-cannot undo a provider-side token rotation, and a database commit failure must not
-be treated as successful authentication. Recovery may require fresh sign-in.
+The internal `authenticate_account_session` coordinator loads and locks the
+application session, rejecting missing or expired sessions before any provider
+request. A current stored access token uses the existing verification and activity
+update service. An expired access token triggers one exchange, identity
+verification, and guarded encrypted replacement. Verification failure on the
+current-token path does not fall back to refresh. Rejection, unavailability,
+cancellation, and database errors propagate without automatic retries.
+
+The caller retains the row lock throughout verification, any bounded provider
+request, and storage, and owns commit or rollback. The current-token path reloads
+the same locked row to reuse the existing service. An authentication result must
+be discarded if its transaction rolls back or commit fails. HTTP integration and
+its transaction boundary remain pending; holding the lock during network work
+also occupies a database connection.
+
+Offline coordinator tests cover branch selection, failure propagation, and caller
+transaction ownership. Local PostgreSQL tests use generated signing/encryption
+keys and mocked provider responses. They cover current and expired credentials,
+unchanged data on provider failure, unrelated sessions, and caller rollback.
+Concurrent tests confirm a real PostgreSQL lock wait: after the first request
+commits, the waiter reuses its replacement credentials without another exchange.
+If the first request rolls back, the waiter reloads the original credentials and
+attempts recovery once. Mocked recovery either returns the active replacement
+pair or rejects the credentials; rejection leaves the committed row unchanged.
+
+These recovery tests model provider responses rather than verify live Supabase
+reuse behavior. PostgreSQL rollback cannot undo provider-side token rotation, and
+an uncertain database commit is not resolved by these tests. A later request must
+reload committed state before attempting recovery; fresh sign-in may be required.
 
 ## Checks
 
@@ -532,7 +559,8 @@ connections are used for setup, inspection, and cleanup. Tests do not create
 tables automatically or apply migrations. They cover guest token/session behavior,
 account-session storage and encrypted-token round trips, account-deletion cascades,
 expiry-safe account-session activity updates, stored-session authentication,
-guarded refresh credential storage, invalid session fields and timestamps, and
+guarded refresh credential storage, concurrent authentication and recovery,
+invalid session fields and timestamps, and
 restricted-role permissions. Direct session updates and deletions in schema tests
 do not implement provider-token refresh or logout endpoints. Managed account login
 and conversation ownership are not covered by these database tests.
