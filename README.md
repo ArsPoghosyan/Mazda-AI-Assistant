@@ -198,6 +198,13 @@ cryptography. Its caller supplies a trusted P-256 public key and the expected
 issuer and audience. It accepts only ES256, validates required identity and time
 claims, rejects anonymous/non-account identities, and limits token length.
 
+Successful verification also returns the access token's expiry as a
+timezone-aware UTC timestamp for future account-session handling. Expiry comes
+from the verified `exp` claim; unrepresentable timestamps produce the generic
+invalid-token error. The `/api/v1/account/me` response still exposes only
+`user_id`. Provider access-token expiry is separate from the application's
+inactivity and absolute session deadlines.
+
 `SUPABASE_AUTH_ISSUER` configures the expected HTTPS Auth issuer ending in
 `/auth/v1`; `SUPABASE_AUTH_AUDIENCE` defaults to `authenticated`.
 The issuer remains optional. When configured, FastAPI creates one dedicated HTTP

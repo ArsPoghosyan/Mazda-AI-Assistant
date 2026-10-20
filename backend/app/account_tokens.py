@@ -1,6 +1,7 @@
 """Verify managed-account tokens using a trusted public key."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -25,11 +26,12 @@ class InvalidAccountToken(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class VerifiedAccount:
-    """Identity claims verified against the configured authentication provider."""
+    """Identity and token expiry verified against the configured provider."""
 
     user_id: UUID
     session_id: UUID
     assurance_level: Literal["aal1", "aal2"]
+    access_token_expires_at: datetime
 
 
 class _AccountClaims(BaseModel):
@@ -128,8 +130,14 @@ def verify_account_token(
     if claims.is_anonymous:
         raise InvalidAccountToken("Invalid account token.")
 
+    try:
+        access_token_expires_at = datetime.fromtimestamp(claims.exp, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        raise InvalidAccountToken("Invalid account token.") from None
+
     return VerifiedAccount(
         user_id=claims.sub,
         session_id=claims.session_id,
         assurance_level=claims.aal,
+        access_token_expires_at=access_token_expires_at,
     )

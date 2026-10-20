@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -59,6 +59,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Iterator[AccountAPI]:
             user_id=USER_ID,
             session_id=SESSION_ID,
             assurance_level="aal1",
+            access_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
     )
     fetcher = AsyncMock(side_effect=AssertionError("HTTP contract tests must not fetch keys."))

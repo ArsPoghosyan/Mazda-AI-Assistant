@@ -119,14 +119,19 @@ async def test_authenticates_and_reuses_cached_keys(
     token: SecretStr,
     cache: AccountKeyCache,
     download: AsyncMock,
+    claims: dict[str, object],
 ) -> None:
     first = await authenticate_account_token(token, settings=settings, key_cache=cache)
     second = await authenticate_account_token(token, settings=settings, key_cache=cache)
+
+    expiry = claims["exp"]
+    assert isinstance(expiry, int)
 
     assert first == VerifiedAccount(
         user_id=USER_ID,
         session_id=SESSION_ID,
         assurance_level="aal1",
+        access_token_expires_at=datetime.fromtimestamp(expiry, tz=UTC),
     )
     assert second == first
     download.assert_awaited_once()

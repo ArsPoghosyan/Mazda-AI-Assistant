@@ -65,11 +65,16 @@ def test_accepts_valid_account_token(
 
     account = verify_for_test(token, signing_key.public_key())
 
+    expiry = claims["exp"]
+    assert isinstance(expiry, int)
+
     assert account == VerifiedAccount(
         user_id=USER_ID,
         session_id=SESSION_ID,
         assurance_level="aal1",
+        access_token_expires_at=datetime.fromtimestamp(expiry, tz=UTC),
     )
+    assert account.access_token_expires_at.tzinfo is UTC
 
 
 def test_rejects_token_signed_by_another_key(
@@ -384,3 +389,26 @@ def test_header_extraction_does_not_establish_authenticity(
 
     with pytest.raises(InvalidAccountToken, match="Invalid account token"):
         verify_for_test(tampered_token, signing_key.public_key())
+
+
+@pytest.mark.parametrize(
+    "expiry",
+    [
+        pytest.param(253402300800, id="year-10000"),
+        pytest.param(10**30, id="outside-timestamp-range"),
+        pytest.param(10**400, id="outside-float-range"),
+    ],
+)
+def test_rejects_unrepresentable_expiry(
+    signing_key: ec.EllipticCurvePrivateKey,
+    claims: dict[str, object],
+    expiry: int,
+) -> None:
+    claims["exp"] = expiry
+    token = jwt.encode(claims, signing_key, algorithm="ES256")
+
+    with pytest.raises(InvalidAccountToken) as caught:
+        verify_for_test(token, signing_key.public_key())
+
+    assert str(caught.value) == "Invalid account token."
+    assert token not in str(caught.value)
