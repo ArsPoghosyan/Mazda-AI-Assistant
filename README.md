@@ -65,6 +65,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   connection before returning identity, with commit-failure and rollback tests.
 - Internal account-cookie helpers for setting, reading, and clearing opaque
   browser tokens, with independent HTTPS defaults and offline policy tests.
+- A default-disabled account-session HTTP endpoint with exact Origin checks,
+  committed authentication, cookie renewal, controlled failures, and PostgreSQL
+  tests using generated credentials and mocked provider responses.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -326,7 +329,8 @@ initial response is lost before the browser receives its credential.
 
 The refresh token must come from the same trusted provider authentication response.
 The service validates its format but does not independently verify refresh-token
-ownership. No provider login adapter or account-session HTTP endpoint is connected.
+ownership. No provider login adapter or account-session creation HTTP endpoint
+is connected. The session-check endpoint authenticates existing sessions only.
 
 Local PostgreSQL tests cover encrypted storage, verified identity, configurable
 deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
@@ -407,9 +411,9 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-Account-cookie HTTP integration, provider-token refresh HTTP endpoints, logout,
-automated session cleanup, and encryption-key rotation are not implemented.
-Account-session authentication is not yet connected to HTTP routes.
+Account sign-in/session creation, logout, automated session cleanup, and
+encryption-key rotation are not implemented. Cookie-authenticated session checking
+is available through the default-disabled endpoint described below.
 Provider identity and expiry require JWT verification in addition to ciphertext
 decryption. Keep real encryption keys in ignored backend environment files or a
 server-side secret manager, never in frontend variables or Git. Retain the key
@@ -436,6 +440,49 @@ The helpers do not calculate or enforce database deadlines themselves. Offline
 tests cover header policy, malformed tokens, expiry conversion, matching deletion
 scope, and HTTP/HTTPS cookie round trips in an in-memory test application. These
 tests make no database or provider requests and do not enable account endpoints.
+
+## Account session endpoint
+
+`POST /api/v1/account/session` authenticates an existing opaque account cookie;
+it does not sign in or create a session. `ACCOUNT_SESSION_API_ENABLED` defaults
+to `false`. Keep it disabled until abuse controls and deployment checks are ready.
+The existing Bearer-only `GET /api/v1/account/me` contract is unchanged, and the
+Cloudflare Pages proxy does not forward the new endpoint yet.
+
+The endpoint requires exactly one Origin matching `CSRF_TRUSTED_ORIGINS` before
+processing credentials. Missing, null, duplicate, or untrusted origins return 403
+without changing cookies. With a trusted Origin, a disabled endpoint returns 503
+without authenticating or changing cookies.
+
+When enabled, the endpoint reads the configured account cookie and authenticates
+through the transaction helper. Successful authentication commits before renewing
+the cookie with the stored inactivity deadline. The JSON response contains only
+`user_id`, `expires_at`, and `absolute_expires_at`; provider and browser tokens are
+not returned in the response body. Current access credentials are verified, and
+expired access credentials use the bounded provider refresh flow.
+
+Missing or malformed cookies, unknown or expired application sessions, and explicit
+provider credential rejection return a generic 401 and clear the account cookie.
+Unavailable verification, missing application resources, provider outages, database
+errors, and authentication timeouts return a generic 503 without replacing or
+clearing the cookie. Origin failures, authentication failures, and successful
+responses use `Cache-Control: no-store`. No automatic authentication retry is made.
+
+`ACCOUNT_SESSION_AUTH_TIMEOUT_SECONDS` defaults to 15 and accepts 1 through 30.
+It sets a cancellation deadline around authentication, including transaction
+completion. The application shares its lifecycle-managed HTTP client between
+signing-key downloads and provider refresh requests. Startup/shutdown tests cover
+resource closure and clearing application-state references, including failures.
+
+Offline HTTP tests mock the authentication transaction helper and cover request
+guards, response/cookie contracts, temporary failures, missing resources, and
+cancellation of stalled authentication. Local PostgreSQL HTTP tests exercise the
+actual route, session services, encrypted storage, JWT verification, and signing-key
+cache, with only provider HTTP responses mocked. Independent database connections
+confirm committed updates. SQL errors injected at the pre-commit boundary return
+503, restore the entire original session row, and send no replacement cookie.
+Both current-token and refreshed-token paths are covered. These tests do not
+contact Supabase or simulate an uncertain commit after a lost network connection.
 
 ## Provider refresh foundation
 
@@ -531,8 +578,8 @@ during network work also occupies a database connection.
 the coordinator. It returns identity only after successful commit and connection
 release, so subsequent protected application work can use a separate transaction.
 Authentication errors, cancellation, and database errors propagate without
-automatic retries. The helper is internal; HTTP account-cookie integration remains
-pending.
+automatic retries. The account-session HTTP endpoint uses this helper and renews
+the cookie only after it returns successfully.
 
 Offline tests model successful transaction completion, no authenticated result,
 commit failure, authentication errors, and cancellation. PostgreSQL tests run
@@ -540,7 +587,7 @@ authentication as the restricted application role and use an independent
 connection to confirm committed activity and replacement credentials. Rollback
 cases cause a real SQL error after successful authentication writes and verify
 that the entire original session row is restored. Both current-token and
-refreshed-token paths are covered. Commit failure itself is mocked; these tests
+refreshed-token paths are covered. Offline commit failure is mocked; these tests
 do not simulate a lost connection during commit.
 
 Offline coordinator tests cover branch selection, failure propagation, and caller

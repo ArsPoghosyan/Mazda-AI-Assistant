@@ -69,6 +69,7 @@ def test_unconfigured_auth_creates_no_key_resources(
 
     with TestClient(application) as client:
         assert application.state.account_key_cache is None
+        assert application.state.account_auth_client is None
         assert client.get("/api/v1/health").status_code == 200
 
     factory.assert_not_called()
@@ -90,6 +91,7 @@ def test_shared_cache_fetches_lazily_and_resources_close(
     with TestClient(application) as client:
         cache = cast(AccountKeyCache, application.state.account_key_cache)
         assert isinstance(cache, AccountKeyCache)
+        assert application.state.account_auth_client is http_client
         assert not http_client.is_closed
         engine.dispose.assert_not_awaited()
 
@@ -109,6 +111,7 @@ def test_shared_cache_fetches_lazily_and_resources_close(
     assert http_client.is_closed
     engine.dispose.assert_awaited_once()
     assert application.state.account_key_cache is None
+    assert application.state.account_auth_client is None
     assert application.state.database_engine is None
 
 
@@ -129,6 +132,7 @@ def test_client_construction_failure_disposes_database(
 
     engine.dispose.assert_awaited_once()
     assert application.state.account_key_cache is None
+    assert application.state.account_auth_client is None
     assert application.state.database_engine is None
 
 
@@ -151,6 +155,7 @@ def test_cache_construction_failure_closes_registered_resources(
     assert http_client.is_closed
     engine.dispose.assert_awaited_once()
     assert application.state.account_key_cache is None
+    assert application.state.account_auth_client is None
     assert application.state.database_engine is None
 
 
@@ -175,6 +180,7 @@ def test_http_cleanup_failure_still_disposes_database_and_clears_state(
     assert http_client.is_closed
     engine.dispose.assert_awaited_once()
     assert application.state.account_key_cache is None
+    assert application.state.account_auth_client is None
     assert application.state.database_engine is None
 
 
@@ -193,4 +199,5 @@ def test_database_cleanup_failure_still_closes_http_and_clears_state(
     assert http_client.is_closed
     engine.dispose.assert_awaited_once()
     assert application.state.account_key_cache is None
+    assert application.state.account_auth_client is None
     assert application.state.database_engine is None

@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     account_session_inactivity_days: int = Field(default=7, ge=1)
     account_session_absolute_lifetime_days: int = Field(default=30, ge=1)
     account_cookie_secure: bool = True
+    account_session_api_enabled: bool = False
+    account_session_auth_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
 
     @field_validator("supabase_auth_publishable_key")
     @classmethod
