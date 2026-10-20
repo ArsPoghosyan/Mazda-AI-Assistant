@@ -56,6 +56,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   credentials, and distinct credential-rejection and unavailability errors.
 - Refreshed access-token verification against the expected account and provider
   session, tested with generated signing keys and mocked provider requests.
+- Internal stored-refresh exchange and encrypted replacement helpers, with
+  configuration, identity, stale-snapshot, and expiry guards. Combined refresh
+  orchestration is still pending.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up, chat, conversation persistence, vehicle selection,
@@ -439,14 +442,54 @@ mismatches, and unavailable signing keys produce `AccountRefreshUnavailable`.
 The opaque refresh token's ownership is not independently verified; both tokens
 must originate from the same trusted provider exchange.
 
-These helpers do not write to the database or extend application-session
-deadlines. Coordinating concurrent refresh attempts, encrypted credential
-replacement, recovery after an interrupted exchange, and session-expiry checks
-around the provider request remain pending. No refresh HTTP endpoint is connected.
+The HTTP adapter and JWT verification helper above do not write to the database
+or extend application-session deadlines.
 Tests use synthetic credentials, generated ES256 keys, mocked HTTP transport and
 signing-key downloads, and no live Supabase requests. They cover response and token
 bounds, error classification, deadlines, cancellation, forged signatures, identity
 mismatches, and the adapter-to-verifier flow.
+
+The internal `refresh_locked_account_tokens` helper decrypts a stored refresh
+token, exchanges it once, and verifies the returned identity against the locked
+session snapshot. It checks encryption, issuer, publishable-key, and key-cache
+configuration before making the provider request. Unreadable or malformed stored
+credentials produce `AccountRefreshUnavailable` before the exchange. Provider
+rejection remains distinct, cancellation propagates, and no automatic retry is
+performed. The result contains verified identity and masked replacement tokens;
+this helper does not save credentials or complete session authentication. The
+caller must retain the row lock and check application-session deadlines before
+and after the exchange.
+
+`store_verified_account_refresh` accepts that verified provider result within an
+active caller-owned transaction. It checks account/provider identity, encrypts
+both replacement tokens, and performs one guarded SQL update. Stored access and
+refresh ciphertext and the previous access-token expiry must still match the
+snapshot. Fresh database statement time must precede both application-session
+deadlines and the new access-token expiry. A failed SQL guard returns no result
+without changing the row.
+
+Successful storage replaces both encrypted tokens and access-token expiry together
+with last activity and inactivity expiry. Activity cannot move backward, and
+inactivity expiry stays capped at the unchanged absolute deadline. Ownership,
+browser-token hash, and other sessions remain unchanged. The returned authentication
+result contains identity and session deadlines, with no provider tokens. The helper
+does not commit or roll back; the caller must commit successfully before using the
+result outside the transaction. Database errors propagate to the caller.
+
+Offline tests cover configuration and encryption guards, exchange/verification
+with generated signing keys, identity mismatches, provider rejection, outages,
+rate limits, cancellation, and absence of automatic retries. Local PostgreSQL
+tests cover encrypted replacement, inactivity caps, unchanged fields and other
+accounts' rows, and rollback to the original credentials and activity. Stale
+snapshots are simulated by changing one credential field in the test transaction;
+expiry cases simulate the final SQL check at and one second after each deadline.
+At the absolute boundary, inactivity expiry coincides with the absolute deadline
+as required by the schema. These tests make no live provider requests.
+
+The combined refresh coordinator, concurrent-request refresh tests, recovery after
+an interrupted exchange, and HTTP integration remain pending. PostgreSQL rollback
+cannot undo a provider-side token rotation, and a database commit failure must not
+be treated as successful authentication. Recovery may require fresh sign-in.
 
 ## Checks
 
@@ -489,10 +532,10 @@ connections are used for setup, inspection, and cleanup. Tests do not create
 tables automatically or apply migrations. They cover guest token/session behavior,
 account-session storage and encrypted-token round trips, account-deletion cascades,
 expiry-safe account-session activity updates, stored-session authentication,
-invalid session fields and timestamps, and restricted-role permissions. Direct
-session updates and deletions in schema tests do not implement provider-token
-refresh or logout endpoints. Managed account
-login and conversation ownership are not covered by these database tests.
+guarded refresh credential storage, invalid session fields and timestamps, and
+restricted-role permissions. Direct session updates and deletions in schema tests
+do not implement provider-token refresh or logout endpoints. Managed account login
+and conversation ownership are not covered by these database tests.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:
