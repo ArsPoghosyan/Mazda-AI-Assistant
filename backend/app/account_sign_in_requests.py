@@ -1,7 +1,14 @@
 """Bounded JSON credential parsing without exposing validation details."""
 
 from fastapi import HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+)
 
 _MAX_BODY_BYTES = 16 * 1024
 
@@ -15,6 +22,23 @@ class SignInCredentials(BaseModel):
 
     email: SecretStr = Field(min_length=1, max_length=320)
     password: SecretStr = Field(min_length=1, max_length=1024)
+    captcha_token: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2048,
+    )
+
+    @field_validator("captcha_token")
+    @classmethod
+    def validate_captcha_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+
+        raw_token = value.get_secret_value()
+        if any(ord(character) < 33 or ord(character) > 126 for character in raw_token):
+            raise ValueError("Invalid CAPTCHA token.")
+
+        return value
 
 
 def sign_in_request_error(

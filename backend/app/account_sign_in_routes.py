@@ -15,7 +15,11 @@ from app.account_auth import AccountAuthenticationUnavailable
 from app.account_cookies import set_account_cookie
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import AccountSessionAlreadyExists, AccountSessionUnavailable
-from app.account_sign_in import AccountSignInRejected, AccountSignInUnavailable
+from app.account_sign_in import (
+    AccountSignInCaptchaRejected,
+    AccountSignInRejected,
+    AccountSignInUnavailable,
+)
 from app.account_sign_in_requests import read_sign_in_credentials
 from app.account_sign_in_service import sign_in_account
 from app.account_tokens import InvalidAccountToken
@@ -46,7 +50,7 @@ def account_sign_in_unavailable() -> HTTPException:
     responses={
         400: {"description": "Invalid sign-in request."},
         401: {"description": "Sign-in was rejected."},
-        403: {"description": "Request origin is not allowed."},
+        403: {"description": "Request origin or human verification was rejected."},
         413: {"description": "Sign-in request is too large."},
         415: {"description": "Sign-in requires a JSON request."},
         503: {"description": "Account sign-in is temporarily unavailable."},
@@ -81,6 +85,8 @@ async def sign_in(
     try:
         async with asyncio.timeout(settings.account_sign_in_timeout_seconds):
             credentials = await read_sign_in_credentials(request)
+            if credentials.captcha_token is None:
+                raise AccountSignInCaptchaRejected("Human verification is required.")
 
             created = await sign_in_account(
                 engine,
@@ -89,7 +95,17 @@ async def sign_in(
                 settings=settings,
                 client=client,
                 key_cache=key_cache,
+                captcha_token=credentials.captcha_token,
             )
+    except AccountSignInCaptchaRejected:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Human verification is required or was rejected.",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Account-Verification": "required",
+            },
+        ) from None
     except AccountSignInRejected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

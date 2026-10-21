@@ -26,7 +26,11 @@ from app.account_sessions import (
     AccountSessionUnavailable,
     CreatedAccountSession,
 )
-from app.account_sign_in import AccountSignInRejected, AccountSignInUnavailable
+from app.account_sign_in import (
+    AccountSignInCaptchaRejected,
+    AccountSignInRejected,
+    AccountSignInUnavailable,
+)
 from app.account_tokens import InvalidAccountToken
 from app.config import Settings
 from app.main import create_app
@@ -96,6 +100,7 @@ def assert_blocked(
     assert "set-cookie" not in response.headers
     guards.parse.assert_not_awaited()
     guards.sign_in.assert_not_awaited()
+    assert response.headers.get("X-Account-Verification") is None
 
 
 def test_disabled_route_stops_before_reading_credentials(
@@ -211,6 +216,7 @@ PASSWORD = "  synthetic-password-é  "
 COOKIE_NAME = "__Host-askm6_account"
 OLD_BROWSER_TOKEN = "B" * 43
 PRIVATE_DETAIL = "synthetic-private-provider-detail"
+CAPTCHA_TOKEN = "synthetic-account-captcha-proof"
 
 
 @dataclass
@@ -268,7 +274,11 @@ def route_material(
 def post_credentials(material: RouteMaterial) -> httpx2.Response:
     return material.client.post(
         PATH,
-        json={"email": EMAIL, "password": PASSWORD},
+        json={
+            "email": EMAIL,
+            "password": PASSWORD,
+            "captcha_token": CAPTCHA_TOKEN,
+        },
         headers={
             "Origin": ORIGIN,
             "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
@@ -284,6 +294,7 @@ def assert_service_called_once(material: RouteMaterial) -> None:
         settings=material.settings,
         client=material.http_client,
         key_cache=material.key_cache,
+        captcha_token=SecretStr(CAPTCHA_TOKEN),
     )
 
 
@@ -349,6 +360,7 @@ def test_rejected_credentials_return_generic_401_without_changing_cookie(
 
     assert_sign_in_failure(response, 401, "Sign-in was rejected.")
     assert_service_called_once(route_material)
+    assert response.headers.get("X-Account-Verification") is None
 
 
 @pytest.mark.parametrize(
@@ -386,6 +398,7 @@ def test_service_failure_returns_generic_503_without_changing_cookie(
         "Account sign-in is temporarily unavailable.",
     )
     assert_service_called_once(route_material)
+    assert response.headers.get("X-Account-Verification") is None
 
 
 @pytest.mark.parametrize(
@@ -498,3 +511,54 @@ def test_deadline_covers_stalled_body_reading(
     )
     assert was_cancelled
     route_material.sign_in.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "include_null",
+    [False, True],
+    ids=["omitted", "null"],
+)
+def test_missing_captcha_stops_before_sign_in_service(
+    route_material: RouteMaterial,
+    include_null: bool,
+) -> None:
+    payload: dict[str, object] = {
+        "email": EMAIL,
+        "password": PASSWORD,
+    }
+    if include_null:
+        payload["captcha_token"] = None
+
+    response = route_material.client.post(
+        PATH,
+        json=payload,
+        headers={
+            "Origin": ORIGIN,
+            "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
+        },
+    )
+
+    assert_sign_in_failure(
+        response,
+        403,
+        "Human verification is required or was rejected.",
+    )
+    assert response.headers["X-Account-Verification"] == "required"
+    route_material.sign_in.assert_not_awaited()
+
+
+def test_provider_captcha_rejection_requests_fresh_verification(
+    route_material: RouteMaterial,
+) -> None:
+    route_material.sign_in.side_effect = AccountSignInCaptchaRejected(PRIVATE_DETAIL)
+
+    response = post_credentials(route_material)
+
+    assert_sign_in_failure(
+        response,
+        403,
+        "Human verification is required or was rejected.",
+    )
+    assert response.headers["X-Account-Verification"] == "required"
+    assert CAPTCHA_TOKEN not in response.text
+    assert_service_called_once(route_material)

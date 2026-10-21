@@ -11,6 +11,7 @@ from pydantic_settings import SettingsConfigDict
 
 import app.account_sign_in as account_sign_in
 from app.account_sign_in import (
+    AccountSignInCaptchaRejected,
     AccountSignInRejected,
     AccountSignInUnavailable,
     SignedInAccountTokens,
@@ -70,6 +71,7 @@ def run_sign_in(
     *,
     email: str = EMAIL,
     password: str = PASSWORD,
+    captcha_token: str | None = None,
 ) -> SignedInAccountTokens:
     async def run() -> SignedInAccountTokens:
         async with httpx2.AsyncClient(
@@ -83,6 +85,7 @@ def run_sign_in(
                 SecretStr(password),
                 settings=settings,
                 client=client,
+                captcha_token=(SecretStr(captcha_token) if captcha_token is not None else None),
             )
 
     return asyncio.run(run())
@@ -590,3 +593,206 @@ def test_response_read_failure_closes_response_without_retry(
     assert str(caught.value) == "Account sign-in is unavailable."
     assert response.is_closed
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "captcha_token",
+    ["synthetic-captcha-proof", "x" * 2048],
+    ids=["ordinary", "maximum-length"],
+)
+def test_forwards_captcha_once_in_provider_security_metadata(
+    settings: Settings,
+    captcha_token: str,
+) -> None:
+    requests: list[httpx2.Request] = []
+    response = response_for(
+        {
+            "access_token": ACCESS_TOKEN,
+            "refresh_token": REFRESH_TOKEN,
+            "token_type": "bearer",
+        }
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return response
+
+    result = run_sign_in(
+        settings,
+        handler,
+        captcha_token=captcha_token,
+    )
+
+    assert len(requests) == 1
+    request = requests[0]
+
+    assert request.method == "POST"
+    assert str(request.url) == SIGN_IN_URL
+    assert json.loads(request.content) == {
+        "email": EMAIL,
+        "password": PASSWORD,
+        "gotrue_meta_security": {
+            "captcha_token": captcha_token,
+        },
+    }
+    assert "authorization" not in request.headers
+    assert result.access_token.get_secret_value() == ACCESS_TOKEN
+    assert result.refresh_token.get_secret_value() == REFRESH_TOKEN
+    assert captcha_token not in repr(result)
+    assert response.is_closed
+
+
+@pytest.mark.parametrize(
+    "captcha_token",
+    [
+        "",
+        "x" * 2049,
+        "has space",
+        "line\nbreak",
+        "é",
+        "\ud800",
+    ],
+    ids=[
+        "empty",
+        "too-long",
+        "space",
+        "newline",
+        "non-ascii",
+        "surrogate",
+    ],
+)
+def test_invalid_captcha_prevents_provider_requests(
+    settings: Settings,
+    captcha_token: str,
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        raise AssertionError("No provider request should be made.")
+
+    with pytest.raises(AccountSignInRejected) as caught:
+        run_sign_in(
+            settings,
+            handler,
+            captcha_token=captcha_token,
+        )
+
+    assert str(caught.value) == "Sign-in was rejected."
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "error_fields",
+    [
+        {"error_code": "captcha_failed"},
+        {"code": "captcha_failed"},
+        {"code": 400, "error_code": "captcha_failed"},
+        {"code": "captcha_failed", "error_code": "captcha_failed"},
+    ],
+    ids=["legacy", "current", "legacy-http-code", "matching-codes"],
+)
+@pytest.mark.parametrize(
+    "captcha_token",
+    [None, "synthetic-captcha-proof"],
+    ids=["missing-proof", "supplied-proof"],
+)
+def test_captcha_rejection_is_distinct_generic_and_not_retried(
+    settings: Settings,
+    error_fields: dict[str, object],
+    captcha_token: str | None,
+) -> None:
+    requests: list[httpx2.Request] = []
+    response = response_for(
+        {
+            **error_fields,
+            "msg": "Private provider details and submitted credentials",
+        },
+        status_code=400,
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return response
+
+    with pytest.raises(AccountSignInCaptchaRejected) as caught:
+        run_sign_in(
+            settings,
+            handler,
+            captcha_token=captcha_token,
+        )
+
+    assert str(caught.value) == "Human verification was rejected."
+    assert len(requests) == 1
+    assert response.is_closed
+
+
+@pytest.mark.parametrize(
+    "error_fields",
+    [
+        {
+            "code": "unexpected_provider_error",
+            "msg": "captcha_failed",
+        },
+        {
+            "code": "captcha_failed",
+            "error_code": "invalid_credentials",
+        },
+        {
+            "code": "captcha_failed",
+            "error_code": 123,
+        },
+        {"code": 123},
+        {"error_code": ["captcha_failed"]},
+    ],
+    ids=[
+        "message-is-not-a-code",
+        "conflicting-codes",
+        "malformed-legacy-code",
+        "numeric-code-only",
+        "array-code",
+    ],
+)
+def test_untrusted_error_codes_remain_unavailable(
+    settings: Settings,
+    error_fields: dict[str, object],
+) -> None:
+    requests: list[httpx2.Request] = []
+    response = response_for(error_fields, status_code=400)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return response
+
+    with pytest.raises(AccountSignInUnavailable) as caught:
+        run_sign_in(settings, handler)
+
+    assert str(caught.value) == "Account sign-in is unavailable."
+    assert len(requests) == 1
+    assert response.is_closed
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_server_or_rate_limit_failure_is_not_a_captcha_rejection(
+    settings: Settings,
+    status_code: int,
+) -> None:
+    requests: list[httpx2.Request] = []
+    response = response_for(
+        {"error_code": "captcha_failed"},
+        status_code=status_code,
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return response
+
+    with pytest.raises(AccountSignInUnavailable):
+        run_sign_in(
+            settings,
+            handler,
+            captcha_token="synthetic-captcha-proof",
+        )
+
+    assert len(requests) == 1
+    assert response.is_closed

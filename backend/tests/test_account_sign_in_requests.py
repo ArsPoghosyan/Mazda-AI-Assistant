@@ -219,3 +219,99 @@ def test_rejects_unpaired_unicode_surrogates(
     )
 
     assert_error(response, harness, 400, "Invalid sign-in request.")
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["synthetic-captcha-proof", "x" * 2048],
+    ids=["ordinary", "maximum-length"],
+)
+def test_accepts_and_masks_captcha_token(
+    harness: ParserHarness,
+    token: str,
+) -> None:
+    response = harness.client.post(
+        "/parse",
+        json={
+            "email": EMAIL,
+            "password": PASSWORD,
+            "captcha_token": token,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert len(harness.parsed) == 1
+
+    credentials = harness.parsed[0]
+    assert credentials.captcha_token is not None
+    assert credentials.captcha_token.get_secret_value() == token
+    assert token not in repr(credentials)
+    assert token not in response.text
+
+
+@pytest.mark.parametrize(
+    "extra_fields",
+    [{}, {"captcha_token": None}],
+    ids=["omitted", "null"],
+)
+def test_allows_absent_captcha_during_provider_integration(
+    harness: ParserHarness,
+    extra_fields: dict[str, object],
+) -> None:
+    response = harness.client.post(
+        "/parse",
+        json={
+            "email": EMAIL,
+            "password": PASSWORD,
+            **extra_fields,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(harness.parsed) == 1
+    assert harness.parsed[0].captcha_token is None
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "x" * 2049,
+        123,
+        True,
+        ["synthetic-proof"],
+        "has space",
+        "line\nbreak",
+        "é",
+        "\ud800",
+    ],
+    ids=[
+        "empty",
+        "too-long",
+        "numeric",
+        "boolean",
+        "array",
+        "space",
+        "newline",
+        "non-ascii",
+        "surrogate",
+    ],
+)
+def test_rejects_invalid_captcha_without_echoing_input(
+    harness: ParserHarness,
+    token: object,
+) -> None:
+    payload = {
+        "email": EMAIL,
+        "password": PASSWORD,
+        "captcha_token": token,
+    }
+
+    response = harness.client.post(
+        "/parse",
+        content=json.dumps(payload).encode("ascii"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert_error(response, harness, 400, "Invalid sign-in request.")

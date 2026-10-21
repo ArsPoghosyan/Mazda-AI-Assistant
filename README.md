@@ -74,8 +74,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - An internal sign-in service connecting that adapter to verified, encrypted
   account-session creation, with results returned only after database commit.
 - A default-disabled HTTP sign-in endpoint with bounded JSON credential parsing,
-  trusted-Origin checks, a total deadline, and cookie issuance after commit,
-  verified by offline route tests and local PostgreSQL integration tests.
+  trusted-Origin checks, a required CAPTCHA proof forwarded to Supabase Auth,
+  a total deadline, and cookie issuance after commit, verified by offline route
+  tests and local PostgreSQL integration tests.
 - A default-disabled current-session sign-out endpoint with hashed-cookie deletion,
   cookie clearing after commit, replay rejection, and PostgreSQL isolation and
   rollback tests. Provider-session revocation is separate and not implemented.
@@ -331,9 +332,11 @@ clear application state. The client disables redirects and environment-provided
 proxy settings and allows at most two connections.
 
 The guest-session service calls this verifier before new-session creation, using
-proofs supplied by the development frontend widget. Account sign-in/sign-up CAPTCHA
-integration is not implemented. Public access still requires abuse controls and
-production guest-route/cookie forwarding.
+proofs supplied by the development frontend widget. Account sign-in instead sends
+a separate proof to Supabase Auth for verification during the password exchange;
+it does not call this guest verifier first. Account sign-up and frontend account
+CAPTCHA integration are not implemented. Public access still requires abuse
+controls and production guest-route/cookie forwarding.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
 contents, exact hostname/action matching, rejection versus unavailability,
@@ -591,33 +594,52 @@ policy. Returned access and refresh tokens must be nonempty printable ASCII,
 at most 8,192 characters each, with a bearer token type. `SignedInAccountTokens`
 keeps both values masked in its ordinary representation.
 
+An optional masked `captcha_token` accepts 1–2,048 printable ASCII characters
+without whitespace. When supplied, it is sent unchanged in
+`gotrue_meta_security.captcha_token` in the same password-exchange request. When
+omitted, the internal adapter preserves its existing email/password-only body;
+the HTTP route independently requires a proof. The adapter does not verify the
+proof itself or store it in an application session.
+
 Recognized invalid-credential, unconfirmed-email, banned-user, and input-validation
-responses produce the same generic `AccountSignInRejected` error. Missing
-configuration, unknown provider errors, rate limits, server/transport failures,
-timeouts, and malformed responses produce `AccountSignInUnavailable`. Provider
-messages are not included in these errors. Responses close on success, failure,
-and caller cancellation; cancellation propagates to the caller.
+responses produce the same generic `AccountSignInRejected` error. An explicit
+`captcha_failed` code produces `AccountSignInCaptchaRejected`, a distinct subclass.
+Both legacy `error_code` and newer string `code` responses are supported; a
+numeric legacy HTTP `code` is not treated as an error identifier. Conflicting
+string codes and malformed or unknown codes remain unavailable. Classification
+does not search provider messages for keywords.
+
+Missing configuration, unknown provider errors, rate limits, server/transport
+failures, timeouts, and malformed responses produce `AccountSignInUnavailable`.
+In particular, a 429 or server-error response remains unavailable even if its
+body contains `captcha_failed`. Provider messages are not included in these
+errors. Responses close on success, failure, and caller cancellation;
+cancellation propagates to the caller.
 
 The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. CAPTCHA/abuse integration, signup, email verification, password recovery,
+default. Additional abuse controls, signup, email verification, password recovery,
 Google sign-in, and frontend sign-in remain unimplemented.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
 provider error classification, malformed/missing response fields, token and
 response-size boundaries, response cleanup, transport failures, total deadlines,
-and cancellation. They require no live Supabase requests or database access.
+and cancellation. CAPTCHA cases cover exact metadata forwarding, input bounds,
+legacy/current error formats, generic rejection, conflicting codes, and absence
+of retries. They require no live Supabase requests or database access.
 
 ## Internal sign-in service
 
 `sign_in_account` checks that the Auth issuer, publishable key, session encryption
 key, and signing-key cache are configured before sending credentials. It performs
-the provider password exchange before opening a database transaction, then passes
-the token pair directly to `create_account_session`. That existing helper verifies
-the access JWT, creates or reuses the verified account profile, encrypts provider
+the provider password exchange, forwarding any supplied masked CAPTCHA proof
+unchanged, before opening a database transaction. CAPTCHA rejection propagates
+without opening a transaction. The service then passes the token pair directly
+to `create_account_session`. That existing helper verifies the access JWT,
+creates or reuses the verified account profile, encrypts provider
 credentials, and stores a hash of the new random browser token. Signing-key
 retrieval may still occur during JWT verification inside the transaction.
 
@@ -650,7 +672,8 @@ failure during commit and make no live Supabase requests.
 sign-in service. It creates an application session and issues its opaque browser
 cookie only after successful database commit. `ACCOUNT_SIGN_IN_API_ENABLED`
 defaults to `false` and is independent of `ACCOUNT_SESSION_API_ENABLED`. Keep
-sign-in disabled until Turnstile/abuse controls and deployment checks are ready.
+sign-in disabled until Supabase CAPTCHA enforcement, additional abuse controls,
+and deployment checks are ready.
 The frontend does not call this route, and the Cloudflare Pages proxy still
 forwards health requests only.
 
@@ -662,12 +685,29 @@ ACCOUNT_SIGN_IN_TIMEOUT_SECONDS=15
 The route requires exactly one trusted Origin before reading credentials. The
 feature flag and required engine, HTTP client, and signing-key cache are also
 checked before body parsing. Enabled requests require `application/json` and a
-JSON object containing only `email` and `password`. Credentials use `SecretStr`,
-retain their exact values, and must be representable as UTF-8. Email length is
-1–320 characters; password length is 1–1,024 characters. The parser enforces a
-16 KiB body limit against received bytes, including when `Content-Length` is
-missing or inaccurate. These are structural/resource checks rather than a full
-email-syntax or password-strength policy.
+JSON object containing `email`, `password`, and `captcha_token`, with no extra
+fields. Credentials use `SecretStr`, retain their exact values, and must be
+representable as UTF-8. Email length is 1–320 characters; password length is
+1–1,024 characters. A supplied proof is masked and must contain 1–2,048 printable
+ASCII characters without whitespace. The parser represents omitted/null proofs
+as `None` so the route can return a verification-specific 403 before calling the
+sign-in service. The parser enforces a 16 KiB body limit against received bytes,
+including when `Content-Length` is missing or inaccurate. These are structural
+and resource checks rather than full email-syntax or password-strength policy.
+
+Enable CAPTCHA protection in the Supabase project's Authentication settings,
+select Turnstile, and configure the secret matching the frontend widget's site
+key. This is a project-wide Auth setting and also affects relevant signup and
+password-reset flows. The Supabase publishable key is separate from both
+Turnstile keys. The application's `TURNSTILE_SECRET_KEY` configures guest
+Siteverify requests; it does not enable CAPTCHA protection in Supabase.
+
+The account route checks proof presence, while Supabase verifies authenticity
+during the password exchange. Presence alone does not prove successful human
+verification. Do not first redeem an account proof through the guest verifier:
+Turnstile proofs are single-use. Obtain a fresh proof after any attempted sign-in,
+including credential rejection or an uncertain provider result. See Supabase's
+[CAPTCHA setup](https://supabase.com/docs/guides/auth/auth-captcha).
 
 The configurable total deadline defaults to 15 seconds, accepts 1–30 seconds,
 and covers body reading, provider exchange, JWT verification, and database
@@ -680,9 +720,10 @@ idle deadline. Responses use `Cache-Control: no-store`.
 
 | Condition | HTTP status |
 | --- | --- |
-| Invalid JSON, missing/extra fields, or invalid credential values | 400 |
+| Invalid JSON, missing email/password, extra fields, or invalid supplied values | 400 |
 | Recognized provider credential rejection | 401 |
 | Missing, duplicate, null, or untrusted Origin | 403 |
+| Omitted/null CAPTCHA proof, or explicit provider CAPTCHA rejection | 403 with `X-Account-Verification: required` |
 | Body over 16 KiB | 413 |
 | Missing or unsupported content type | 415 |
 | Disabled/unconfigured route, provider/verification/database failure, duplicate provider session, or timeout | 503 |
@@ -691,6 +732,8 @@ Input errors use generic messages instead of Pydantic validation details that
 could expose submitted credentials. Rejections do not reveal provider error
 messages or send a Bearer authentication challenge. Controlled failures do not
 set or clear an existing account cookie, and sign-in is not automatically retried.
+Only missing/rejected CAPTCHA verification sets `X-Account-Verification: required`;
+Origin failures, ordinary credential rejection, and unavailable services do not.
 The route does not revoke an earlier session when a new sign-in succeeds.
 Database rollback cannot undo provider-side sign-in, and uncertain commit outcomes
 remain unresolved as described above.
@@ -698,12 +741,17 @@ remain unresolved as described above.
 Offline parser and route tests cover credential preservation and masking, invalid
 documents and fields, extra-field rejection, body boundaries, unpaired Unicode
 surrogates, Origin/feature/resource guards, cookie policy, generic failures, and
-actual deadline cancellation during body reading and service execution. Two
-opt-in PostgreSQL HTTP cases exercise actual verification and storage using
+actual deadline cancellation during body reading and service execution. They
+also cover proof forwarding, missing-proof guards, and distinct CAPTCHA response
+headers without changing cookies. Two opt-in PostgreSQL HTTP cases exercise
+actual verification and storage using
 generated ES256 credentials and mocked provider/JWKS responses. They verify that
 the returned cookie matches the committed token hash, or that a deliberate SQL
 error before commit leaves neither new profile nor session visible and issues no
-cookie. Tests require no live Supabase requests.
+cookie, while asserting that the proof reaches the provider exchange unchanged.
+Tests require no live Supabase requests. They do not establish successful live
+CAPTCHA-protected account sign-in; that browser flow remains to be implemented
+and verified.
 
 ## Account sign-out endpoint
 

@@ -26,6 +26,7 @@ from app.account_sessions import (
     CreatedAccountSession,
 )
 from app.account_sign_in import (
+    AccountSignInCaptchaRejected,
     AccountSignInRejected,
     AccountSignInUnavailable,
     SignedInAccountTokens,
@@ -148,7 +149,11 @@ def material(monkeypatch: pytest.MonkeyPatch) -> SignInMaterial:
     )
 
 
-async def invoke(material: SignInMaterial) -> CreatedAccountSession:
+async def invoke(
+    material: SignInMaterial,
+    *,
+    captcha_token: SecretStr | None = None,
+) -> CreatedAccountSession:
     return await service.sign_in_account(
         cast(AsyncEngine, material.engine),
         EMAIL,
@@ -156,6 +161,7 @@ async def invoke(material: SignInMaterial) -> CreatedAccountSession:
         settings=material.settings,
         client=material.client,
         key_cache=material.key_cache,
+        captcha_token=captcha_token,
     )
 
 
@@ -180,6 +186,7 @@ async def test_returns_session_after_commit_and_connection_release(
         PASSWORD,
         settings=material.settings,
         client=material.client,
+        captcha_token=None,
     )
     material.create_session.assert_awaited_once_with(
         material.connection,
@@ -308,3 +315,69 @@ async def test_commit_failure_prevents_returning_session(
     material.engine.begin.assert_called_once_with()
     material.create_session.assert_awaited_once()
     material.commit.assert_awaited_once_with()
+
+
+async def test_forwards_captcha_without_persisting_it(
+    material: SignInMaterial,
+) -> None:
+    proof = SecretStr("synthetic-captcha-proof")
+
+    result = await invoke(material, captcha_token=proof)
+
+    assert result is material.created
+    assert material.events == [
+        "provider",
+        "begin",
+        "create",
+        "commit",
+        "release",
+    ]
+
+    material.sign_in.assert_awaited_once_with(
+        EMAIL,
+        PASSWORD,
+        settings=material.settings,
+        client=material.client,
+        captcha_token=proof,
+    )
+
+    # Session storage receives provider credentials, not the CAPTCHA proof.
+    material.create_session.assert_awaited_once_with(
+        material.connection,
+        material.settings,
+        access_token=material.tokens.access_token,
+        refresh_token=material.tokens.refresh_token,
+        key_cache=material.key_cache,
+    )
+    material.commit.assert_awaited_once_with()
+    assert proof.get_secret_value() not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "captcha_token",
+    [None, SecretStr("synthetic-captcha-proof")],
+    ids=["missing-proof", "supplied-proof"],
+)
+async def test_captcha_rejection_prevents_database_work(
+    material: SignInMaterial,
+    captcha_token: SecretStr | None,
+) -> None:
+    failure = AccountSignInCaptchaRejected("Human verification was rejected.")
+    material.sign_in.side_effect = failure
+
+    with pytest.raises(AccountSignInCaptchaRejected) as caught:
+        await invoke(material, captcha_token=captcha_token)
+
+    assert caught.value is failure
+    assert material.events == []
+
+    material.sign_in.assert_awaited_once_with(
+        EMAIL,
+        PASSWORD,
+        settings=material.settings,
+        client=material.client,
+        captcha_token=captcha_token,
+    )
+    material.engine.begin.assert_not_called()
+    material.create_session.assert_not_awaited()
+    material.commit.assert_not_awaited()

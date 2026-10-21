@@ -14,6 +14,7 @@ _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_TOKEN_CHARACTERS = 8192
 _MAX_EMAIL_CHARACTERS = 320
 _MAX_PASSWORD_CHARACTERS = 1024
+_MAX_CAPTCHA_CHARACTERS = 2048
 
 _REJECTED_CODES = frozenset(
     {
@@ -27,6 +28,10 @@ _REJECTED_CODES = frozenset(
 
 class AccountSignInRejected(ValueError):
     """Credentials could not establish a provider session."""
+
+
+class AccountSignInCaptchaRejected(AccountSignInRejected):
+    """The provider could not verify the supplied CAPTCHA proof."""
 
 
 class AccountSignInUnavailable(RuntimeError):
@@ -72,6 +77,7 @@ async def sign_in_with_password(
     *,
     settings: Settings,
     client: httpx2.AsyncClient,
+    captcha_token: SecretStr | None = None,
 ) -> SignedInAccountTokens:
     """Exchange credentials once using a caller-owned HTTP client.
 
@@ -86,6 +92,20 @@ async def sign_in_with_password(
 
     raw_email = _input_value(email, _MAX_EMAIL_CHARACTERS)
     raw_password = _input_value(password, _MAX_PASSWORD_CHARACTERS)
+    request_payload: dict[str, object] = {
+        "email": raw_email,
+        "password": raw_password,
+    }
+
+    if captcha_token is not None:
+        raw_captcha = _input_value(captcha_token, _MAX_CAPTCHA_CHARACTERS)
+
+        if any(ord(character) < 33 or ord(character) > 126 for character in raw_captcha):
+            raise AccountSignInRejected("Sign-in was rejected.")
+
+        request_payload["gotrue_meta_security"] = {
+            "captcha_token": raw_captcha,
+        }
     body = bytearray()
 
     try:
@@ -98,10 +118,7 @@ async def sign_in_with_password(
                     "Accept": "application/json",
                     "Accept-Encoding": "identity",
                 },
-                json={
-                    "email": raw_email,
-                    "password": raw_password,
-                },
+                json=request_payload,
                 auth=None,
                 follow_redirects=False,
                 timeout=_SIGN_IN_TIMEOUT_SECONDS,
@@ -140,9 +157,24 @@ async def sign_in_with_password(
         raise AccountSignInUnavailable("Account sign-in is unavailable.")
 
     if status_code != 200:
-        error_code = payload.get("error_code")
-        if isinstance(error_code, str) and error_code in _REJECTED_CODES:
-            raise AccountSignInRejected("Sign-in was rejected.")
+        legacy_code = payload.get("error_code")
+        current_code = payload.get("code")
+        error_code: object = None
+
+        if isinstance(legacy_code, str):
+            if isinstance(current_code, str) and current_code != legacy_code:
+                raise AccountSignInUnavailable("Account sign-in is unavailable.")
+
+            error_code = legacy_code
+        elif legacy_code is None:
+            error_code = current_code
+
+        if isinstance(error_code, str):
+            if error_code == "captcha_failed":
+                raise AccountSignInCaptchaRejected("Human verification was rejected.")
+
+            if error_code in _REJECTED_CODES:
+                raise AccountSignInRejected("Sign-in was rejected.")
 
         raise AccountSignInUnavailable("Account sign-in is unavailable.")
 

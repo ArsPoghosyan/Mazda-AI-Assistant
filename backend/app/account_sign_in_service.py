@@ -18,6 +18,7 @@ async def sign_in_account(
     settings: Settings,
     client: httpx2.AsyncClient,
     key_cache: AccountKeyCache | None,
+    captcha_token: SecretStr | None = None,
 ) -> CreatedAccountSession:
     """Return a browser credential only after successful database commit.
 
@@ -38,6 +39,7 @@ async def sign_in_account(
         password,
         settings=settings,
         client=client,
+        captcha_token=captcha_token,
     )
 
     async with engine.begin() as connection:

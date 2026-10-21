@@ -37,6 +37,7 @@ ORIGIN = "https://app.example.test"
 COOKIE_NAME = "__Host-askm6_account"
 EMAIL = "owner@example.test"
 PASSWORD = "  synthetic-password-é  "
+CAPTCHA_TOKEN = "synthetic-account-captcha-proof"
 OLD_BROWSER_TOKEN = "B" * 43
 
 
@@ -149,6 +150,9 @@ def test_http_sign_in_obeys_commit_boundary(
         assert json.loads(request.content) == {
             "email": EMAIL,
             "password": PASSWORD,
+            "gotrue_meta_security": {
+                "captcha_token": CAPTCHA_TOKEN,
+            },
         }
 
         sign_in_requests.append(request)
@@ -227,7 +231,11 @@ def test_http_sign_in_obeys_commit_boundary(
         ) as client:
             response = client.post(
                 "/api/v1/account/sign-in",
-                json={"email": EMAIL, "password": PASSWORD},
+                json={
+                    "email": EMAIL,
+                    "password": PASSWORD,
+                    "captcha_token": CAPTCHA_TOKEN,
+                },
                 headers={
                     "Origin": ORIGIN,
                     "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
