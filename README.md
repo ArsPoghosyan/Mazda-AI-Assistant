@@ -94,10 +94,13 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   required CAPTCHA input, generic outcomes, and mocked failure/cancellation tests.
 - A default-disabled registration HTTP endpoint with trusted-Origin checks, a
   total deadline, and generic acknowledgements. It issues no application cookies;
-  the confirmation HTTP endpoint and registration interface remain unimplemented.
+  the registration interface remains unimplemented.
 - Internal email-code confirmation parsing and a bounded Supabase verification
   adapter, with masked credentials, response validation, and mocked HTTP tests.
   Provider session credentials are discarded; application sign-in remains separate.
+- A default-disabled confirmation HTTP endpoint with trusted-Origin and resource
+  checks, a total deadline, and cookie-free responses. Mocked HTTP tests cover
+  confirmation, malformed input, provider failures, configuration gates, and deadlines.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -608,7 +611,7 @@ tests make no database or provider requests and do not enable account endpoints.
 Registration currently consists of configuration, bounded credential parsing,
 provider-response interpretation, and an internal `sign_up_with_password` adapter.
 `POST /api/v1/account/sign-up` connects these helpers without creating an
-application session. The confirmation HTTP endpoint and sign-up UI are not implemented.
+application session. The sign-up and email-confirmation interfaces are not implemented.
 `ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The route's total timeout setting,
 `ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
 it does not change the adapter's independent five-second provider deadline.
@@ -663,10 +666,11 @@ cookie preservation, and cancellation of stalled body/provider work.
 
 Email confirmation currently provides configuration, bounded JSON parsing,
 provider-response interpretation, and the internal `confirm_email_code` adapter.
-There is no confirmation HTTP route or frontend interface yet. The independent
-`ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED` flag defaults to false. The future route's
-total timeout setting, `ACCOUNT_EMAIL_CONFIRMATION_TIMEOUT_SECONDS`, defaults to
-15 seconds and accepts one to 30; the adapter has its own five-second deadline.
+`POST /api/v1/account/confirm-email` connects these helpers without issuing an
+application session or cookie. The frontend confirmation interface is not implemented.
+The independent `ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED` flag defaults to false.
+The route's total timeout setting, `ACCOUNT_EMAIL_CONFIRMATION_TIMEOUT_SECONDS`,
+defaults to 15 seconds and accepts one to 30; the adapter has its own five-second deadline.
 
 The parser requires only `email` and `code`, stored as masked `SecretStr` fields.
 It accepts an email of 1–320 characters representable as UTF-8 and a string of
@@ -697,11 +701,28 @@ session, write application database rows, or issue a browser cookie. The planned
 flow requires a separate application sign-in after confirmation. A timeout or
 unusable response does not undo provider-side confirmation or code consumption.
 
+The HTTP endpoint requires an exact trusted Origin before reading credentials,
+then checks its feature flag and provider configuration. Its total deadline covers
+body reading and provider work. Successful responses contain only
+`{"status":"confirmed","message":"Email confirmed. You can now sign in."}`.
+Invalid input and known provider rejections return 400, an untrusted Origin 403,
+an oversized body 413, and an unsupported media type 415. Disabled/incomplete
+configuration, provider unavailability, and timeouts return a generic 503. These
+responses use `Cache-Control: no-store` and never set or clear guest/account cookies.
+Confirmation requires no application database connection, session-encryption key,
+or signing-key lookup. It does not automatically retry a code submission.
+
 Offline tests use synthetic credentials, in-memory parser endpoints, and mocked
 provider HTTP. They cover feature defaults, timeout bounds, input masking and size
 limits, response classification, exact request forwarding, redirects, transport
 errors, cumulative response bounds, stalled requests/streams, cancellation, and
 cleanup. No live confirmation requests or email delivery checks have been made.
+Route tests use the real adapter with mocked provider HTTP to cover successful
+confirmation, exact credential forwarding, unchanged cookie headers, and
+Origin/feature/resource gates. They also check malformed input, rejected
+verification types, provider rejection/outage handling without retries, malformed
+success responses, unsupported methods, and cancellation of stalled body/provider
+work at the total deadline.
 Keep public registration and confirmation disabled until their complete flows,
 abuse controls, email configuration, and deployment behavior have been validated.
 
@@ -747,7 +768,7 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, the signup UI, the email-confirmation endpoint,
+default. Additional abuse controls, the signup and email-confirmation interfaces,
 password recovery, and Google sign-in remain unimplemented. The development-only
 frontend sign-in flow is described below.
 
