@@ -41,6 +41,12 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    account_sign_in_api_enabled: bool = False
+    account_sign_in_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
 
     @field_validator("supabase_auth_publishable_key")
     @classmethod

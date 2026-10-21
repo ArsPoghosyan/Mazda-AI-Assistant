@@ -72,9 +72,12 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   results, generic provider errors, and mocked HTTP/timeout/cancellation tests.
 - An internal sign-in service connecting that adapter to verified, encrypted
   account-session creation, with results returned only after database commit.
+- A default-disabled HTTP sign-in endpoint with bounded JSON credential parsing,
+  trusted-Origin checks, a total deadline, and cookie issuance after commit,
+  verified by offline route tests and local PostgreSQL integration tests.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Browser account sign-in/sign-up, chat, conversation persistence, vehicle selection,
+Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
 retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
@@ -334,8 +337,9 @@ initial response is lost before the browser receives its credential.
 The refresh token must come from the same trusted provider authentication response.
 The service validates its format but does not independently verify refresh-token
 ownership. The internal sign-in service connects the provider adapter to this
-creation flow, but no HTTP sign-in endpoint is implemented. The session-check
-endpoint authenticates existing sessions only.
+creation flow, and a default-disabled HTTP sign-in endpoint issues its browser
+cookie after successful commit. The separate session-check endpoint authenticates
+existing sessions only.
 
 Local PostgreSQL tests cover encrypted storage, verified identity, configurable
 deadlines, account-profile reuse, invalid inputs, expiry after initial verification,
@@ -416,9 +420,9 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-HTTP account sign-in/session creation, logout, automated session cleanup, and
-encryption-key rotation are not implemented. Cookie-authenticated session checking
-is available through the default-disabled endpoint described below.
+Logout, automated session cleanup, and encryption-key rotation are not implemented.
+HTTP sign-in/session creation and cookie-authenticated session checking are
+available through the separate default-disabled endpoints described below.
 Provider identity and expiry require JWT verification in addition to ciphertext
 decryption. Keep real encryption keys in ignored backend environment files or a
 server-side secret manager, never in frontend variables or Git. Retain the key
@@ -472,8 +476,9 @@ and caller cancellation; cancellation propagates to the caller.
 The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
-Public sign-in routes, CAPTCHA/abuse integration, signup, email verification,
-password recovery, Google sign-in, and frontend sign-in remain unimplemented.
+The HTTP sign-in route described below connects that flow but is disabled by
+default. CAPTCHA/abuse integration, signup, email verification, password recovery,
+Google sign-in, and frontend sign-in remain unimplemented.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
@@ -502,7 +507,8 @@ A database rollback cannot undo a successful provider sign-in. Provider-session
 cleanup and recovery from an uncertain database commit are not implemented here;
 callers must not assume that failure means the provider created no session.
 The provider adapter's deadline does not bound the entire service operation.
-Public HTTP integration still needs a total request deadline and abuse controls.
+The HTTP sign-in route adds an outer deadline; public enablement still requires
+abuse controls and deployment checks.
 
 Unit tests cover configuration preflight, operation ordering, exact token-pair
 forwarding, rejection, verification/persistence failures, cancellation, and commit
@@ -512,6 +518,67 @@ flow. They confirm committed encrypted credentials and hashed browser tokens, or
 rollback of both newly inserted profile and session rows after a deliberate SQL
 error before commit completes. These tests do not simulate an uncertain network
 failure during commit and make no live Supabase requests.
+
+## Account sign-in endpoint
+
+`POST /api/v1/account/sign-in` connects bounded credential parsing to the internal
+sign-in service. It creates an application session and issues its opaque browser
+cookie only after successful database commit. `ACCOUNT_SIGN_IN_API_ENABLED`
+defaults to `false` and is independent of `ACCOUNT_SESSION_API_ENABLED`. Keep
+sign-in disabled until Turnstile/abuse controls and deployment checks are ready.
+The frontend does not call this route, and the Cloudflare Pages proxy still
+forwards health requests only.
+
+```dotenv
+ACCOUNT_SIGN_IN_API_ENABLED=false
+ACCOUNT_SIGN_IN_TIMEOUT_SECONDS=15
+```
+
+The route requires exactly one trusted Origin before reading credentials. The
+feature flag and required engine, HTTP client, and signing-key cache are also
+checked before body parsing. Enabled requests require `application/json` and a
+JSON object containing only `email` and `password`. Credentials use `SecretStr`,
+retain their exact values, and must be representable as UTF-8. Email length is
+1–320 characters; password length is 1–1,024 characters. The parser enforces a
+16 KiB body limit against received bytes, including when `Content-Length` is
+missing or inaccurate. These are structural/resource checks rather than a full
+email-syntax or password-strength policy.
+
+The configurable total deadline defaults to 15 seconds, accepts 1–30 seconds,
+and covers body reading, provider exchange, JWT verification, and database
+completion. The provider adapter retains its own five-second deadline. Successful
+responses contain only `user_id`, `expires_at`, and `absolute_expires_at`.
+The browser token is sent only in the account cookie; provider tokens and submitted
+credentials are not returned in JSON. The cookie follows `ACCOUNT_COOKIE_SECURE`,
+uses `HttpOnly`, `SameSite=Lax`, `Path=/`, no Domain attribute, and the committed
+idle deadline. Responses use `Cache-Control: no-store`.
+
+| Condition | HTTP status |
+| --- | --- |
+| Invalid JSON, missing/extra fields, or invalid credential values | 400 |
+| Recognized provider credential rejection | 401 |
+| Missing, duplicate, null, or untrusted Origin | 403 |
+| Body over 16 KiB | 413 |
+| Missing or unsupported content type | 415 |
+| Disabled/unconfigured route, provider/verification/database failure, duplicate provider session, or timeout | 503 |
+
+Input errors use generic messages instead of Pydantic validation details that
+could expose submitted credentials. Rejections do not reveal provider error
+messages or send a Bearer authentication challenge. Controlled failures do not
+set or clear an existing account cookie, and sign-in is not automatically retried.
+The route does not revoke an earlier session when a new sign-in succeeds.
+Database rollback cannot undo provider-side sign-in, and uncertain commit outcomes
+remain unresolved as described above.
+
+Offline parser and route tests cover credential preservation and masking, invalid
+documents and fields, extra-field rejection, body boundaries, unpaired Unicode
+surrogates, Origin/feature/resource guards, cookie policy, generic failures, and
+actual deadline cancellation during body reading and service execution. Two
+opt-in PostgreSQL HTTP cases exercise actual verification and storage using
+generated ES256 credentials and mocked provider/JWKS responses. They verify that
+the returned cookie matches the committed token hash, or that a deliberate SQL
+error before commit leaves neither new profile nor session visible and issues no
+cookie. Tests require no live Supabase requests.
 
 ## Account session endpoint
 
