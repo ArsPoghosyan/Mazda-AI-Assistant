@@ -1,4 +1,4 @@
-"""Account authentication returns only after successful transaction completion."""
+"""Account-session operations return only after successful transaction completion."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -191,3 +191,92 @@ async def test_authentication_failure_rolls_back_without_commit_or_retry(
     material.engine.begin.assert_called_once_with()
     material.authenticate.assert_awaited_once()
     material.commit.assert_not_awaited()
+
+
+@pytest.fixture
+def deletion(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    operation = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        transactions,
+        "delete_account_session",
+        operation,
+    )
+    return operation
+
+
+async def invoke_deletion(material: TransactionMaterial) -> bool:
+    return await transactions.delete_account_session_transaction(
+        cast(AsyncEngine, material.engine),
+        TOKEN,
+    )
+
+
+@pytest.mark.parametrize("deleted", [True, False], ids=["deleted", "unknown"])
+async def test_deletion_returns_only_after_commit_and_connection_release(
+    material: TransactionMaterial,
+    deletion: AsyncMock,
+    deleted: bool,
+) -> None:
+    deletion.return_value = deleted
+
+    result = await invoke_deletion(material)
+    material.events.append("returned")
+
+    assert result is deleted
+    assert material.events == ["begin", "commit", "release", "returned"]
+    material.engine.begin.assert_called_once_with()
+    deletion.assert_awaited_once_with(material.connection, TOKEN)
+    material.commit.assert_awaited_once_with()
+    material.authenticate.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SQLAlchemyError("Synthetic deletion commit failure"),
+        asyncio.CancelledError(),
+    ],
+    ids=["database-error", "cancelled"],
+)
+async def test_deletion_commit_failure_prevents_returning_result(
+    material: TransactionMaterial,
+    deletion: AsyncMock,
+    failure: BaseException,
+) -> None:
+    material.commit.side_effect = failure
+
+    with pytest.raises(type(failure)) as caught:
+        await invoke_deletion(material)
+
+    assert caught.value is failure
+    assert material.events == ["begin", "commit", "release"]
+    material.engine.begin.assert_called_once_with()
+    deletion.assert_awaited_once_with(material.connection, TOKEN)
+    material.commit.assert_awaited_once_with()
+    material.authenticate.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SQLAlchemyError("Synthetic deletion failure"),
+        asyncio.CancelledError(),
+    ],
+    ids=["database-error", "cancelled"],
+)
+async def test_deletion_failure_rolls_back_without_commit_or_retry(
+    material: TransactionMaterial,
+    deletion: AsyncMock,
+    failure: BaseException,
+) -> None:
+    deletion.side_effect = failure
+
+    with pytest.raises(type(failure)) as caught:
+        await invoke_deletion(material)
+
+    assert caught.value is failure
+    assert material.events == ["begin", "rollback", "release"]
+    material.engine.begin.assert_called_once_with()
+    deletion.assert_awaited_once_with(material.connection, TOKEN)
+    material.commit.assert_not_awaited()
+    material.authenticate.assert_not_awaited()

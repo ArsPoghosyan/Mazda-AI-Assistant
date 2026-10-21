@@ -75,6 +75,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled HTTP sign-in endpoint with bounded JSON credential parsing,
   trusted-Origin checks, a total deadline, and cookie issuance after commit,
   verified by offline route tests and local PostgreSQL integration tests.
+- A default-disabled current-session sign-out endpoint with hashed-cookie deletion,
+  cookie clearing after commit, replay rejection, and PostgreSQL isolation and
+  rollback tests. Provider-session revocation is separate and not implemented.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
@@ -420,9 +423,10 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-Logout, automated session cleanup, and encryption-key rotation are not implemented.
-HTTP sign-in/session creation and cookie-authenticated session checking are
-available through the separate default-disabled endpoints described below.
+Provider-session revocation, automated session cleanup, and encryption-key rotation
+are not implemented. HTTP sign-in/session creation, application-session sign-out,
+and cookie-authenticated session checking are available through the separate
+default-disabled endpoints described below.
 Provider identity and expiry require JWT verification in addition to ciphertext
 decryption. Keep real encryption keys in ignored backend environment files or a
 server-side secret manager, never in frontend variables or Git. Retain the key
@@ -579,6 +583,60 @@ generated ES256 credentials and mocked provider/JWKS responses. They verify that
 the returned cookie matches the committed token hash, or that a deliberate SQL
 error before commit leaves neither new profile nor session visible and issues no
 cookie. Tests require no live Supabase requests.
+
+## Account sign-out endpoint
+
+`POST /api/v1/account/sign-out` signs out the current browser's application session.
+`ACCOUNT_SIGN_OUT_API_ENABLED` defaults to `false` and is independent of the
+sign-in and session-check flags. Keep it disabled until endpoint testing and
+deployment checks are complete. The frontend does not call the route, and the
+Cloudflare Pages proxy does not forward it yet.
+
+```dotenv
+ACCOUNT_SIGN_OUT_API_ENABLED=false
+ACCOUNT_SIGN_OUT_TIMEOUT_SECONDS=15
+```
+
+The route requires exactly one trusted Origin before processing the cookie. It
+accepts no client-supplied user or session ID. Missing or malformed account cookies
+produce an empty 204 response and expire the configured account cookie without
+database work. Correctly shaped cookies require an available database engine and
+a successfully completed deletion transaction, including when the session is
+already absent. Repeated sign-out therefore remains harmless and returns 204.
+
+`delete_account_session` hashes the opaque browser credential and deletes only the
+matching `app.account_sessions` row in a caller-owned transaction. It requires no
+JWT verification, provider refresh, publishable key, signing-key cache, or token
+decryption. Expired application sessions can also be deleted. The account profile,
+other sessions for the same account, and sessions for other accounts remain
+unchanged. The transaction wrapper returns only after commit and connection
+release; the route clears the cookie afterward using its existing name, path,
+Secure/HttpOnly/SameSite policy, and no Domain attribute.
+
+All controlled responses use `Cache-Control: no-store`. Invalid Origins return
+403. A disabled route, a missing engine for a correctly shaped cookie, database
+failure, or timeout returns a generic 503 without setting or clearing the cookie.
+The database-operation deadline defaults to 15 seconds, accepts 1–30 seconds,
+and cancels stalled deletion. Failures and cancellation are not automatically
+retried. A timeout or transport error can leave commit outcome uncertain; a later
+request can repeat sign-out rather than assuming the deletion rolled back.
+
+This operation invalidates the application cookie for subsequent database-backed
+session lookups. It makes no Supabase logout request, does not revoke provider
+access/refresh tokens, and does not cancel already authorized in-flight requests.
+The Bearer-only `/api/v1/account/me` endpoint still verifies provider JWTs
+independently. Do not describe this endpoint as provider-wide or all-device logout.
+
+Unit tests cover token guards and hashed query targeting, transaction ordering,
+rollback/error/cancellation propagation, Origin and feature gates, HTTPS and
+development cookie deletion, unknown cookies, unavailable databases, generic
+errors, and real deadline cancellation. Local PostgreSQL tests verify deletion
+of active/expired sessions, idempotence, profile and cross-session isolation, and
+savepoint rollback. Two HTTP integration cases verify committed deletion and
+cookie clearing, rejection of a replayed deleted cookie, and repeated sign-out,
+or restoration of the original rows without cookie clearing after a deliberate
+SQL error before commit. Provider requests are blocked in these HTTP tests;
+uncertain network failures during commit are not simulated.
 
 ## Account session endpoint
 
@@ -787,10 +845,11 @@ account-session storage and encrypted-token round trips, account-deletion cascad
 expiry-safe account-session activity updates, stored-session authentication,
 guarded refresh credential storage, concurrent authentication and recovery,
 authentication transaction commit and rollback, invalid session fields and
-timestamps, and restricted-role permissions. Direct session updates and deletions
-in schema tests do not implement provider-token refresh or logout endpoints.
-Managed account login and conversation ownership are not covered by these
-database tests.
+timestamps, and restricted-role permissions. Additional HTTP tests cover account
+sign-in with mocked provider/JWKS responses and application-session sign-out with
+provider requests blocked, including commit failures and cookie behavior.
+These tests do not exercise live hosted authentication or provider logout.
+Conversation ownership is not implemented or covered by these database tests.
 Keep test administrator credentials separate from the running web service.
 
 From `frontend`:

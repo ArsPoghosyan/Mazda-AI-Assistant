@@ -14,6 +14,7 @@ from app.account_key_fetch import fetch_account_key_set
 from app.account_routes import router as account_router
 from app.account_session_routes import router as account_session_router
 from app.account_sign_in_routes import router as account_sign_in_router
+from app.account_sign_out_routes import router as account_sign_out_router
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
 from app.guest_routes import router as guest_router
@@ -87,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(account_router)
     application.include_router(account_session_router)
     application.include_router(account_sign_in_router)
+    application.include_router(account_sign_out_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
