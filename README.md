@@ -90,6 +90,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled current-session sign-out endpoint with hashed-cookie deletion,
   cookie clearing after commit, replay rejection, and PostgreSQL isolation and
   rollback tests. Provider-session revocation is separate and not implemented.
+- Internal registration parsing and a bounded Supabase sign-up adapter, with
+  required CAPTCHA input, generic outcomes, and mocked failure/cancellation tests.
+  Registration has no HTTP route or frontend interface yet.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -351,8 +354,9 @@ The guest-session service calls this verifier before new-session creation, using
 proofs supplied by the development frontend widget. Account sign-in instead sends
 a separate proof to Supabase Auth for verification during the password exchange;
 it does not call this guest verifier first. The development sign-in form uses the
-`account_sign_in` widget action. Account sign-up is not implemented. Public access still requires abuse
-controls and production guest-route/cookie forwarding.
+`account_sign_in` widget action. The internal registration adapter also forwards
+its proof to Supabase; registration has no HTTP route yet. Public access still
+requires abuse controls and production guest-route/cookie forwarding.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
 contents, exact hostname/action matching, rejection versus unavailability,
@@ -594,6 +598,47 @@ tests cover header policy, malformed tokens, expiry conversion, matching deletio
 scope, and HTTP/HTTPS cookie round trips in an in-memory test application. These
 tests make no database or provider requests and do not enable account endpoints.
 
+## Internal registration foundation
+
+Registration currently consists of configuration, bounded credential parsing,
+provider-response interpretation, and an internal `sign_up_with_password` adapter.
+There is no registration HTTP route, email-confirmation handler, or sign-up UI.
+`ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The future route's timeout setting,
+`ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
+it does not change the adapter's independent five-second provider deadline.
+
+The parser requires JSON containing only `email`, `password`, and `captcha_token`.
+It limits actual streamed input to 16 KiB, masks all three fields with `SecretStr`,
+and preserves password whitespace and Unicode. Email and password have resource
+bounds of 1–320 and 1–1,024 characters; Supabase remains responsible for semantic
+email validation and password policy. CAPTCHA input is required and accepts
+1–2,048 printable ASCII characters without whitespace. Parsing does not verify
+the proof; its caller must enforce the total request deadline.
+
+The adapter submits those credentials once to the configured issuer's `/signup`
+endpoint with the publishable key and `gotrue_meta_security.captcha_token`. It
+uses a caller-owned HTTP client, disables redirects, and accepts only uncompressed
+JSON responses of at most 64 KiB. The five-second deadline covers the provider
+request and response streaming. It performs no automatic retries, and cancellation
+propagates while the response stream is closed.
+
+Accepted response shapes and recognized existing-account errors have the same
+generic outcome. Provider user details are discarded; acceptance does not prove
+that a new account was created or an email was delivered. Responses containing
+session or access/refresh-token fields are rejected. Known input and CAPTCHA
+errors remain distinct, controlled exceptions; rate limits, outages, unknown
+errors, and malformed responses produce generic unavailability without provider
+messages. The adapter does not create an application session, write application
+database rows, or issue browser cookies.
+
+Supabase email confirmation and CAPTCHA protection must be configured before
+registration is enabled. The planned flow uses one password field, an emailed
+verification code, and then the existing sign-in flow. Confirmation, delivery,
+and the complete registration flow have not been validated live. Offline tests
+use synthetic credentials and mocked HTTP to cover parsing, configuration,
+response classification, size limits, redirects, transport failures, deadlines,
+cancellation, and stream cleanup; they send no registration emails.
+
 ## Provider sign-in adapter
 
 The internal `sign_in_with_password` adapter exchanges email/password credentials
@@ -636,9 +681,9 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, signup, email verification, password recovery,
-and Google sign-in remain unimplemented. The development-only frontend sign-in
-flow is described below.
+default. Additional abuse controls, the signup route/UI, email verification,
+password recovery, and Google sign-in remain unimplemented. The development-only
+frontend sign-in flow is described below.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
@@ -1144,7 +1189,8 @@ and recovery with a fresh proof after rejected or unavailable verification.
 Automated tests do not contact Cloudflare or prove live token replay protection.
 
 Public guest access still requires abuse controls and production guest-route/cookie
-forwarding. Frontend managed account login remains unimplemented.
+forwarding. Account sign-in, session restoration, and sign-out are available only
+in development; registration and recovery interfaces remain unimplemented.
 
 ## License
 

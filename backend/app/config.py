@@ -58,6 +58,12 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    account_sign_up_api_enabled: bool = False
+    account_sign_up_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
     turnstile_secret_key: SecretStr | None = None
     turnstile_allowed_hostnames: tuple[str, ...] = ()
     turnstile_timeout_seconds: int = Field(
