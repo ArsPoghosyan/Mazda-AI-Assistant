@@ -92,7 +92,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   rollback tests. Provider-session revocation is separate and not implemented.
 - Internal registration parsing and a bounded Supabase sign-up adapter, with
   required CAPTCHA input, generic outcomes, and mocked failure/cancellation tests.
-  Registration has no HTTP route or frontend interface yet.
+- A default-disabled registration HTTP endpoint with trusted-Origin checks, a
+  total deadline, and generic acknowledgements. It issues no application cookies;
+  email confirmation and the registration interface remain unimplemented.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -355,8 +357,8 @@ proofs supplied by the development frontend widget. Account sign-in instead send
 a separate proof to Supabase Auth for verification during the password exchange;
 it does not call this guest verifier first. The development sign-in form uses the
 `account_sign_in` widget action. The internal registration adapter also forwards
-its proof to Supabase; registration has no HTTP route yet. Public access still
-requires abuse controls and production guest-route/cookie forwarding.
+its proof to Supabase through the default-disabled registration route. Public
+access still requires abuse controls and production guest-route/cookie forwarding.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
 contents, exact hostname/action matching, rejection versus unavailability,
@@ -602,8 +604,9 @@ tests make no database or provider requests and do not enable account endpoints.
 
 Registration currently consists of configuration, bounded credential parsing,
 provider-response interpretation, and an internal `sign_up_with_password` adapter.
-There is no registration HTTP route, email-confirmation handler, or sign-up UI.
-`ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The future route's timeout setting,
+`POST /api/v1/account/sign-up` connects these helpers without creating an
+application session. Email confirmation and the sign-up UI are not implemented.
+`ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The route's total timeout setting,
 `ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
 it does not change the adapter's independent five-second provider deadline.
 
@@ -631,13 +634,27 @@ errors, and malformed responses produce generic unavailability without provider
 messages. The adapter does not create an application session, write application
 database rows, or issue browser cookies.
 
+The HTTP route requires an exact trusted Origin before reading credentials.
+Its total deadline covers body parsing and the provider exchange. Accepted
+outcomes return HTTP 202 with `status: "accepted"` and a generic message that
+does not confirm account existence or email delivery. Invalid/rejected input
+returns 400, oversized bodies 413, and unsupported media types 415. Provider
+CAPTCHA rejection returns 403 with `X-Account-Verification: required`; an Origin
+rejection has no verification marker. Disabled or incomplete configuration,
+provider unavailability, and timeouts return 503. These responses use no-store
+headers and do not set or clear account or guest cookies. Registration does not
+require an application database connection, session-encryption key, or JWT lookup.
+
 Supabase email confirmation and CAPTCHA protection must be configured before
 registration is enabled. The planned flow uses one password field, an emailed
 verification code, and then the existing sign-in flow. Confirmation, delivery,
 and the complete registration flow have not been validated live. Offline tests
 use synthetic credentials and mocked HTTP to cover parsing, configuration,
 response classification, size limits, redirects, transport failures, deadlines,
-cancellation, and stream cleanup; they send no registration emails.
+cancellation, and stream cleanup; they send no registration emails. HTTP tests
+exercise the registered route with mocked provider requests, including Origin
+and feature gates, generic duplicate-account outcomes, credential forwarding,
+cookie preservation, and cancellation of stalled body/provider work.
 
 ## Provider sign-in adapter
 
@@ -681,7 +698,7 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, the signup route/UI, email verification,
+default. Additional abuse controls, the signup UI, email verification,
 password recovery, and Google sign-in remain unimplemented. The development-only
 frontend sign-in flow is described below.
 
