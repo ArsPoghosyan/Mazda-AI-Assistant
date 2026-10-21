@@ -4,6 +4,7 @@ import {
   AccountVerificationRequiredError,
   signInAccount,
   type AccountSignInCredentials,
+  type AccountSessionResponse,
 } from '../api/account'
 
 type SignInState = {
@@ -37,9 +38,11 @@ export function useAccountSignIn() {
     }
   }, [])
 
-  async function start(credentials: AccountSignInCredentials) {
+  async function start(
+    credentials: AccountSignInCredentials,
+  ): Promise<AccountSessionResponse | null> {
     if (!enabled || request.current || state.status === 'ready') {
-      return
+      return null
     }
 
     const controller = new AbortController()
@@ -58,24 +61,26 @@ export function useAccountSignIn() {
     })
 
     try {
-      await signInAccount(credentials, controller.signal)
+      const session = await signInAccount(credentials, controller.signal)
 
-      if (request.current?.controller !== controller) return
+      if (request.current?.controller !== controller) return null
 
       if (controller.signal.aborted) {
         setState({
           status: 'error',
           message: 'Sign-in took too long. Please try again.',
         })
-        return
+        return null
       }
 
       setState({
         status: 'ready',
         message: 'Signed in. Chat is still in development.',
       })
+
+      return session
     } catch (error) {
-      if (request.current?.controller !== controller) return
+      if (request.current?.controller !== controller) return null
 
       let message = 'Sign-in could not be completed. Please try again.'
 
@@ -91,6 +96,8 @@ export function useAccountSignIn() {
         status: 'error',
         message,
       })
+
+      return null
     } finally {
       window.clearTimeout(timeout)
 

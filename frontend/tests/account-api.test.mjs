@@ -3,7 +3,9 @@ import { test } from 'node:test'
 
 import {
   AccountVerificationRequiredError,
+  checkAccountSession,
   signInAccount,
+  signOutAccount,
 } from '../src/api/account.ts'
 
 const credentials = {
@@ -209,5 +211,216 @@ test('preserves cancellation while reading the response body', async (t) => {
       assert.equal(error, reason)
       return true
     },
+  )
+})
+
+test('checks the cookie session once and returns only metadata', async (t) => {
+  const controller = new AbortController()
+
+  const request = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(url, '/api/v1/account/session')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.credentials, 'same-origin')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.redirect, 'error')
+    assert.equal(options.signal, controller.signal)
+    assert.equal(options.body, undefined)
+    assert.equal(options.headers, undefined)
+
+    return Response.json({
+      ...session,
+      access_token: 'unexpected-synthetic-provider-token',
+    })
+  })
+
+  assert.deepEqual(
+    await checkAccountSession(controller.signal),
+    session,
+  )
+  assert.equal(request.mock.callCount(), 1)
+})
+
+test('treats HTTP 401 as signed out without parsing its body', async (t) => {
+  const request = t.mock.method(globalThis, 'fetch', async () =>
+    new Response('Private rejection details', { status: 401 }),
+  )
+
+  assert.equal(await checkAccountSession(), null)
+  assert.equal(request.mock.callCount(), 1)
+})
+
+for (const status of [403, 429, 500, 503]) {
+  test(`session HTTP ${status} remains an error rather than signed out`, async (t) => {
+    const request = t.mock.method(globalThis, 'fetch', async () =>
+      Response.json(
+        { detail: 'Private server details' },
+        {
+          status,
+          headers: { 'X-Account-Verification': 'required' },
+        },
+      ),
+    )
+
+    await assert.rejects(checkAccountSession(), {
+      name: 'Error',
+      message: 'Account session is temporarily unavailable. Please try again.',
+    })
+    assert.equal(request.mock.callCount(), 1)
+  })
+}
+
+for (const [label, body] of [
+  ['null', null],
+  ['invalid identity', { ...session, user_id: 'not-a-uuid' }],
+  [
+    'inconsistent expiry',
+    { ...session, expires_at: '2031-01-01T12:00:00Z' },
+  ],
+]) {
+  test(`rejects session metadata with ${label}`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => Response.json(body))
+
+    await assert.rejects(checkAccountSession(), {
+      name: 'Error',
+      message: 'Unexpected account-session response.',
+    })
+  })
+}
+
+test('rejects malformed session JSON without exposing it', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    new Response('Private malformed response', {
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  )
+
+  await assert.rejects(checkAccountSession(), {
+    name: 'Error',
+    message: 'Unexpected account-session response.',
+  })
+})
+
+test('masks session network failures without retrying', async (t) => {
+  const request = t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('Private transport details')
+  })
+
+  await assert.rejects(checkAccountSession(), {
+    name: 'Error',
+    message: 'Account session could not be checked. Please try again.',
+  })
+  assert.equal(request.mock.callCount(), 1)
+})
+
+test('preserves session request cancellation', async (t) => {
+  const controller = new AbortController()
+  const reason = new DOMException('Cancelled', 'AbortError')
+  controller.abort(reason)
+
+  t.mock.method(globalThis, 'fetch', async () => {
+    throw reason
+  })
+
+  await assert.rejects(
+    checkAccountSession(controller.signal),
+    (error) => {
+      assert.equal(error, reason)
+      return true
+    },
+  )
+})
+
+test('preserves cancellation while reading session metadata', async (t) => {
+  const controller = new AbortController()
+  const reason = new DOMException('Cancelled', 'AbortError')
+  const response = Response.json(session)
+
+  t.mock.method(response, 'json', async () => {
+    controller.abort(reason)
+    throw reason
+  })
+  t.mock.method(globalThis, 'fetch', async () => response)
+
+  await assert.rejects(
+    checkAccountSession(controller.signal),
+    (error) => {
+      assert.equal(error, reason)
+      return true
+    },
+  )
+})
+
+test('signs out once using the cookie without sending a body', async (t) => {
+  const controller = new AbortController()
+
+  const request = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(url, '/api/v1/account/sign-out')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.credentials, 'same-origin')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.redirect, 'error')
+    assert.equal(options.signal, controller.signal)
+    assert.equal(options.body, undefined)
+    assert.equal(options.headers, undefined)
+
+    return new Response(null, { status: 204 })
+  })
+
+  assert.equal(await signOutAccount(controller.signal), undefined)
+  assert.equal(request.mock.callCount(), 1)
+})
+
+for (const status of [200, 401, 403, 500, 503]) {
+  test(`sign-out HTTP ${status} does not count as confirmed success`, async (t) => {
+    const request = t.mock.method(globalThis, 'fetch', async () =>
+      Response.json(
+        { detail: 'private-provider-detail' },
+        { status },
+      ),
+    )
+
+    await assert.rejects(signOutAccount(), (error) => {
+      assert.equal(
+        error.message,
+        'Sign-out could not be completed. Please try again.',
+      )
+      assert.equal(error.cause, undefined)
+      assert.equal(error.message.includes('private-provider-detail'), false)
+      return true
+    })
+
+    assert.equal(request.mock.callCount(), 1)
+  })
+}
+
+test('masks sign-out network failures without retrying', async (t) => {
+  const request = t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('private-network-detail')
+  })
+
+  await assert.rejects(signOutAccount(), (error) => {
+    assert.equal(
+      error.message,
+      'Sign-out could not be completed. Please try again.',
+    )
+    assert.equal(error.cause, undefined)
+    return true
+  })
+
+  assert.equal(request.mock.callCount(), 1)
+})
+
+test('preserves sign-out cancellation', async (t) => {
+  const controller = new AbortController()
+  const cancellation = new DOMException('Aborted', 'AbortError')
+  controller.abort(cancellation)
+
+  t.mock.method(globalThis, 'fetch', async () => {
+    throw cancellation
+  })
+
+  await assert.rejects(
+    signOutAccount(controller.signal),
+    (error) => error === cancellation,
   )
 })

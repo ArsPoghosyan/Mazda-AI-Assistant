@@ -79,6 +79,60 @@ export async function signInAccount(
     throw new Error('Sign-in could not be completed. Please try again.')
   }
 
+  return readAccountSessionResponse(
+    response,
+    'Unexpected sign-in response.',
+    signal,
+  )
+}
+
+export async function checkAccountSession(
+  signal?: AbortSignal,
+): Promise<AccountSessionResponse | null> {
+  let response: Response
+
+  try {
+    response = await fetch('/api/v1/account/session', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+      signal,
+    })
+  } catch (error) {
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === 'AbortError')
+    ) {
+      throw error
+    }
+
+    // eslint-disable-next-line preserve-caught-error -- Discard untrusted transport details at the UI boundary.
+    throw new Error('Account session could not be checked. Please try again.')
+  }
+
+  if (response.status === 401) {
+    return null
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      'Account session is temporarily unavailable. Please try again.',
+    )
+  }
+
+  return readAccountSessionResponse(
+    response,
+    'Unexpected account-session response.',
+    signal,
+  )
+}
+
+async function readAccountSessionResponse(
+  response: Response,
+  invalidMessage: string,
+  signal?: AbortSignal,
+): Promise<AccountSessionResponse> {
   let body: unknown
 
   try {
@@ -92,7 +146,7 @@ export async function signInAccount(
     }
 
     // eslint-disable-next-line preserve-caught-error -- Parser errors may contain private response content.
-    throw new Error('Unexpected sign-in response.')
+    throw new Error(invalidMessage)
   }
 
   if (
@@ -106,7 +160,7 @@ export async function signInAccount(
     !('absolute_expires_at' in body) ||
     typeof body.absolute_expires_at !== 'string'
   ) {
-    throw new Error('Unexpected sign-in response.')
+    throw new Error(invalidMessage)
   }
 
   const expiry = Date.parse(body.expires_at)
@@ -117,12 +171,42 @@ export async function signInAccount(
     !Number.isFinite(absoluteExpiry) ||
     expiry > absoluteExpiry
   ) {
-    throw new Error('Unexpected sign-in response.')
+    throw new Error(invalidMessage)
   }
 
   return {
     user_id: body.user_id,
     expires_at: body.expires_at,
     absolute_expires_at: body.absolute_expires_at,
+  }
+}
+
+export async function signOutAccount(
+  signal?: AbortSignal,
+): Promise<void> {
+  let response: Response
+
+  try {
+    response = await fetch('/api/v1/account/sign-out', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+      signal,
+    })
+  } catch (error) {
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === 'AbortError')
+    ) {
+      throw error
+    }
+
+    // eslint-disable-next-line preserve-caught-error -- Discard untrusted transport details at the UI boundary.
+    throw new Error('Sign-out could not be completed. Please try again.')
+  }
+
+  if (response.status !== 204) {
+    throw new Error('Sign-out could not be completed. Please try again.')
   }
 }

@@ -70,11 +70,12 @@ test('blocks duplicate submissions while pending and after success', async () =>
     wrapper: StrictMode,
   })
 
-  let submission!: Promise<void>
+  let submission!: Promise<AccountSessionResponse | null>
+  let duplicate!: Promise<AccountSessionResponse | null>
 
   act(() => {
     submission = result.current.start(credentials)
-    void result.current.start(credentials)
+    duplicate = result.current.start(credentials)
   })
 
   expect(result.current.status).toBe('loading')
@@ -86,8 +87,9 @@ test('blocks duplicate submissions while pending and after success', async () =>
   expect(call?.[1]).toBeInstanceOf(AbortSignal)
 
   await act(async () => {
+    expect(await duplicate).toBeNull()
     pending.resolve(session)
-    await submission
+    expect(await submission).toEqual(session)
   })
 
   expect(result.current.status).toBe('ready')
@@ -96,7 +98,7 @@ test('blocks duplicate submissions while pending and after success', async () =>
   )
 
   await act(async () => {
-    await result.current.start(credentials)
+    expect(await result.current.start(credentials)).toBeNull()
   })
 
   expect(signInAccount).toHaveBeenCalledTimes(1)
@@ -126,7 +128,7 @@ test.each([
   })
 
   await act(async () => {
-    await result.current.start(credentials)
+    expect(await result.current.start(credentials)).toBeNull()
   })
 
   expect(result.current.status).toBe('error')
@@ -142,7 +144,7 @@ test.each([
   }
 
   await act(async () => {
-    await result.current.start(freshCredentials)
+    expect(await result.current.start(freshCredentials)).toEqual(session)
   })
 
   expect(signInAccount).toHaveBeenCalledTimes(2)
@@ -170,7 +172,7 @@ test('aborts a stalled submission after 15 seconds', async () => {
     wrapper: StrictMode,
   })
 
-  let submission!: Promise<void>
+  let submission!: Promise<AccountSessionResponse | null>
 
   act(() => {
     submission = result.current.start(credentials)
@@ -187,7 +189,7 @@ test('aborts a stalled submission after 15 seconds', async () => {
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1)
-    await submission
+    expect(await submission).toBeNull()
   })
 
   expect(signal?.aborted).toBe(true)
@@ -209,7 +211,7 @@ test('unmount aborts the request and ignores its late result', async () => {
     wrapper: StrictMode,
   })
 
-  let submission!: Promise<void>
+  let submission!: Promise<AccountSessionResponse | null>
 
   act(() => {
     submission = result.current.start(credentials)
@@ -224,7 +226,7 @@ test('unmount aborts the request and ignores its late result', async () => {
 
   await act(async () => {
     pending.resolve(session)
-    await submission
+    expect(await submission).toBeNull()
   })
 
   expect(result.current.status).toBe('loading')
@@ -239,7 +241,7 @@ test('does not submit outside development', async () => {
   })
 
   await act(async () => {
-    await result.current.start(credentials)
+    expect(await result.current.start(credentials)).toBeNull()
   })
 
   expect(result.current.enabled).toBe(false)

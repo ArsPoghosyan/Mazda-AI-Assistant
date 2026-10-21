@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type RefObject } from 'react'
+import type { AccountSessionResponse } from '../api/account'
 import AccountSignInForm from './AccountSignInForm'
 
 type AccountSignInDialogProps = {
@@ -6,6 +7,8 @@ type AccountSignInDialogProps = {
   siteKey: string
   onClose: () => void
   returnFocusRef: RefObject<HTMLButtonElement | null>
+  fallbackFocusRef?: RefObject<HTMLElement | null>
+  onSignedIn?: (session: AccountSessionResponse) => void
 }
 
 export default function AccountSignInDialog({
@@ -13,6 +16,8 @@ export default function AccountSignInDialog({
   siteKey,
   onClose,
   returnFocusRef,
+  fallbackFocusRef,
+  onSignedIn,
 }: AccountSignInDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null)
   const titleId = useId()
@@ -22,6 +27,7 @@ export default function AccountSignInDialog({
     if (!open || !element) return
 
     const returnFocus = returnFocusRef.current
+    const fallbackFocus = fallbackFocusRef?.current
     element.showModal()
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -30,9 +36,12 @@ export default function AccountSignInDialog({
     return () => {
       if (element.open) element.close()
       document.body.style.overflow = previousOverflow
-      returnFocus?.focus()
+      const target = returnFocus?.disabled
+        ? fallbackFocus
+        : returnFocus
+      target?.focus()
     }
-  }, [open, returnFocusRef])
+  }, [open, returnFocusRef, fallbackFocusRef])
 
   function focusEdge(edge: 'first' | 'last') {
     const controls = Array.from(
@@ -75,6 +84,7 @@ export default function AccountSignInDialog({
           siteKey={siteKey}
           titleId={titleId}
           onClose={onClose}
+          onSignedIn={onSignedIn}
         />
       )}
       <span

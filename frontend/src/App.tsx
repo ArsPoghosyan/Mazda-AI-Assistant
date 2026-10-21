@@ -1,9 +1,11 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import AccountSignInDialog from './components/AccountSignInDialog'
 import LandingPage from './components/LandingPage'
+import TurnstileChallenge from './components/TurnstileChallenge'
+import { useAccountSession } from './hooks/useAccountSession'
+import { useAccountSignOut } from './hooks/useAccountSignOut'
 import { useApiHealth, type ApiStatus } from './hooks/useApiHealth'
 import { useGuestSession } from './hooks/useGuestSession'
-import TurnstileChallenge from './components/TurnstileChallenge'
 
 const statusMessages: Record<ApiStatus, string> = {
   checking: 'Checking API connection…',
@@ -13,18 +15,56 @@ const statusMessages: Record<ApiStatus, string> = {
 
 export default function App() {
   const { status, retry } = useApiHealth()
+  const account = useAccountSession()
+  const signOut = useAccountSignOut()
   const guest = useGuestSession()
 
   const [signInOpen, setSignInOpen] = useState(false)
   const signInButton = useRef<HTMLButtonElement>(null)
+  const accessStatus = useRef<HTMLParagraphElement>(null)
+
+  const signingOut = signOut.status === 'loading'
+  const accessMessage =
+    account.status === 'signed_in' &&
+    (signOut.status === 'loading' || signOut.status === 'error')
+      ? signOut.message
+      : account.status === 'signed_out' && guest.message
+        ? guest.message
+        : account.message || guest.message
+
+  useEffect(() => {
+    if (account.status === 'signed_out' && signOut.status === 'ready') {
+      signInButton.current?.focus()
+    }
+  }, [account.status, signOut.status])
+
+  async function handleSignOut() {
+    if (account.status !== 'signed_in') return
+
+    const confirmed = await signOut.start()
+
+    if (confirmed) account.acceptSignOut()
+  }
 
   const signInDisabled =
-    !import.meta.env.DEV ||
+    !account.enabled ||
+    account.status === 'checking' ||
+    account.status === 'signed_in' ||
     guest.status === 'loading' ||
     guest.status === 'verification'
 
+  const accountLabel =
+    account.status === 'checking'
+      ? 'Checking account…'
+      : account.status === 'signed_in'
+        ? 'Signed in'
+        : account.status === 'unavailable'
+          ? 'Retry session check'
+          : 'Sign In'
+
   const guestDisabled =
     signInOpen ||
+    (account.enabled && account.status !== 'signed_out') ||
     !guest.enabled ||
     guest.status === 'loading' ||
     guest.status === 'verification' ||
@@ -49,7 +89,7 @@ export default function App() {
             type="button"
             disabled={guestDisabled}
             aria-busy={guest.status === 'loading'}
-            aria-describedby="guest-status development-notice"
+            aria-describedby="access-status development-notice"
             onClick={() => {
               void guest.start()
             }}
@@ -57,6 +97,7 @@ export default function App() {
           >
             {guestLabel}
           </button>
+
           {guest.enabled && guest.status === 'verification' && (
             <TurnstileChallenge
               siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? ''}
@@ -68,35 +109,74 @@ export default function App() {
           )}
 
           <p
-            id="guest-status"
+            ref={accessStatus}
+            id="access-status"
+            tabIndex={-1}
             role="status"
             aria-atomic="true"
             className="order-last min-h-6 basis-full text-sm text-muted"
           >
-            {guest.message}
+            {accessMessage}
           </p>
         </>
       }
       accountAction={
-        <button
-          ref={signInButton}
-          type="button"
-          disabled={signInDisabled}
-          aria-expanded={signInOpen}
-          aria-haspopup="dialog"
-          aria-controls="account-sign-in-panel"
-          aria-describedby="development-notice"
-          onClick={() => setSignInOpen(true)}
-          className="inline-flex min-h-11 items-center justify-center rounded-control border border-control-border px-6 py-3 font-medium text-foreground enabled:hover:bg-surface-raised disabled:opacity-60"
-        >
-          Sign In
-        </button>
+        <>
+          <button
+            ref={signInButton}
+            type="button"
+            disabled={signInDisabled}
+            aria-busy={account.status === 'checking'}
+            aria-expanded={
+              account.status === 'signed_out' ? signInOpen : undefined
+            }
+            aria-haspopup={
+              account.status === 'signed_out' ? 'dialog' : undefined
+            }
+            aria-controls={
+              account.status === 'signed_out'
+                ? 'account-sign-in-panel'
+                : undefined
+            }
+            aria-describedby="access-status development-notice"
+            onClick={() => {
+              if (account.status === 'unavailable') {
+                account.refresh()
+              } else if (account.status === 'signed_out') {
+                setSignInOpen(true)
+              }
+            }}
+            className="inline-flex min-h-11 items-center justify-center rounded-control border border-control-border px-6 py-3 font-medium text-foreground enabled:hover:bg-surface-raised disabled:opacity-60"
+          >
+            {accountLabel}
+          </button>
+
+          {account.status === 'signed_in' && (
+            <button
+              type="button"
+              disabled={!signOut.enabled || signingOut}
+              aria-busy={signingOut}
+              aria-describedby="access-status development-notice"
+              onClick={() => {
+                void handleSignOut()
+              }}
+              className="inline-flex min-h-11 items-center justify-center rounded-control border border-control-border px-6 py-3 font-medium text-foreground enabled:hover:bg-surface-raised disabled:opacity-60"
+            >
+              {signingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          )}
+        </>
       }
       accountPanel={
         <AccountSignInDialog
           open={signInOpen}
           siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? ''}
           returnFocusRef={signInButton}
+          fallbackFocusRef={accessStatus}
+          onSignedIn={(session) => {
+            account.acceptSignIn(session)
+            setSignInOpen(false)
+          }}
           onClose={() => setSignInOpen(false)}
         />
       }

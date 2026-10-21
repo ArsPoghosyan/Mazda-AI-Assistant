@@ -6,6 +6,17 @@ import App from './App'
 import { loadTurnstile, type TurnstileApi } from './lib/turnstile'
 
 vi.mock('./lib/turnstile', () => ({ loadTurnstile: vi.fn() }))
+vi.mock('./hooks/useAccountSession', () => ({
+  useAccountSession: () => ({
+    enabled: import.meta.env.DEV,
+    status: import.meta.env.DEV ? 'signed_out' : 'disabled',
+    session: null,
+    message: '',
+    refresh: vi.fn(),
+    acceptSignIn: vi.fn(),
+    acceptSignOut: vi.fn(),
+  }),
+}))
 
 const prototype = HTMLDialogElement.prototype
 const originalShow = Object.getOwnPropertyDescriptor(prototype, 'showModal')

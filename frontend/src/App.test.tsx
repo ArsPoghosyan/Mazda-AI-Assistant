@@ -8,6 +8,17 @@ import { loadTurnstile, type TurnstileApi } from './lib/turnstile'
 vi.mock('./lib/turnstile', () => ({
   loadTurnstile: vi.fn(),
 }))
+vi.mock('./hooks/useAccountSession', () => ({
+  useAccountSession: () => ({
+    enabled: import.meta.env.DEV,
+    status: import.meta.env.DEV ? 'signed_out' : 'disabled',
+    session: null,
+    message: '',
+    refresh: vi.fn(),
+    acceptSignIn: vi.fn(),
+    acceptSignOut: vi.fn(),
+  }),
+}))
 
 afterEach(async () => {
   cleanup()

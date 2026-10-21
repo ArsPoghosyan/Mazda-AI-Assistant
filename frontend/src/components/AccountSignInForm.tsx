@@ -5,6 +5,7 @@ import {
   useState,
   type FormEvent,
 } from 'react'
+import type { AccountSessionResponse } from '../api/account'
 import { useAccountSignIn } from '../hooks/useAccountSignIn'
 import TurnstileChallenge from './TurnstileChallenge'
 
@@ -12,12 +13,14 @@ type AccountSignInFormProps = {
   siteKey: string
   titleId?: string
   onClose: () => void
+  onSignedIn?: (session: AccountSessionResponse) => void
 }
 
 export default function AccountSignInForm({
   siteKey,
   titleId,
   onClose,
+  onSignedIn,
 }: AccountSignInFormProps) {
   const signIn = useAccountSignIn()
   const id = useId()
@@ -25,6 +28,7 @@ export default function AccountSignInForm({
   const emailInput = useRef<HTMLInputElement>(null)
   const proof = useRef<string | null>(null)
   const generation = useRef(0)
+  const active = useRef(false)
 
   const [verified, setVerified] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -35,10 +39,15 @@ export default function AccountSignInForm({
   const fieldsDisabled = !signIn.enabled || loading || ready
 
   useEffect(() => {
+    active.current = true
     emailInput.current?.focus()
+
+    return () => {
+      active.current = false
+    }
   }, [])
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
     if (fieldsDisabled || !proof.current) return
@@ -66,11 +75,13 @@ export default function AccountSignInForm({
       passwordInput.value = ''
     }
 
-    void signIn.start({
+    const session = await signIn.start({
       email,
       password,
       captcha_token: captchaToken,
     })
+
+    if (session && active.current) onSignedIn?.(session)
   }
 
   return (

@@ -39,7 +39,10 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   Sign-in submissions consume each proof once, clear the password field, and use
   bounded requests with controlled error feedback. Manual local validation confirmed
   successful CAPTCHA-protected sign-in and a subsequent cookie-authenticated session
-  check after a backend restart. Frontend session restoration/sign-out remain pending.
+  check after a backend restart. In development, the page restores account state
+  from the cookie session and updates immediately after a successful sign-in.
+  Development sign-out waits for server confirmation before clearing account state.
+  Local browser checks confirmed sign-in, account restoration on refresh, and sign-out.
 - Offline ES256 account-token verification with typed identity claims and
   generated-key tests for invalid signatures, claims, algorithms, and token sizes.
 - Bounded HTTPS signing-key retrieval, P-256 key selection, and a shared
@@ -775,8 +778,10 @@ production account access is not enabled or validated by these checks.
 The landing page opens sign-in in a native modal dialog outside the hero grid.
 The navy/teal design is retained, with a dimmed backdrop, email focus on opening,
 focus guards around the verification iframe, Escape/Close dismissal, body scroll
-restoration, and focus returned to the trigger. The dialog does not increase the
-hero's layout height. Turnstile uses its rectangular `flexible` size with a 65px
+restoration, and focus returned to the trigger on dismissal. Successful sign-in
+closes the dialog and focuses the signed-in status message, since the original
+trigger is then disabled. The dialog does not increase the hero's layout height.
+Turnstile uses its rectangular `flexible` size with a 65px
 height and 300px minimum width; narrow layouts accommodate that minimum.
 
 The form uses labeled email/password inputs with password-manager autocomplete,
@@ -804,20 +809,47 @@ controlled failures, malformed responses, and cancellation. Controller/form test
 cover duplicate submissions, deadlines, cleanup, proof expiration, fresh retries,
 password clearing, and development-only availability. App tests cover opening and
 closing, native cancel handling, focus restoration/guards, and pending-request
-cancellation. jsdom's native dialog methods and layout are stubbed in those tests;
+cancellation. Integration tests use the real account hooks and API helpers with
+mocked network responses to cover successful sign-in updating the landing page
+without another session request, controlled failure, and ignored late results.
+jsdom's native dialog methods and layout are stubbed in those tests;
 they do not replace browser checks of native modal behavior or the real widget.
 
-The frontend does not yet restore account state on reload or provide sign-out,
-registration, email-confirmation, password-recovery, or Google sign-in interfaces.
-A successful sign-in displays session readiness; chat remains in development.
+In development, the page checks `POST /api/v1/account/session` on mount, with a
+15-second deadline and cleanup on unmount. While checking, guest access and
+sign-in are disabled. HTTP 401 enables signed-out access; an unavailable service
+or invalid response keeps guest access blocked and offers an explicit retry.
+There is no automatic polling. A successful sign-in supplies validated session
+metadata directly to the page's account state without another session request.
+Account-session metadata is held in React memory; the opaque session credential
+remains in an HttpOnly cookie and provider tokens stay on the backend. Session
+restoration and sign-in remain disabled outside development.
+
+The frontend sign-out API helper sends a cookie-authenticated POST without a body
+and accepts only HTTP 204 as confirmed success. It preserves cancellation, masks
+server/transport details, and does not retry automatically; its tests use mocked
+network responses. In development, a Sign out button appears for a restored or
+newly signed-in account. Its controller allows one request at a time, uses a
+15-second deadline, and cancels pending work on unmount. Account state and blocked
+guest access are retained while sign-out is pending or fails; failures offer a
+manual retry. Confirmed success clears account metadata and returns keyboard
+focus to Sign In. Guest access can then be started explicitly. App tests cover
+pending, success, failure/retry, timeout, cancellation, and repeat sign-in/sign-out
+cycles using mocked network responses. Separate local browser checks confirmed
+successful sign-in, automatic dialog dismissal, account restoration after a page
+refresh, and successful sign-out. These checks validate the local development
+flow; production account access remains disabled and is not validated by them.
+
+The frontend does not yet provide registration, email-confirmation,
+password-recovery, or Google sign-in interfaces. Chat remains in development.
 
 ## Account sign-out endpoint
 
 `POST /api/v1/account/sign-out` signs out the current browser's application session.
 `ACCOUNT_SIGN_OUT_API_ENABLED` defaults to `false` and is independent of the
 sign-in and session-check flags. Keep it disabled until endpoint testing and
-deployment checks are complete. The frontend does not call the route, and the
-Cloudflare Pages proxy does not forward it yet.
+deployment checks are complete. The development frontend calls the route through
+Vite's local API proxy; the Cloudflare Pages proxy does not forward it yet.
 
 ```dotenv
 ACCOUNT_SIGN_OUT_API_ENABLED=false
