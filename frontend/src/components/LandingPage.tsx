@@ -2,6 +2,8 @@ import type { ReactNode } from 'react'
 
 type LandingPageProps = {
   guestAction: ReactNode
+  accountAction: ReactNode
+  accountPanel: ReactNode
   serviceStatus: ReactNode
 }
 
@@ -22,6 +24,8 @@ const capabilities = [
 
 export default function LandingPage({
   guestAction,
+  accountAction,
+  accountPanel,
   serviceStatus,
 }: LandingPageProps) {
   return (
@@ -51,7 +55,7 @@ export default function LandingPage({
       <main
         id="main-content"
         tabIndex={-1}
-        className="mx-auto w-full max-w-7xl flex-1 px-6 lg:px-10"
+        className="mx-auto w-full max-w-7xl flex-1 px-2 min-[360px]:px-6 lg:px-10"
       >
         <section
           aria-labelledby="landing-title"
@@ -74,22 +78,15 @@ export default function LandingPage({
             <div className="mt-8 flex flex-wrap items-start gap-3">
               {guestAction}
 
-              <button
-                type="button"
-                disabled
-                aria-describedby="development-notice"
-                className="inline-flex min-h-11 items-center justify-center rounded-control border border-control-border px-6 py-3 font-medium text-muted"
-              >
-                Sign In
-              </button>
+              {accountAction}
             </div>
 
             <p
               id="development-notice"
               className="mt-4 max-w-lg text-sm text-muted"
             >
-              Guest access is being connected. Account sign-in and chat are
-              still in development.
+              Guest access and account sign-in are being connected.
+              Chat is still in development.
             </p>
           </div>
 
@@ -159,6 +156,8 @@ export default function LandingPage({
         <p>Independent, unofficial and unaffiliated with Mazda.</p>
         {serviceStatus}
       </footer>
+
+      {accountPanel}
     </div>
   )
 }

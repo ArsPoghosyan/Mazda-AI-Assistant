@@ -55,6 +55,8 @@ test('delivers a token once under StrictMode', async () => {
   const { onToken, onInvalidated, options } = await mountChallenge()
 
   expect(api.render).toHaveBeenCalledTimes(1)
+  expect(options.action).toBe('guest_start')
+  expect(options.size).toBe('flexible')
   expect(onToken).not.toHaveBeenCalled()
 
   act(() => {
@@ -187,4 +189,83 @@ test('does not render if the SDK finishes loading after unmount', async () => {
   expect(api.remove).not.toHaveBeenCalled()
   expect(onToken).not.toHaveBeenCalled()
   expect(onInvalidated).not.toHaveBeenCalled()
+})
+
+test('renders account sign-in verification with its own action', async () => {
+  const onToken = vi.fn<(token: string) => void>()
+  const onInvalidated = vi.fn<() => void>()
+
+  render(
+    <StrictMode>
+      <TurnstileChallenge
+        siteKey="public-test-site-key"
+        action="account_sign_in"
+        onToken={onToken}
+        onInvalidated={onInvalidated}
+      />
+    </StrictMode>,
+  )
+
+  await screen.findByText('Complete the check to continue.')
+
+  expect(api.render).toHaveBeenCalledTimes(1)
+
+  const options = vi.mocked(api.render).mock.calls[0]?.[1]
+
+  if (!options) {
+    throw new Error('Expected the account verification widget')
+  }
+
+  expect(options.action).toBe('account_sign_in')
+  expect(options.size).toBe('flexible')
+  expect(onToken).not.toHaveBeenCalled()
+
+  act(() => {
+    options.callback('synthetic-account-proof')
+  })
+
+  expect(onToken).toHaveBeenCalledExactlyOnceWith('synthetic-account-proof')
+  expect(onInvalidated).not.toHaveBeenCalled()
+})
+
+test('changing action replaces the widget and ignores old callbacks', async () => {
+  const {
+    view,
+    onToken,
+    onInvalidated,
+    options: oldOptions,
+  } = await mountChallenge()
+
+  expect(oldOptions.action).toBe('guest_start')
+
+  await act(async () => {
+    view.rerender(
+      <StrictMode>
+        <TurnstileChallenge
+          siteKey="public-test-site-key"
+          action="account_sign_in"
+          onToken={onToken}
+          onInvalidated={onInvalidated}
+        />
+      </StrictMode>,
+    )
+  })
+
+  expect(api.remove).toHaveBeenCalledExactlyOnceWith('test-widget')
+  expect(api.render).toHaveBeenCalledTimes(2)
+
+  const freshOptions = vi.mocked(api.render).mock.calls[1]?.[1]
+
+  if (!freshOptions) {
+    throw new Error('Expected the replacement account widget')
+  }
+
+  expect(freshOptions.action).toBe('account_sign_in')
+
+  act(() => {
+    oldOptions.callback('late-guest-proof')
+    freshOptions.callback('fresh-account-proof')
+  })
+
+  expect(onToken).toHaveBeenCalledExactlyOnceWith('fresh-account-proof')
 })

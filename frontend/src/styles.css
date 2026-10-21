@@ -26,6 +26,7 @@
   background: var(--color-background);
   color-scheme: dark;
   line-height: 1.6;
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -39,6 +40,10 @@ button:not(:disabled) {
 
 button:disabled {
   cursor: not-allowed;
+}
+
+.sign-in-dialog::backdrop {
+  background: color-mix(in srgb, var(--color-background) 80%, transparent);
 }
 
 :where(a, button, input, select, textarea):focus-visible {

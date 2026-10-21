@@ -1,8 +1,9 @@
+import { useRef, useState } from 'react'
+import AccountSignInDialog from './components/AccountSignInDialog'
 import LandingPage from './components/LandingPage'
 import { useApiHealth, type ApiStatus } from './hooks/useApiHealth'
 import { useGuestSession } from './hooks/useGuestSession'
 import TurnstileChallenge from './components/TurnstileChallenge'
-
 
 const statusMessages: Record<ApiStatus, string> = {
   checking: 'Checking API connection…',
@@ -14,7 +15,16 @@ export default function App() {
   const { status, retry } = useApiHealth()
   const guest = useGuestSession()
 
+  const [signInOpen, setSignInOpen] = useState(false)
+  const signInButton = useRef<HTMLButtonElement>(null)
+
+  const signInDisabled =
+    !import.meta.env.DEV ||
+    guest.status === 'loading' ||
+    guest.status === 'verification'
+
   const guestDisabled =
+    signInOpen ||
     !guest.enabled ||
     guest.status === 'loading' ||
     guest.status === 'verification' ||
@@ -66,6 +76,29 @@ export default function App() {
             {guest.message}
           </p>
         </>
+      }
+      accountAction={
+        <button
+          ref={signInButton}
+          type="button"
+          disabled={signInDisabled}
+          aria-expanded={signInOpen}
+          aria-haspopup="dialog"
+          aria-controls="account-sign-in-panel"
+          aria-describedby="development-notice"
+          onClick={() => setSignInOpen(true)}
+          className="inline-flex min-h-11 items-center justify-center rounded-control border border-control-border px-6 py-3 font-medium text-foreground enabled:hover:bg-surface-raised disabled:opacity-60"
+        >
+          Sign In
+        </button>
+      }
+      accountPanel={
+        <AccountSignInDialog
+          open={signInOpen}
+          siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? ''}
+          returnFocusRef={signInButton}
+          onClose={() => setSignInOpen(false)}
+        />
       }
       serviceStatus={
         <div className="flex flex-wrap items-center gap-3">

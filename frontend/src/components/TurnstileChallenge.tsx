@@ -3,6 +3,7 @@ import { loadTurnstile, type TurnstileApi } from '../lib/turnstile'
 
 type TurnstileChallengeProps = {
   siteKey: string
+  action?: 'guest_start' | 'account_sign_in'
   onToken: (token: string) => void
   onInvalidated: () => void
 }
@@ -14,6 +15,7 @@ type Feedback = {
 
 export default function TurnstileChallenge({
   siteKey,
+  action = 'guest_start',
   onToken,
   onInvalidated,
 }: TurnstileChallengeProps) {
@@ -72,9 +74,9 @@ export default function TurnstileChallenge({
 
         widgetId = loaded.render(host, {
           sitekey: siteKey,
-          action: 'guest_start',
+          action,
           theme: 'dark',
-          size: 'compact',
+          size: 'flexible',
           retry: 'never',
           'refresh-expired': 'never',
           'refresh-timeout': 'never',
@@ -126,7 +128,7 @@ export default function TurnstileChallenge({
 
       host.replaceChildren()
     }
-  }, [siteKey, attempt])
+  }, [siteKey, action, attempt])
 
   function retry() {
     onInvalidated()
@@ -141,13 +143,13 @@ export default function TurnstileChallenge({
     <section
       aria-labelledby={titleId}
       aria-describedby={messageId}
-      className="order-last basis-full space-y-3 text-sm"
+      className="order-last w-full min-w-0 basis-full space-y-3 text-sm"
     >
       <p id={titleId} className="font-medium text-foreground">
         Human verification
       </p>
 
-      <div ref={container} className="min-h-36" />
+      <div ref={container} className="min-h-[65px]" />
 
       <p
         id={messageId}

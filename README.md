@@ -33,6 +33,13 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - Development-only frontend guest session creation/refresh with loading, success,
   error/retry feedback, request cancellation, and a bounded timeout. New sessions
   use an on-demand Turnstile widget; valid existing sessions refresh without it.
+- Development-only email/password sign-in form in a native modal dialog, with
+  a dimmed backdrop, initial focus, Escape/Close dismissal, and focus restoration.
+  Turnstile uses a rectangular flexible-width widget for guest and account access.
+  Sign-in submissions consume each proof once, clear the password field, and use
+  bounded requests with controlled error feedback. Manual local validation confirmed
+  successful CAPTCHA-protected sign-in and a subsequent cookie-authenticated session
+  check after a backend restart. Frontend session restoration/sign-out remain pending.
 - Offline ES256 account-token verification with typed identity claims and
   generated-key tests for invalid signatures, claims, algorithms, and token sizes.
 - Bounded HTTPS signing-key retrieval, P-256 key selection, and a shared
@@ -88,7 +95,7 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   once and requires a fresh attempt after a failed submission.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
+Account sign-up UI, chat, conversation persistence, vehicle selection,
 retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
@@ -156,6 +163,12 @@ Backend configuration is documented in `backend/.env.example`. Settings read
 Without `DATABASE_URL`, `/api/v1/health` returns 200 and `/api/v1/ready` returns 503.
 The health endpoint checks process liveness; readiness executes `SELECT 1` and
 checks connectivity, not migration status or application-table permissions.
+
+Apply migrations independently to the development database and the integration-test
+database using the restricted migration role. Upgrading `askm6_test` does not upgrade
+the website's local `mazda6` database. Account sign-in needs the account-session table
+and the provider-session uniqueness constraint through migration `08cad124d60b`.
+Use migration credentials for Alembic; keep the runtime database role restricted.
 
 Database URLs use `postgresql+psycopg://`. Remote connections require
 `sslmode=verify-full` and an `sslrootcert` path pointing to the downloaded CA
@@ -334,8 +347,8 @@ proxy settings and allows at most two connections.
 The guest-session service calls this verifier before new-session creation, using
 proofs supplied by the development frontend widget. Account sign-in instead sends
 a separate proof to Supabase Auth for verification during the password exchange;
-it does not call this guest verifier first. Account sign-up and frontend account
-CAPTCHA integration are not implemented. Public access still requires abuse
+it does not call this guest verifier first. The development sign-in form uses the
+`account_sign_in` widget action. Account sign-up is not implemented. Public access still requires abuse
 controls and production guest-route/cookie forwarding.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
@@ -621,7 +634,8 @@ sessions, or issue browser cookies. The returned pair must still pass the existi
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
 default. Additional abuse controls, signup, email verification, password recovery,
-Google sign-in, and frontend sign-in remain unimplemented.
+and Google sign-in remain unimplemented. The development-only frontend sign-in
+flow is described below.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
@@ -672,10 +686,11 @@ failure during commit and make no live Supabase requests.
 sign-in service. It creates an application session and issues its opaque browser
 cookie only after successful database commit. `ACCOUNT_SIGN_IN_API_ENABLED`
 defaults to `false` and is independent of `ACCOUNT_SESSION_API_ENABLED`. Keep
-sign-in disabled until Supabase CAPTCHA enforcement, additional abuse controls,
+public sign-in disabled until Supabase CAPTCHA enforcement, additional abuse controls,
 and deployment checks are ready.
-The frontend does not call this route, and the Cloudflare Pages proxy still
-forwards health requests only.
+The development frontend calls this route through Vite's same-origin proxy. The
+Cloudflare Pages proxy still forwards health requests only, and account access
+remains disabled in normal production frontend builds.
 
 ```dotenv
 ACCOUNT_SIGN_IN_API_ENABLED=false
@@ -749,9 +764,52 @@ generated ES256 credentials and mocked provider/JWKS responses. They verify that
 the returned cookie matches the committed token hash, or that a deliberate SQL
 error before commit leaves neither new profile nor session visible and issues no
 cookie, while asserting that the proof reaches the provider exchange unchanged.
-Tests require no live Supabase requests. They do not establish successful live
-CAPTCHA-protected account sign-in; that browser flow remains to be implemented
-and verified.
+Automated tests require no live Supabase requests. Separate manual local validation
+confirmed a successful CAPTCHA-protected sign-in against Supabase Auth, account-cookie
+storage, credential rejection with HTTP 401, and HTTP 200 from the cookie-authenticated
+session endpoint after restarting the backend. This is local integration evidence;
+production account access is not enabled or validated by these checks.
+
+## Development sign-in interface
+
+The landing page opens sign-in in a native modal dialog outside the hero grid.
+The navy/teal design is retained, with a dimmed backdrop, email focus on opening,
+focus guards around the verification iframe, Escape/Close dismissal, body scroll
+restoration, and focus returned to the trigger. The dialog does not increase the
+hero's layout height. Turnstile uses its rectangular `flexible` size with a 65px
+height and 300px minimum width; narrow layouts accommodate that minimum.
+
+The form uses labeled email/password inputs with password-manager autocomplete,
+an optional password visibility toggle, and native required/email validation.
+It sends only email, the exact password, and a CAPTCHA proof to the same-origin
+API, with redirects rejected and cookies included. It clears the password field
+and consumes the proof when submitting. Every failed submission requires a fresh
+proof; callbacks from an earlier widget cannot authorize a later attempt.
+Credentials and proofs are not saved in browser storage or logs.
+
+The controller allows one pending request, has a 15-second browser deadline,
+discards results after unmount, and exposes controlled error messages. Neither
+credential rejection nor transport/provider failure triggers automatic retries.
+Closing the dialog cancels the browser request; cancellation does not guarantee
+that a provider exchange or database commit was undone, and it is not sign-out.
+
+For local HTTP testing only, enable the required backend endpoints in the ignored
+`backend/.env`, retain a configured session encryption key, and use
+`ACCOUNT_COOKIE_SECURE=false`. The sign-in flag and session-check flag are
+independent. Restart FastAPI after environment changes. Keep public examples and
+production defaults disabled until the remaining release checks are complete.
+
+API tests mock fetch and cover request allowlists, metadata-only responses,
+controlled failures, malformed responses, and cancellation. Controller/form tests
+cover duplicate submissions, deadlines, cleanup, proof expiration, fresh retries,
+password clearing, and development-only availability. App tests cover opening and
+closing, native cancel handling, focus restoration/guards, and pending-request
+cancellation. jsdom's native dialog methods and layout are stubbed in those tests;
+they do not replace browser checks of native modal behavior or the real widget.
+
+The frontend does not yet restore account state on reload or provide sign-out,
+registration, email-confirmation, password-recovery, or Google sign-in interfaces.
+A successful sign-in displays session readiness; chat remains in development.
 
 ## Account sign-out endpoint
 
