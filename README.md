@@ -101,6 +101,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled confirmation HTTP endpoint with trusted-Origin and resource
   checks, a total deadline, and cookie-free responses. Mocked HTTP tests cover
   confirmation, malformed input, provider failures, configuration gates, and deadlines.
+- Frontend registration and email-confirmation API helpers with explicit request
+  fields, validated acknowledgement responses, controlled errors, cancellation,
+  and mocked API tests. These helpers are not connected to the interface yet.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -974,6 +977,23 @@ flow; production account access remains disabled and is not validated by them.
 
 The frontend does not yet provide registration, email-confirmation,
 password-recovery, or Google sign-in interfaces. Chat remains in development.
+
+## Frontend registration API foundation
+
+`signUpAccount` submits email, password, and CAPTCHA proof once. It requires
+HTTP 202 and an accepted acknowledgement. Acceptance does not confirm that a new
+account was created or an email was delivered.
+
+`confirmAccountEmail` submits only email and the unchanged verification code.
+It requires HTTP 200 and a confirmed acknowledgement. Confirmation does not
+establish an application login.
+
+Both helpers support caller-provided cancellation, disable redirects and caching,
+and return only allowlisted status metadata. They do not persist credentials or
+automatically retry. Mocked tests cover request fields, controlled errors,
+malformed responses, unexpected statuses, and cancellation.
+
+The registration and confirmation interfaces are not implemented yet.
 
 ## Account sign-out endpoint
 
