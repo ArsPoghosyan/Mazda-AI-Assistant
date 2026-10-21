@@ -94,7 +94,10 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   required CAPTCHA input, generic outcomes, and mocked failure/cancellation tests.
 - A default-disabled registration HTTP endpoint with trusted-Origin checks, a
   total deadline, and generic acknowledgements. It issues no application cookies;
-  email confirmation and the registration interface remain unimplemented.
+  the confirmation HTTP endpoint and registration interface remain unimplemented.
+- Internal email-code confirmation parsing and a bounded Supabase verification
+  adapter, with masked credentials, response validation, and mocked HTTP tests.
+  Provider session credentials are discarded; application sign-in remains separate.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -605,7 +608,7 @@ tests make no database or provider requests and do not enable account endpoints.
 Registration currently consists of configuration, bounded credential parsing,
 provider-response interpretation, and an internal `sign_up_with_password` adapter.
 `POST /api/v1/account/sign-up` connects these helpers without creating an
-application session. Email confirmation and the sign-up UI are not implemented.
+application session. The confirmation HTTP endpoint and sign-up UI are not implemented.
 `ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The route's total timeout setting,
 `ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
 it does not change the adapter's independent five-second provider deadline.
@@ -656,6 +659,52 @@ exercise the registered route with mocked provider requests, including Origin
 and feature gates, generic duplicate-account outcomes, credential forwarding,
 cookie preservation, and cancellation of stalled body/provider work.
 
+## Internal email-confirmation foundation
+
+Email confirmation currently provides configuration, bounded JSON parsing,
+provider-response interpretation, and the internal `confirm_email_code` adapter.
+There is no confirmation HTTP route or frontend interface yet. The independent
+`ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED` flag defaults to false. The future route's
+total timeout setting, `ACCOUNT_EMAIL_CONFIRMATION_TIMEOUT_SECONDS`, defaults to
+15 seconds and accepts one to 30; the adapter has its own five-second deadline.
+
+The parser requires only `email` and `code`, stored as masked `SecretStr` fields.
+It accepts an email of 1–320 characters representable as UTF-8 and a string of
+6–10 ASCII digits, preserving leading zeros. These code lengths are structural
+bounds; Supabase checks the actual issued code and its expiry. Non-JSON input,
+extra fields, malformed credentials, and actual streamed bodies over 4 KiB are
+rejected with generic no-store errors. Parsing does not verify a code, and its
+caller must bound the complete request duration.
+
+`confirm_email_code` posts the email and unchanged code once to the configured
+issuer's `/verify` endpoint with the publishable key and a fixed `type: "signup"`.
+Callers cannot select recovery or other verification types through this helper.
+It uses a caller-owned HTTP client, disables redirects, accepts only uncompressed
+JSON responses up to 64 KiB, and bounds the provider request and response streaming
+to five seconds. There are no automatic retries. Caller cancellation propagates,
+and response streams close on completion, failure, timeout, or cancellation.
+
+An accepted response requires a user UUID and a timezone-aware
+`email_confirmed_at` timestamp. Known invalid/expired-code, input-validation, and
+banned-user responses produce the same controlled rejection. Unknown or conflicting
+error codes, rate limits, provider outages, and malformed responses remain generic
+unavailability. Provider error messages are not exposed. This response validation
+does not authenticate an application identity or verify a JWT.
+
+Supabase may create a provider session during verification. Returned provider
+identity and credentials are discarded; this helper does not revoke that provider
+session, write application database rows, or issue a browser cookie. The planned
+flow requires a separate application sign-in after confirmation. A timeout or
+unusable response does not undo provider-side confirmation or code consumption.
+
+Offline tests use synthetic credentials, in-memory parser endpoints, and mocked
+provider HTTP. They cover feature defaults, timeout bounds, input masking and size
+limits, response classification, exact request forwarding, redirects, transport
+errors, cumulative response bounds, stalled requests/streams, cancellation, and
+cleanup. No live confirmation requests or email delivery checks have been made.
+Keep public registration and confirmation disabled until their complete flows,
+abuse controls, email configuration, and deployment behavior have been validated.
+
 ## Provider sign-in adapter
 
 The internal `sign_in_with_password` adapter exchanges email/password credentials
@@ -698,7 +747,7 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, the signup UI, email verification,
+default. Additional abuse controls, the signup UI, the email-confirmation endpoint,
 password recovery, and Google sign-in remain unimplemented. The development-only
 frontend sign-in flow is described below.
 

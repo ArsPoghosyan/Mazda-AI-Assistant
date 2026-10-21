@@ -64,6 +64,12 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    account_email_confirmation_api_enabled: bool = False
+    account_email_confirmation_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
     turnstile_secret_key: SecretStr | None = None
     turnstile_allowed_hostnames: tuple[str, ...] = ()
     turnstile_timeout_seconds: int = Field(
