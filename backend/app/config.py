@@ -53,6 +53,13 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    turnstile_secret_key: SecretStr | None = None
+    turnstile_allowed_hostnames: tuple[str, ...] = ()
+    turnstile_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+    )
 
     @field_validator("supabase_auth_publishable_key")
     @classmethod

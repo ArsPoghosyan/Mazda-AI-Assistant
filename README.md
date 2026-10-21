@@ -78,6 +78,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled current-session sign-out endpoint with hashed-cookie deletion,
   cookie clearing after commit, replay rejection, and PostgreSQL isolation and
   rollback tests. Provider-session revocation is separate and not implemented.
+- An internal Turnstile verifier with exact hostname/action checks, bounded
+  Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
+  Endpoint and frontend challenge integration are not implemented.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
@@ -226,6 +229,42 @@ chat. A failed request allows an explicit retry. The action remains disabled in
 `npm run preview`, which serves the production build. The development UI gate is
 not an authorization control; the backend's independent checks still apply.
 Keep insecure cookies and this local endpoint configuration out of production.
+
+## Internal Turnstile verification
+
+`verify_turnstile_token` submits a challenge once to Cloudflare's fixed HTTPS
+Siteverify endpoint using a caller-owned HTTP client. Successful verification
+requires `success: true`, an exact hostname from `TURNSTILE_ALLOWED_HOSTNAMES`,
+and an exact match for the action supplied by backend code.
+
+`TURNSTILE_SECRET_KEY` is backend-only and defaults to unset. The hostname
+allowlist defaults to empty; configure it as a JSON array of exact hostnames,
+without schemes, ports, paths, or wildcards. `TURNSTILE_TIMEOUT_SECONDS` defaults
+to five seconds and accepts values from one to 30. Missing configuration prevents
+verification before any provider request.
+
+Requests accept only nonempty printable ASCII challenge tokens of at most 2048
+characters. The total deadline covers the request and response reading, with a
+64 KiB response limit. Redirects and compressed or non-JSON responses are rejected.
+The helper does not retry or forward a visitor IP. Known challenge failures raise
+`TurnstileRejected`; configuration, transport, unknown provider, or malformed
+response failures raise `TurnstileUnavailable`. Both prevent successful
+verification, expose generic messages, and preserve caller cancellation.
+
+Token expiration and single use are enforced by Cloudflare's live Siteverify
+service. The helper does not cache successful challenges or establish an identity.
+After an uncertain verification result, obtain a fresh challenge. Do not verify
+one token here and then submit it to Supabase's CAPTCHA verification as well.
+
+This helper is not connected to any endpoint, application-managed HTTP client,
+or frontend widget yet. It does not currently protect guest creation or account
+sign-in. Public access still requires challenge integration and abuse controls.
+
+Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
+contents, exact hostname/action matching, rejection versus unavailability,
+malformed responses, redirects, response-size boundaries, transport failures,
+total deadlines, cancellation, and response cleanup. They make no Cloudflare
+requests and do not test live challenge issuance, expiration, or replay handling.
 
 ## Account-token verification foundation
 
