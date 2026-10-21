@@ -1,11 +1,16 @@
 """Guest HTTP cookie lifecycle against the guarded local PostgreSQL database."""
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from sqlalchemy import delete, event, func, insert, select, text
 from sqlalchemy.engine import Connection, Engine
@@ -22,6 +27,11 @@ pytestmark = pytest.mark.integration
 
 class IsolatedSettings(Settings):
     model_config = SettingsConfigDict(env_file=None)
+
+
+class JsonStream(httpx2.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b'{"success":true,"hostname":"askm6.com","action":"guest_start"}'
 
 
 @pytest.mark.parametrize(
@@ -46,6 +56,11 @@ def test_http_creation_and_reuse_persist_the_same_session(
         guest_cookie_secure=True,
         guest_session_inactivity_days=30,
         csrf_trusted_origins=(origin,),
+        supabase_auth_issuer=None,
+        supabase_auth_publishable_key=None,
+        account_session_encryption_key=None,
+        turnstile_secret_key=SecretStr("synthetic-test-secret"),
+        turnstile_allowed_hostnames=("askm6.com",),
     )
 
     statement = select(
@@ -109,6 +124,32 @@ def test_http_creation_and_reuse_persist_the_same_session(
         lambda: token,
     )
 
+    provider_requests: list[httpx2.Request] = []
+
+    def verify_challenge(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert str(request.url) == ("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+        assert json.loads(request.content) == {
+            "secret": "synthetic-test-secret",
+            "response": "synthetic-guest-challenge",
+        }
+        provider_requests.append(request)
+        return httpx2.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            stream=JsonStream(),
+        )
+
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(verify_challenge),
+        trust_env=False,
+    )
+    client_factory = Mock(return_value=http_client)
+    monkeypatch.setattr(
+        "app.main.httpx2",
+        SimpleNamespace(AsyncClient=client_factory, Limits=httpx2.Limits),
+    )
+
     expired_before: tuple[object, ...] | None = None
 
     try:
@@ -144,6 +185,7 @@ def test_http_creation_and_reuse_persist_the_same_session(
             first = client.post(
                 "/api/v1/guest/session",
                 headers={"Origin": origin},
+                json={"turnstile_token": "synthetic-guest-challenge"},
             )
 
             assert first.status_code == 200
@@ -170,6 +212,8 @@ def test_http_creation_and_reuse_persist_the_same_session(
             assert second.cookies.get("__Host-askm6_guest") == token
             assert token not in second.text
             assert second.headers["Cache-Control"] == "no-store"
+            # Only creation consumes a challenge; an active cookie refresh does not.
+            assert len(provider_requests) == 1
 
             with integration_engine.connect() as connection:
                 after = connection.execute(statement).one()
@@ -190,6 +234,9 @@ def test_http_creation_and_reuse_persist_the_same_session(
                     expired_after = tuple(connection.execute(expired_statement).one())
 
                 assert expired_after == expired_before
+
+        assert http_client.is_closed
+        client_factory.assert_called_once()
 
     finally:
         verifiers_to_delete = [verifier]

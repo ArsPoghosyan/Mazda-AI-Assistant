@@ -80,7 +80,9 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   rollback tests. Provider-session revocation is separate and not implemented.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
-  Endpoint and frontend challenge integration are not implemented.
+- Guest first-use verification before session creation, bounded optional JSON
+  input, and a total operation deadline. Active sessions refresh without another
+  challenge; cookies are issued only after commit. The frontend widget is pending.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
@@ -183,15 +185,42 @@ the `DATABASE_URL=` prefix. The native Python service uses root directory
 
 ## Guest session endpoint
 
-`POST /api/v1/guest/session` creates a guest session or refreshes an existing,
-unexpired one. Missing, malformed, unknown, and expired cookies result in a new
-session. Only the token hash is stored in PostgreSQL. The token is issued in an
-HttpOnly cookie after the transaction commits, and is never returned in JSON.
-Successful responses contain `status` and `expires_at` and use `Cache-Control: no-store`.
-Database failures return a generic 503 without issuing a cookie.
+`POST /api/v1/guest/session` refreshes an existing, unexpired guest session or
+requires Turnstile verification before creating a new one. Missing, malformed,
+unknown, and expired cookies require a fresh challenge for new-session creation.
+Only the browser token's hash is stored in PostgreSQL. The token is issued in an
+HttpOnly cookie after commit and is never returned in JSON. Successful responses
+contain `status` and `expires_at` and use `Cache-Control: no-store`.
+
+For creation, send `Content-Type: application/json` with
+`{"turnstile_token":"token-from-the-widget"}`. The backend requires the verified
+hostname to match its configured allowlist and the challenge action to be
+`guest_start`. Empty bodies, `{}`, and a null `turnstile_token` carry no challenge;
+they support refresh but cannot authorize creation. Nonempty bodies require JSON,
+extra fields are rejected, and tokens must be strings of one to 2048 characters.
+The parser enforces a 16 KiB limit on actual streamed bytes, independent of the
+claimed Content-Length.
+
+The service commits the refresh attempt before returning an active session or
+contacting Cloudflare. Verification runs without holding a database transaction
+or connection. A new creation transaction opens only after verification succeeds,
+and cookie material is returned only after commit. Active sessions can refresh
+even when the Turnstile client is unavailable. Verification does not establish a
+unique human identity or replace rate limits and message quotas.
+
+`GUEST_SESSION_TIMEOUT_SECONDS` defaults to 15 and accepts one to 30 seconds.
+It bounds body reading, verification, and database work. Invalid input returns
+400, oversized input 413, and unsupported nonempty-body media types 415. Missing
+or rejected challenges return a generic 403; unavailable verification, database
+errors, and timeouts return a generic 503. These errors use no-store headers and
+do not issue or clear a guest cookie. Provider details are not returned. Requests
+are not automatically retried; after verification has been attempted, obtain a
+fresh challenge before retrying creation. Database rollback cannot undo consumed
+verification, and an uncertain commit does not guarantee that no row was created.
 
 The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
-Keep public guest access disabled until Turnstile and abuse controls are ready.
+Keep public guest access disabled until frontend challenge integration and abuse
+controls are ready.
 The Cloudflare Pages proxy still forwards only health requests; production guest
 route and cookie forwarding are not implemented. The frontend guest action is
 enabled only in Vite development and remains disabled in normal production builds.
@@ -209,6 +238,11 @@ defaults to 30 days through `GUEST_SESSION_INACTIVITY_DAYS`.
 
 ### Local frontend guest flow
 
+The frontend does not yet render Turnstile or send challenge tokens. It can
+refresh an existing unexpired guest session, but fresh-session creation requires
+the challenge input described above. Browser widget integration and live
+challenge testing remain pending.
+
 The local guest flow requires a running, migrated local database and a backend
 `DATABASE_URL` using the restricted application role. In the ignored `backend/.env`,
 enable the endpoint and use the exact frontend origin:
@@ -224,8 +258,9 @@ Run the backend and `npm run dev`, then open `http://127.0.0.1:5173` and select
 read or store its token. Reloading the page alone does not submit a guest-session
 request. Selecting the action again after reload refreshes an unexpired session.
 
-Success confirms that a guest session was established; it does not open a working
-chat. A failed request allows an explicit retry. The action remains disabled in
+Success confirms that a guest session was refreshed; it does not open a working
+chat. A failed request allows an explicit retry, but the current frontend cannot
+obtain the challenge needed for creation. The action remains disabled in
 `npm run preview`, which serves the production build. The development UI gate is
 not an authorization control; the backend's independent checks still apply.
 Keep insecure cookies and this local endpoint configuration out of production.
@@ -256,15 +291,29 @@ service. The helper does not cache successful challenges or establish an identit
 After an uncertain verification result, obtain a fresh challenge. Do not verify
 one token here and then submit it to Supabase's CAPTCHA verification as well.
 
-This helper is not connected to any endpoint, application-managed HTTP client,
-or frontend widget yet. It does not currently protect guest creation or account
-sign-in. Public access still requires challenge integration and abuse controls.
+FastAPI owns a dedicated Turnstile HTTP client when a secret and nonempty hostname
+allowlist are configured. It is independent of the Supabase client, does not
+contact Cloudflare at startup or during health checks, and is closed on shutdown.
+Startup and cleanup failures still release previously registered resources and
+clear application state. The client disables redirects and environment-provided
+proxy settings and allows at most two connections.
+
+The guest-session service calls this verifier before new-session creation. A
+frontend widget and account sign-in/sign-up CAPTCHA integration are not implemented.
+Public access still requires frontend integration and abuse controls.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
 contents, exact hostname/action matching, rejection versus unavailability,
 malformed responses, redirects, response-size boundaries, transport failures,
 total deadlines, cancellation, and response cleanup. They make no Cloudflare
 requests and do not test live challenge issuance, expiration, or replay handling.
+Lifecycle tests cover incomplete configuration, operation without Supabase,
+separate clients, and cleanup failures. Service tests cover transaction ordering,
+refresh without a challenge, rejected verification, cancellation, and commit
+failures. Local PostgreSQL tests verify committed creation from a separate
+connection and rollback after an injected SQL error before commit. Guest HTTP
+tests exercise verified creation and challenge-free reuse for missing, malformed,
+unknown, and expired initial cookies, using mocked Cloudflare responses.
 
 ## Account-token verification foundation
 
@@ -915,8 +964,9 @@ verifies that the guest button stays disabled without sending a session request.
 Requests are mocked; the backend and database are not needed. These jsdom tests
 do not replace browser checks of cookies, layout, or the built production bundle.
 
-Public guest access still requires Turnstile, abuse controls, and production
-guest-route/cookie forwarding. Managed account login remains unimplemented.
+Public guest access still requires the frontend Turnstile widget, abuse controls,
+and production guest-route/cookie forwarding. Frontend managed account login
+remains unimplemented.
 
 ## License
 

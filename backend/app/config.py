@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     guest_cookie_secure: bool = True
     csrf_trusted_origins: tuple[str, ...] = ()
     guest_session_api_enabled: bool = False
+    guest_session_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
     supabase_auth_issuer: HttpUrl | None = None
     supabase_auth_publishable_key: SecretStr | None = None
     supabase_auth_audience: str = Field(

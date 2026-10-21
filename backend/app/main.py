@@ -39,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.database_engine = None
         application.state.account_key_cache = None
         application.state.account_auth_client = None
+        application.state.turnstile_client = None
 
         try:
             async with AsyncExitStack() as resources:
@@ -72,8 +73,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
                     application.state.account_key_cache = AccountKeyCache(download_account_keys)
 
+                if (
+                    configuration.turnstile_secret_key is not None
+                    and configuration.turnstile_allowed_hostnames
+                ):
+                    turnstile_client = await resources.enter_async_context(
+                        httpx2.AsyncClient(
+                            timeout=configuration.turnstile_timeout_seconds,
+                            follow_redirects=False,
+                            trust_env=False,
+                            limits=httpx2.Limits(
+                                max_connections=2,
+                                max_keepalive_connections=2,
+                            ),
+                        )
+                    )
+
+                    application.state.turnstile_client = turnstile_client
+
                 yield
         finally:
+            application.state.turnstile_client = None
             application.state.account_auth_client = None
             application.state.account_key_cache = None
             application.state.database_engine = None
