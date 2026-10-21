@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { ensureGuestSession } from '../src/api/guest.ts'
+import {
+  ensureGuestSession,
+  GuestVerificationRequiredError,
+} from '../src/api/guest.ts'
 
 const session = {
   status: 'ok',
@@ -17,6 +20,8 @@ test('requests a guest session with cookies and cancellation support', async (t)
     assert.equal(options.credentials, 'same-origin')
     assert.equal(options.cache, 'no-store')
     assert.equal(options.signal, controller.signal)
+    assert.equal(options.body, undefined)
+    assert.equal(options.headers, undefined)
 
     return Response.json(session)
   })
@@ -91,3 +96,70 @@ test('preserves cancellation errors for the calling component', async (t) => {
     name: 'AbortError',
   })
 })
+
+test('sends a challenge token as JSON with cookies and cancellation', async (t) => {
+  const controller = new AbortController()
+  const token = 'synthetic-widget-token'
+
+  const request = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(url, '/api/v1/guest/session')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.credentials, 'same-origin')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.signal, controller.signal)
+    assert.deepEqual(options.headers, {
+      'Content-Type': 'application/json',
+    })
+    assert.deepEqual(JSON.parse(options.body), {
+      turnstile_token: token,
+    })
+
+    return Response.json(session)
+  })
+
+  assert.deepEqual(
+    await ensureGuestSession(controller.signal, token),
+    session,
+  )
+  assert.equal(request.mock.callCount(), 1)
+})
+
+test('recognizes an explicit human-verification response', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => {
+    return Response.json(
+      { detail: 'Private provider details' },
+      {
+        status: 403,
+        headers: { 'X-Guest-Verification': 'required' },
+      },
+    )
+  })
+
+  await assert.rejects(ensureGuestSession(), (error) => {
+    assert.ok(error instanceof GuestVerificationRequiredError)
+    assert.equal(error.message, 'Please complete human verification.')
+    return true
+  })
+})
+
+for (const [status, message] of [
+  [400, 'Guest access could not be started.'],
+  [503, 'Guest access is temporarily unavailable.'],
+]) {
+  test(`ignores the verification header on HTTP ${status}`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => {
+      return Response.json(
+        { detail: 'Private server details' },
+        {
+          status,
+          headers: { 'X-Guest-Verification': 'required' },
+        },
+      )
+    })
+
+    await assert.rejects(ensureGuestSession(), {
+      name: 'Error',
+      message,
+    })
+  })
+}

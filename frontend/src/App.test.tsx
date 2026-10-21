@@ -3,6 +3,11 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import App from './App'
+import { loadTurnstile, type TurnstileApi } from './lib/turnstile'
+
+vi.mock('./lib/turnstile', () => ({
+  loadTurnstile: vi.fn(),
+}))
 
 afterEach(async () => {
   cleanup()
@@ -412,3 +417,270 @@ test('keeps guest access disabled outside development', async () => {
     ),
   ).toBeNull()
 })
+
+test('requests verification and submits one proof before starting guest access', async () => {
+  vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')
+
+  const renderWidget = vi.fn<TurnstileApi['render']>(
+    () => 'app-test-widget',
+  )
+  const removeWidget = vi.fn<TurnstileApi['remove']>()
+
+  const api: TurnstileApi = {
+    ready: vi.fn<TurnstileApi['ready']>((callback) => callback()),
+    render: renderWidget,
+    reset: vi.fn<TurnstileApi['reset']>(),
+    remove: removeWidget,
+  }
+
+  vi.mocked(loadTurnstile).mockReset()
+  vi.mocked(loadTurnstile).mockResolvedValue(api)
+
+  let guestRequests = 0
+
+  const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+    if (input === '/api/v1/health') {
+      return Response.json({
+        status: 'ok',
+        service: 'mazda6-assistant-api',
+      })
+    }
+
+    if (input === '/api/v1/guest/session') {
+      guestRequests += 1
+
+      if (guestRequests === 1) {
+        return Response.json(
+          { detail: 'Human verification is required or was rejected.' },
+          {
+            status: 403,
+            headers: { 'X-Guest-Verification': 'required' },
+          },
+        )
+      }
+
+      return Response.json({
+        status: 'ok',
+        expires_at: '2030-01-01T12:00:00Z',
+      })
+    }
+
+    throw new Error('Unexpected request')
+  })
+
+  vi.stubGlobal('fetch', fetchMock)
+
+  const user = userEvent.setup()
+
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+
+  await screen.findByText('API connected')
+
+  expect(loadTurnstile).not.toHaveBeenCalled()
+  expect(guestRequests).toBe(0)
+
+  await user.click(
+    screen.getByRole('button', { name: 'Try as Guest' }),
+  )
+
+  await screen.findByText('Complete the check to continue.')
+
+  expect(guestRequests).toBe(1)
+  expect(renderWidget).toHaveBeenCalledTimes(1)
+
+  const verificationButton = screen.getByRole('button', {
+    name: 'Complete verification',
+  })
+
+  expect(verificationButton.hasAttribute('disabled')).toBe(true)
+
+  const options = renderWidget.mock.calls[0]?.[1]
+
+  if (!options) {
+    throw new Error('Expected the verification widget to render')
+  }
+
+  expect(options.sitekey).toBe('public-test-site-key')
+  expect(options.action).toBe('guest_start')
+
+  await act(async () => {
+    options.callback('synthetic-proof')
+    options.callback('duplicate-proof')
+  })
+
+  await screen.findByText(
+    'Guest session ready. Chat is still in development.',
+  )
+
+  const requests = fetchMock.mock.calls.filter(
+    ([input]) => input === '/api/v1/guest/session',
+  )
+
+  expect(requests).toHaveLength(2)
+  expect(requests[0]?.[1]?.body).toBeUndefined()
+  expect(requests[1]?.[1]?.body).toBe(
+    JSON.stringify({ turnstile_token: 'synthetic-proof' }),
+  )
+  expect(requests[1]?.[1]?.credentials).toBe('same-origin')
+
+  expect(removeWidget).toHaveBeenCalledExactlyOnceWith('app-test-widget')
+  expect(screen.queryByText('Human verification')).toBeNull()
+
+  expect(
+    screen
+      .getByRole('button', { name: 'Guest session ready' })
+      .hasAttribute('disabled'),
+  ).toBe(true)
+})
+test.each([
+  [403, 'Verification was not accepted. Please try again.'],
+  [503, 'Guest access could not be started. Please try again.'],
+] as const)(
+  'requires a fresh proof after a token submission returns HTTP %s',
+  async (failureStatus, expectedMessage) => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')
+
+    const user = userEvent.setup()
+    const renderWidget = vi.fn<TurnstileApi['render']>(
+      () => 'retry-widget',
+    )
+    const removeWidget = vi.fn<TurnstileApi['remove']>()
+
+    const api: TurnstileApi = {
+      ready: (callback) => callback(),
+      render: renderWidget,
+      reset: vi.fn<TurnstileApi['reset']>(),
+      remove: removeWidget,
+    }
+
+    vi.mocked(loadTurnstile).mockReset()
+    vi.mocked(loadTurnstile).mockResolvedValue(api)
+
+    let guestRequests = 0
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+      async (input) => {
+        if (input === '/api/v1/health') {
+          return Response.json({
+            status: 'ok',
+            service: 'mazda6-assistant-api',
+          })
+        }
+
+        if (input !== '/api/v1/guest/session') {
+          throw new Error('Unexpected request')
+        }
+
+        guestRequests += 1
+
+        if (guestRequests === 1 || guestRequests === 3) {
+          return Response.json(
+            { detail: 'Verification required.' },
+            {
+              status: 403,
+              headers: { 'X-Guest-Verification': 'required' },
+            },
+          )
+        }
+
+        if (guestRequests === 2) {
+          return Response.json(
+            { detail: 'Private provider failure details' },
+            {
+              status: failureStatus,
+              headers:
+                failureStatus === 403
+                  ? { 'X-Guest-Verification': 'required' }
+                  : {},
+            },
+          )
+        }
+
+        return Response.json({
+          status: 'ok',
+          expires_at: '2030-01-01T12:00:00Z',
+        })
+      },
+    )
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    )
+
+    await screen.findByText('API connected')
+
+    await user.click(
+      screen.getByRole('button', { name: 'Try as Guest' }),
+    )
+
+    await screen.findByText('Complete the check to continue.')
+
+    const firstOptions = renderWidget.mock.calls[0]?.[1]
+
+    if (!firstOptions) {
+      throw new Error('Expected the first challenge')
+    }
+
+    await act(async () => {
+      firstOptions.callback('first-proof')
+    })
+
+    await screen.findByText(expectedMessage)
+
+    expect(guestRequests).toBe(2)
+    expect(screen.queryByText('Human verification')).toBeNull()
+    expect(
+      screen.queryByText(/private provider failure details/i),
+    ).toBeNull()
+
+    await user.click(
+      screen.getByRole('button', { name: 'Try again' }),
+    )
+
+    await screen.findByText('Complete the check to continue.')
+
+    expect(guestRequests).toBe(3)
+    expect(renderWidget).toHaveBeenCalledTimes(2)
+
+    const freshOptions = renderWidget.mock.calls[1]?.[1]
+
+    if (!freshOptions) {
+      throw new Error('Expected a fresh challenge')
+    }
+
+    act(() => {
+      firstOptions.callback('stale-proof')
+    })
+
+    expect(guestRequests).toBe(3)
+
+    await act(async () => {
+      freshOptions.callback('fresh-proof')
+    })
+
+    await screen.findByText(
+      'Guest session ready. Chat is still in development.',
+    )
+
+    const requests = fetchMock.mock.calls.filter(
+      ([input]) => input === '/api/v1/guest/session',
+    )
+
+    expect(requests.map(([, options]) => options?.body)).toEqual([
+      undefined,
+      JSON.stringify({ turnstile_token: 'first-proof' }),
+      undefined,
+      JSON.stringify({ turnstile_token: 'fresh-proof' }),
+    ])
+
+    expect(removeWidget).toHaveBeenCalledTimes(2)
+  },
+)

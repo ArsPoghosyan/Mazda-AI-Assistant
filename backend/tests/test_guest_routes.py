@@ -190,6 +190,7 @@ def test_origin_rejection_prevents_database_work(
     assert response.status_code == 403
     assert "set-cookie" not in response.headers
     assert api.events == []
+    assert response.headers.get("X-Guest-Verification") is None
 
     api.engine.begin.assert_not_called()
     api.create.assert_not_awaited()
@@ -271,6 +272,7 @@ def test_missing_challenge_prevents_creation(api: GuestAPI) -> None:
     assert response.status_code == 403
     assert response.json() == {"detail": "Human verification is required or was rejected."}
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers.get("X-Guest-Verification") == "required"
     assert "set-cookie" not in response.headers
     api.engine.begin.assert_not_called()
     api.verify.assert_not_awaited()

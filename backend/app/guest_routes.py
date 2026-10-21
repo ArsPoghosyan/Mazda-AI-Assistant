@@ -86,7 +86,10 @@ async def ensure_guest_session(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Human verification is required or was rejected.",
-            headers={"Cache-Control": "no-store"},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Guest-Verification": "required",
+            },
         ) from None
     except (TurnstileUnavailable, SQLAlchemyError, TimeoutError):
         raise session_unavailable() from None

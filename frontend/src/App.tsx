@@ -1,6 +1,8 @@
 import LandingPage from './components/LandingPage'
 import { useApiHealth, type ApiStatus } from './hooks/useApiHealth'
 import { useGuestSession } from './hooks/useGuestSession'
+import TurnstileChallenge from './components/TurnstileChallenge'
+
 
 const statusMessages: Record<ApiStatus, string> = {
   checking: 'Checking API connection…',
@@ -15,16 +17,19 @@ export default function App() {
   const guestDisabled =
     !guest.enabled ||
     guest.status === 'loading' ||
+    guest.status === 'verification' ||
     guest.status === 'ready'
 
   const guestLabel =
     guest.status === 'loading'
       ? 'Starting…'
-      : guest.status === 'ready'
-        ? 'Guest session ready'
-        : guest.status === 'error'
-          ? 'Try again'
-          : 'Try as Guest'
+      : guest.status === 'verification'
+        ? 'Complete verification'
+        : guest.status === 'ready'
+          ? 'Guest session ready'
+          : guest.status === 'error'
+            ? 'Try again'
+            : 'Try as Guest'
 
   return (
     <LandingPage
@@ -42,6 +47,15 @@ export default function App() {
           >
             {guestLabel}
           </button>
+          {guest.enabled && guest.status === 'verification' && (
+            <TurnstileChallenge
+              siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? ''}
+              onToken={(token) => {
+                void guest.start(token)
+              }}
+              onInvalidated={guest.invalidateVerification}
+            />
+          )}
 
           <p
             id="guest-status"

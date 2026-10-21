@@ -31,7 +31,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
 - A default-disabled guest session endpoint with exact Origin checks and HttpOnly cookies.
 - Guest HTTP tests for session reuse, invalid/expired cookies, and database failures.
 - Development-only frontend guest session creation/refresh with loading, success,
-  error/retry feedback, request cancellation, and a bounded timeout.
+  error/retry feedback, request cancellation, and a bounded timeout. New sessions
+  use an on-demand Turnstile widget; valid existing sessions refresh without it.
 - Offline ES256 account-token verification with typed identity claims and
   generated-key tests for invalid signatures, claims, algorithms, and token sizes.
 - Bounded HTTPS signing-key retrieval, P-256 key selection, and a shared
@@ -82,7 +83,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
   input, and a total operation deadline. Active sessions refresh without another
-  challenge; cookies are issued only after commit. The frontend widget is pending.
+  challenge; cookies are issued only after commit. The browser submits each proof
+  once and requires a fresh attempt after a failed submission.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
 Account sign-in/sign-up UI, chat, conversation persistence, vehicle selection,
@@ -219,8 +221,8 @@ fresh challenge before retrying creation. Database rollback cannot undo consumed
 verification, and an uncertain commit does not guarantee that no row was created.
 
 The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
-Keep public guest access disabled until frontend challenge integration and abuse
-controls are ready.
+Keep public guest access disabled until abuse controls and production integration
+are ready.
 The Cloudflare Pages proxy still forwards only health requests; production guest
 route and cookie forwarding are not implemented. The frontend guest action is
 enabled only in Vite development and remains disabled in normal production builds.
@@ -238,32 +240,62 @@ defaults to 30 days through `GUEST_SESSION_INACTIVITY_DAYS`.
 
 ### Local frontend guest flow
 
-The frontend does not yet render Turnstile or send challenge tokens. It can
-refresh an existing unexpired guest session, but fresh-session creation requires
-the challenge input described above. Browser widget integration and live
-challenge testing remain pending.
+The Vite development frontend first requests a guest session without a challenge.
+A 403 response with `X-Guest-Verification: required` opens an explicit Turnstile
+widget. Ordinary Origin-related 403 responses do not trigger a challenge.
+Completing the widget submits its proof once as JSON. The backend verifies it
+before creating a session; a valid existing guest cookie skips the challenge.
 
 The local guest flow requires a running, migrated local database and a backend
 `DATABASE_URL` using the restricted application role. In the ignored `backend/.env`,
-enable the endpoint and use the exact frontend origin:
+enable the endpoint and configure the exact frontend origin and widget hostname:
 
 ```ini
 GUEST_SESSION_API_ENABLED=true
 GUEST_COOKIE_SECURE=false
 CSRF_TRUSTED_ORIGINS=["http://127.0.0.1:5173"]
+TURNSTILE_SECRET_KEY=your-development-widget-secret
+TURNSTILE_ALLOWED_HOSTNAMES=["127.0.0.1"]
 ```
 
-Run the backend and `npm run dev`, then open `http://127.0.0.1:5173` and select
-**Try as Guest**. The browser manages the HttpOnly cookie; the frontend does not
-read or store its token. Reloading the page alone does not submit a guest-session
-request. Selecting the action again after reload refreshes an unexpired session.
+Use a separate Cloudflare development widget with `127.0.0.1` as an allowed
+hostname, Managed mode, and pre-clearance disabled. Copy `frontend/.env.example`
+to the ignored `frontend/.env.development.local` and set its public site key:
 
-Success confirms that a guest session was refreshed; it does not open a working
-chat. A failed request allows an explicit retry, but the current frontend cannot
-obtain the challenge needed for creation. The action remains disabled in
-`npm run preview`, which serves the production build. The development UI gate is
-not an authorization control; the backend's independent checks still apply.
-Keep insecure cookies and this local endpoint configuration out of production.
+```ini
+VITE_TURNSTILE_SITE_KEY=your-development-widget-site-key
+```
+
+The site key is public; the secret belongs only in backend configuration. Never
+put the secret in a `VITE_*` variable. Hostnames contain no scheme, port, or path;
+trusted origins include the scheme and port. Keep local hostnames out of the
+production widget. Cloudflare's documented dummy-key response uses the action
+`test`, whereas this flow requires `guest_start`; use the separate development
+widget for the live browser check rather than weakening action validation.
+See Cloudflare's [widget setup](https://developers.cloudflare.com/turnstile/get-started/widget-management/dashboard/)
+and [testing documentation](https://developers.cloudflare.com/turnstile/troubleshooting/testing/).
+
+Restart FastAPI and Vite after changing the local environment files. Open
+`http://127.0.0.1:5173` in a fresh private browser window and select **Try as Guest**.
+Complete the challenge if prompted; Managed mode may finish without interaction.
+The widget disappears when its proof is submitted. Wait for **Guest session ready**
+to confirm that the backend accepted it and completed the database transaction.
+Reload in the same private window and select the action again: an unexpired guest
+cookie should refresh without another challenge. Reloading alone does not submit
+a guest-session request. The browser manages the HttpOnly cookie; the frontend
+does not read or store its credential, and challenge proofs are not persisted.
+
+The SDK loads only when a challenge is requested, with a ten-second loading
+deadline and a shared loading attempt. The dynamically inserted script uses
+`async=false` because Cloudflare's `ready()` rejects async/defer-marked scripts.
+Widget cleanup ignores late callbacks after retry or unmount. Loading and
+challenge failures offer an explicit retry; a failed proof submission stops and
+requires a new attempt rather than automatically reusing the token.
+
+Success confirms a guest session, not a working chat. The guest action remains
+disabled in `npm run preview`, which serves the production build. The development
+UI gate is not an authorization control; the backend's independent checks still
+apply. Keep insecure cookies and this local endpoint configuration out of production.
 
 ## Internal Turnstile verification
 
@@ -298,9 +330,10 @@ Startup and cleanup failures still release previously registered resources and
 clear application state. The client disables redirects and environment-provided
 proxy settings and allows at most two connections.
 
-The guest-session service calls this verifier before new-session creation. A
-frontend widget and account sign-in/sign-up CAPTCHA integration are not implemented.
-Public access still requires frontend integration and abuse controls.
+The guest-session service calls this verifier before new-session creation, using
+proofs supplied by the development frontend widget. Account sign-in/sign-up CAPTCHA
+integration is not implemented. Public access still requires abuse controls and
+production guest-route/cookie forwarding.
 
 Offline tests use synthetic secrets/tokens and mocked HTTP. They cover request
 contents, exact hostname/action matching, rejection versus unavailability,
@@ -964,9 +997,16 @@ verifies that the guest button stays disabled without sending a session request.
 Requests are mocked; the backend and database are not needed. These jsdom tests
 do not replace browser checks of cookies, layout, or the built production bundle.
 
-Public guest access still requires the frontend Turnstile widget, abuse controls,
-and production guest-route/cookie forwarding. Frontend managed account login
-remains unimplemented.
+Additional tests cover the explicit verification response header and proof JSON,
+shared SDK loading, loading/readiness failures and deadlines, and the non-async
+script requirement. Widget tests cover Strict Mode, duplicate and late callbacks,
+expiry/error/timeout feedback, explicit retry, and cleanup before or after SDK
+loading. App tests cover the initial verification request, one proof submission,
+and recovery with a fresh proof after rejected or unavailable verification.
+Automated tests do not contact Cloudflare or prove live token replay protection.
+
+Public guest access still requires abuse controls and production guest-route/cookie
+forwarding. Frontend managed account login remains unimplemented.
 
 ## License
 

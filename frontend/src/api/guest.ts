@@ -3,18 +3,36 @@ export type GuestSessionResponse = {
   expires_at: string
 }
 
+export class GuestVerificationRequiredError extends Error {
+  constructor() {
+    super('Please complete human verification.')
+    this.name = 'GuestVerificationRequiredError'
+  }
+}
+
 export async function ensureGuestSession(
   signal?: AbortSignal,
+  turnstileToken?: string,
 ): Promise<GuestSessionResponse> {
   const response = await fetch('/api/v1/guest/session', {
     method: 'POST',
     credentials: 'same-origin',
     cache: 'no-store',
     signal,
+    ...(turnstileToken === undefined
+      ? {}
+      : {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turnstile_token: turnstileToken }),
+        }),
   })
 
   if (!response.ok) {
     if (response.status === 403) {
+      if (response.headers.get('X-Guest-Verification') === 'required') {
+        throw new GuestVerificationRequiredError()
+      }
+
       throw new Error('Guest access could not be verified.')
     }
 

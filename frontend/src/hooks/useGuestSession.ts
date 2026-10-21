@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { ensureGuestSession } from '../api/guest'
+import {
+  ensureGuestSession,
+  GuestVerificationRequiredError,
+} from '../api/guest'
 
 type GuestState = {
-  status: 'idle' | 'loading' | 'ready' | 'error'
+  status: 'idle' | 'loading' | 'verification' | 'ready' | 'error'
   message: string
 }
 
@@ -22,8 +25,24 @@ export function useGuestSession() {
     }
   }, [])
 
-  async function start() {
+  async function start(turnstileToken?: string) {
     if (!enabled || request.current || state.status === 'ready') {
+      return
+    }
+
+    // Accept proofs only while a challenge is expected.
+    if (
+      turnstileToken !== undefined &&
+      state.status !== 'verification'
+    ) {
+      return
+    }
+
+    // Wait for the widget instead of repeating the initial request.
+    if (
+      turnstileToken === undefined &&
+      state.status === 'verification'
+    ) {
       return
     }
 
@@ -42,7 +61,7 @@ export function useGuestSession() {
     })
 
     try {
-      await ensureGuestSession(controller.signal)
+      await ensureGuestSession(controller.signal, turnstileToken)
 
       if (request.current !== controller) return
 
@@ -54,15 +73,35 @@ export function useGuestSession() {
         status: 'ready',
         message: 'Guest session ready. Chat is still in development.',
       })
-    } catch {
+    } catch (error) {
       if (request.current !== controller) return
 
-      setState({
-        status: 'error',
-        message: timedOut
-          ? 'Guest access took too long. Please try again.'
-          : 'Guest access could not be started. Please try again.',
-      })
+      if (timedOut) {
+        setState({
+          status: 'error',
+          message: 'Guest access took too long. Please try again.',
+        })
+      } else if (
+        !controller.signal.aborted &&
+        error instanceof GuestVerificationRequiredError
+      ) {
+        if (turnstileToken === undefined) {
+          setState({
+            status: 'verification',
+            message: 'Complete human verification to continue.',
+          })
+        } else {
+          setState({
+            status: 'error',
+            message: 'Verification was not accepted. Please try again.',
+          })
+        }
+      } else {
+        setState({
+          status: 'error',
+          message: 'Guest access could not be started. Please try again.',
+        })
+      }
     } finally {
       window.clearTimeout(timeout)
 
@@ -72,10 +111,22 @@ export function useGuestSession() {
     }
   }
 
+  function invalidateVerification() {
+    setState((current) =>
+      current.status === 'verification'
+        ? {
+            status: 'verification',
+            message: 'Complete a new verification check to continue.',
+          }
+        : current,
+    )
+  }
+
   return {
     enabled,
     status: state.status,
     message: state.message,
     start,
+    invalidateVerification,
   }
 }
