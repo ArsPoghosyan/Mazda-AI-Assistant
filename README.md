@@ -1102,8 +1102,9 @@ verification requirements produce controlled rejection errors; recognized
 client-wide rate limits remain distinct; unknown, malformed, transport, or server
 failures remain unavailable. Provider details are not returned in these errors.
 
-Each adapter refuses redirects, makes no automatic retry, limits provider work
-to five seconds, and reads at most 64 KiB of uncompressed JSON response data.
+The recovery-verification and password-update HTTP adapters refuse redirects,
+make no automatic retry, limit provider work to five seconds, and read at most
+64 KiB of uncompressed JSON response data.
 Responses close on success, failure, and caller cancellation; cancellation
 propagates. A timeout or malformed reply can occur after a provider-side change,
 so an unavailable result does not establish that the password stayed unchanged.
@@ -1112,9 +1113,61 @@ Offline tests cover input preservation and limits, response contracts, identity
 mismatches, masked errors, exact provider requests, redirect refusal, stream
 limits, deadlines, cancellation, and cleanup. They use synthetic credentials and
 mocked provider HTTP/authentication boundaries; existing account-authentication
-tests cover JWT verification. These helpers are not connected to a reset HTTP
-route or application service. Provider/application session cleanup, the frontend
-reset interface, and live recovery/password-reset validation remain outstanding.
+tests cover JWT verification. The internal reset service described below connects
+these helpers; a reset HTTP route, frontend interface and live password-reset
+validation remain outstanding.
+
+The separate recovery-session cleanup response interpreter accepts a no-content
+204 acknowledgement or an explicit 403 `session_not_found` reply from the
+provider's local-scope logout endpoint. An already absent session satisfies
+cleanup; expired/invalid credentials, unknown errors, conflicting error codes,
+rate limits and outages do not confirm it. Focused offline tests cover response
+classification and generic errors. This interpreter makes no HTTP request and
+is used by the cleanup HTTP helper below.
+
+The cleanup HTTP helper accepts credentials from the server's recovery exchange
+and their previously verified identity. It rejects mismatched account IDs, a
+zero provider-session ID, and malformed tokens before sending a request. The
+caller must have verified the exact access token supplied. It submits one
+`POST /logout?scope=local` request with the recovery bearer token, refuses
+redirects, and bounds network work to five seconds and error JSON to 64 KiB.
+A 204 reply must have no body. Responses close on success, failure and
+cancellation; cancellation propagates and no automatic retry is performed.
+Offline HTTP tests cover scope, identity guards, error handling, actual byte
+limits, deadlines and cancellation. An unavailable result can occur after
+provider revocation; it does not establish that the session remains active.
+The helper does not delete application sessions or complete a password reset.
+
+## Internal password-reset service
+
+The internal reset service verifies the recovery code and JWT identity, requires
+a nonzero provider-session ID, updates the password once and ends the temporary
+provider session. It then deletes the account's application sessions in a
+transaction, returning only after successful commit. It returns no credentials,
+creates no application login and issues no cookies; fresh sign-in is required.
+
+Known password-update rejection, rate limiting or unavailability triggers one
+cleanup attempt. Successful cleanup preserves the original update error; failed
+cleanup produces a generic reset-unavailable error. These failure paths do not
+delete application sessions. Cancellation and caller deadlines interrupt the
+operation without starting additional cleanup work or automatic retries.
+Provider-side changes cannot be undone by PostgreSQL rollback, and cleanup is
+not guaranteed when cancellation, outages or deadline expiry interrupt it.
+
+Mocked service tests cover operation order, exact helper arguments, configuration
+guards, nil session IDs, failures at each stage, transaction-open/commit failures,
+cleanup failures and cancellation. Guarded local PostgreSQL integration tests use
+real signing-key/JWT verification and mocked provider HTTP to cover committed
+account-session deletion, owner/guest/profile isolation, rejected recovery,
+identity mismatch, update errors, cleanup errors and real commit failure.
+Independent connections check transaction visibility and rollback. Tests also
+model provider-side changes surviving a database failure and verify that a
+surviving local session is refused when the provider reports it revoked.
+These scenarios model provider behavior; they do not validate live Supabase
+password changes or revocation. The service still has no public reset endpoint.
+Live provider checks establish session validity at the time of the check; they
+cannot cancel work already authorized before a reset. Concurrent reset/sign-in/
+refresh scenarios still need reset-specific coverage before public enablement.
 
 ## Frontend registration API foundation
 
