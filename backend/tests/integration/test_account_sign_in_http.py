@@ -138,6 +138,14 @@ def test_http_sign_in_obeys_commit_boundary(
     profile_statement = select(UserProfile.id).where(UserProfile.id == user_id)
 
     def provider(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET" and str(request.url) == ISSUER + "/user":
+            assert events == ["provider"]
+            assert request.headers["authorization"] == f"Bearer {access_token}"
+            assert request.headers["apikey"] == "sb_publishable_synthetic_test_key"
+            assert request.content == b""
+            events.append("verify")
+            return json_response({"id": str(user_id), "is_anonymous": False})
+
         if request.method == "GET":
             assert str(request.url) == ISSUER + "/.well-known/jwks.json"
             key_requests.append(request)
@@ -243,7 +251,7 @@ def test_http_sign_in_obeys_commit_boundary(
             )
 
             assert response.headers["Cache-Control"] == "no-store"
-            assert events == ["provider", "begin", "commit"]
+            assert events == ["provider", "verify", "begin", "commit"]
             assert len(sign_in_requests) == 1
             assert len(key_requests) == 1
 

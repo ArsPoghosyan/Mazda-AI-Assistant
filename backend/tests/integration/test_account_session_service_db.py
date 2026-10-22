@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -19,12 +20,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from jwt.algorithms import ECAlgorithm
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
-from sqlalchemy import delete, event, func, insert, select, text
+from sqlalchemy import delete, event, func, insert, literal, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
+import app.account_session_auth as session_auth
+import app.account_session_refresh as session_refresh
+from app.account_auth import AccountAuthenticationUnavailable
 from app.account_key_cache import AccountKeyCache
 from app.account_refresh import (
     AccountRefreshRejected,
@@ -204,6 +208,19 @@ def replacement_response(material: ServiceMaterial) -> httpx2.Response:
     )
 
 
+def active_session_response(
+    request: httpx2.Request,
+    material: ServiceMaterial,
+    access_token: SecretStr,
+) -> httpx2.Response:
+    assert request.method == "GET"
+    assert str(request.url) == ISSUER + "/user"
+    assert request.headers["authorization"] == f"Bearer {access_token.get_secret_value()}"
+    assert request.headers["apikey"] == "sb_publishable_synthetic_test_key"
+    assert request.content == b""
+    return json_response(200, {"id": str(material.user_id), "is_anonymous": False})
+
+
 @pytest.mark.parametrize("access_expired", [False, True])
 def test_coordinator_authenticates_and_preserves_other_session_data(
     async_app_connection_factory: ConnectionFactory,
@@ -231,6 +248,17 @@ def test_coordinator_authenticates_and_preserves_other_session_data(
 
             def handler(request: httpx2.Request) -> httpx2.Response:
                 requests.append(request)
+                if request.method == "GET":
+                    access = (
+                        material.replacement.access_token
+                        if access_expired
+                        else material.current_access
+                    )
+                    return active_session_response(request, material, access)
+
+                assert request.method == "POST"
+                assert str(request.url) == ISSUER + "/token?grant_type=refresh_token"
+                assert access_expired
                 return replacement_response(material)
 
             async with httpx2.AsyncClient(
@@ -264,7 +292,8 @@ def test_coordinator_authenticates_and_preserves_other_session_data(
             assert material.cipher.decrypt(after.access_token_ciphertext) == expected_access
             assert material.cipher.decrypt(after.refresh_token_ciphertext) == expected_refresh
 
-            assert len(requests) == int(access_expired)
+            assert len(requests) == 1 + int(access_expired)
+            assert requests[-1].method == "GET"
             if access_expired:
                 assert json.loads(requests[0].content) == {"refresh_token": OLD_REFRESH}
 
@@ -291,6 +320,143 @@ def test_coordinator_authenticates_and_preserves_other_session_data(
             assert (await connection.execute(other_statement)).one() == other_before
             assert connection.in_transaction()
             material.download.assert_awaited_once()
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+@pytest.mark.parametrize("access_expired", [False, True])
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [(403, AccountRefreshRejected), (503, AccountAuthenticationUnavailable)],
+)
+def test_live_provider_failure_prevents_activity_and_credential_writes(
+    async_app_connection_factory: ConnectionFactory,
+    material: ServiceMaterial,
+    access_expired: bool,
+    status: int,
+    expected_error: type[Exception],
+) -> None:
+    async def check() -> None:
+        async with async_app_connection_factory() as connection:
+            session_id, token = await seed_session(
+                connection, material, access_expired=access_expired
+            )
+            statement = select(AccountSession).where(AccountSession.id == session_id)
+            before = (await connection.execute(statement)).one()
+            requests: list[httpx2.Request] = []
+
+            def handler(request: httpx2.Request) -> httpx2.Response:
+                requests.append(request)
+                if request.method == "GET":
+                    access = (
+                        material.replacement.access_token
+                        if access_expired
+                        else material.current_access
+                    )
+                    active_session_response(request, material, access)
+                    return json_response(
+                        status, {"code": "session_not_found", "msg": "private-provider-detail"}
+                    )
+                assert access_expired
+                assert request.method == "POST"
+                assert str(request.url) == ISSUER + "/token?grant_type=refresh_token"
+                return replacement_response(material)
+
+            async with httpx2.AsyncClient(
+                transport=httpx2.MockTransport(handler), trust_env=False
+            ) as client:
+                with pytest.raises(expected_error) as caught:
+                    await authenticate_account_session(
+                        connection,
+                        token,
+                        settings=material.settings,
+                        client=client,
+                        key_cache=material.cache,
+                    )
+
+            assert "private-provider-detail" not in str(caught.value)
+            assert len(requests) == 1 + int(access_expired)
+            assert requests[-1].method == "GET"
+            # Compare before rollback: failure must not have written activity or tokens.
+            assert (await connection.execute(statement)).one() == before
+            assert connection.in_transaction()
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+@pytest.mark.parametrize("access_expired", [False, True])
+@pytest.mark.parametrize("deadline", ["idle", "absolute"])
+def test_expiry_during_live_check_prevents_session_revival(
+    async_app_connection_factory: ConnectionFactory,
+    material: ServiceMaterial,
+    access_expired: bool,
+    deadline: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        async with async_app_connection_factory() as connection:
+            expires_at = func.statement_timestamp() + timedelta(minutes=1)
+            if deadline == "idle":
+                session_id, token = await seed_session(
+                    connection,
+                    material,
+                    access_expired=access_expired,
+                    idle_expires_at=expires_at,
+                )
+            else:
+                session_id, token = await seed_session(
+                    connection,
+                    material,
+                    access_expired=access_expired,
+                    idle_expires_at=expires_at,
+                    absolute_expires_at=expires_at,
+                )
+            statement = select(AccountSession).where(AccountSession.id == session_id)
+            before = (await connection.execute(statement)).one()
+            requests: list[httpx2.Request] = []
+
+            def handler(request: httpx2.Request) -> httpx2.Response:
+                requests.append(request)
+                if request.method == "POST":
+                    assert access_expired
+                    assert str(request.url) == ISSUER + "/token?grant_type=refresh_token"
+                    return replacement_response(material)
+
+                access = (
+                    material.replacement.access_token if access_expired else material.current_access
+                )
+                reply = active_session_response(request, material, access)
+                checked_at = before.idle_expires_at
+                assert checked_at < material.current_expiry
+                # Advance the database check time at the provider-response boundary.
+                # Keep real SQL guards and the restricted role; absolute deadlines
+                # are intentionally not writable by the application role.
+                clock = SimpleNamespace(
+                    statement_timestamp=lambda: literal(checked_at),
+                    greatest=func.greatest,
+                    least=func.least,
+                )
+                monkeypatch.setattr(session_auth, "func", clock)
+                monkeypatch.setattr(session_refresh, "func", clock)
+                return reply
+
+            async with httpx2.AsyncClient(
+                transport=httpx2.MockTransport(handler), trust_env=False
+            ) as client:
+                authenticated = await authenticate_account_session(
+                    connection,
+                    token,
+                    settings=material.settings,
+                    client=client,
+                    key_cache=material.cache,
+                )
+
+            assert authenticated is None
+            assert len(requests) == 1 + int(access_expired)
+            after = (await connection.execute(statement)).one()
+            assert after == before
+            if deadline == "absolute":
+                assert after.absolute_expires_at == after.idle_expires_at
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
 
@@ -364,6 +530,10 @@ def test_coordinator_refresh_rolls_back_with_callers_savepoint(
 
             def handler(request: httpx2.Request) -> httpx2.Response:
                 requests.append(request)
+                if request.method == "GET":
+                    return active_session_response(
+                        request, material, material.replacement.access_token
+                    )
                 return replacement_response(material)
 
             async with httpx2.AsyncClient(
@@ -388,7 +558,7 @@ def test_coordinator_refresh_rolls_back_with_callers_savepoint(
                 finally:
                     await savepoint.rollback()
 
-            assert len(requests) == 1
+            assert [request.method for request in requests] == ["POST", "GET"]
             assert (await connection.execute(statement)).one() == before
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
@@ -453,6 +623,7 @@ def test_concurrent_requests_respect_first_refresh_transaction(
                 refresh_entered = asyncio.Event()
                 release_refresh = asyncio.Event()
                 requests: list[httpx2.Request] = []
+                session_checks: list[httpx2.Request] = []
                 first_ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
                 second_ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
                 statement = select(AccountSession).where(AccountSession.id == session_id)
@@ -460,6 +631,11 @@ def test_concurrent_requests_respect_first_refresh_transaction(
                 async def handler(
                     request: httpx2.Request,
                 ) -> httpx2.Response:
+                    if request.method == "GET":
+                        session_checks.append(request)
+                        return active_session_response(
+                            request, material, material.replacement.access_token
+                        )
                     requests.append(request)
                     assert json.loads(request.content) == {"refresh_token": OLD_REFRESH}
                     if len(requests) == 1:
@@ -570,6 +746,7 @@ def test_concurrent_requests_respect_first_refresh_transaction(
 
                             assert not second_task.done()
                             assert len(requests) == 1
+                            assert session_checks == []
 
                             release_refresh.set()
                             first_result, first_snapshot = await first_task
@@ -577,6 +754,7 @@ def test_concurrent_requests_respect_first_refresh_transaction(
 
                         if reject_recovery:
                             assert len(requests) == 2
+                            assert len(session_checks) == 1
                             assert first_result is None
                             assert second_result is None
 
@@ -587,6 +765,7 @@ def test_concurrent_requests_respect_first_refresh_transaction(
                             return
 
                         assert second_result is not None
+                        assert len(session_checks) == 2
                         assert second_result.session_id == session_id
                         assert second_result.account.user_id == material.user_id
                         assert second_result.account.session_id == material.provider_session_id
@@ -735,8 +914,17 @@ def test_transaction_boundary_preserves_commit_and_rollback(
                     )
 
                 requests: list[httpx2.Request] = []
+                session_checks: list[httpx2.Request] = []
 
                 def handler(request: httpx2.Request) -> httpx2.Response:
+                    if request.method == "GET":
+                        session_checks.append(request)
+                        access = (
+                            material.replacement.access_token
+                            if access_expired
+                            else material.current_access
+                        )
+                        return active_session_response(request, material, access)
                     requests.append(request)
                     assert access_expired
                     assert len(requests) == 1
@@ -770,6 +958,8 @@ def test_transaction_boundary_preserves_commit_and_rollback(
                 # This independent connection can see only committed changes.
                 async with async_app_connection_factory() as observer:
                     after = (await observer.execute(statement)).one()
+
+                assert len(session_checks) == 1
 
                 if rollback_after_auth:
                     assert authenticated is None

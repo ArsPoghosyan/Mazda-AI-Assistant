@@ -1021,6 +1021,59 @@ endpoint does not establish complete account-enumeration or abuse protection;
 public enablement still requires the remaining abuse controls and deployment
 review.
 
+## Internal provider-session response validation
+
+The provider-session response interpreter accepts a successful raw user reply
+only when it identifies the expected backend-verified, non-anonymous account.
+Known session rejections remain distinct from unavailable verification; malformed
+replies, unexpected statuses and rate limits cannot authorize access. Errors omit
+provider details. Offline tests cover identity mismatches, response boundaries
+and current and legacy error formats.
+
+The separate HTTP helper checks the configured provider's authenticated user
+endpoint once, refuses redirects, and bounds network work to five seconds and
+64 KiB of uncompressed JSON. Mocked HTTP tests cover request headers, response
+limits, timeouts, cancellation and response cleanup.
+
+`authenticate_active_account_token` composes existing JWT verification with this
+live check, requires a nonzero provider session ID, and preserves the existing
+invalid-token versus unavailable-authentication errors. It checks the provider
+on every call, even when signing keys are cached. Sign-in uses this combined
+check before opening the session-creation transaction; rejection, provider
+unavailability and cancellation prevent database work. Session creation retains
+its own JWT verification, and browser credentials are returned only after commit.
+Existing application-session authentication also requires a live check before
+updating activity or storing refreshed credentials, while retaining the row lock
+and existing database deadline guards.
+
+The internal `verify_active_account_session_token` helper verifies JWT identity,
+requires matching account and nonzero provider-session IDs from a locked session,
+then performs the live check. Invalid stored credentials or identity mismatches
+remain unavailable verification; explicit provider rejection uses the existing
+rejected-session error. Unit tests cover ordering, identity binding, error mapping
+and cancellation. This helper does not write activity or credentials. The
+coordinator uses it for both current and refreshed access tokens; failures stop
+before activity or credential writes without retry or fallback.
+
+Guarded local PostgreSQL tests exercise these paths with real JWT verification
+and mocked provider HTTP. They check unchanged rows on live-check failure,
+concurrent refresh/rollback behavior, and expiry guards using a simulated later
+database check time. HTTP integration tests verify that provider rejection clears
+the cookie with a generic 401, while outages return 503 without clearing it, and
+commit failures cannot renew cookies. These tests do not verify live hosted
+Supabase revocation behavior.
+
+The Bearer-only `/api/v1/account/me` identity endpoint retains its existing JWT
+verification behavior; this checkpoint's live checks cover sign-in and cookie
+session authentication. The identity endpoint is not a live revocation check.
+
+The internal `invalidate_account_sessions` helper deletes application-session
+rows belonging to a backend-verified account within a caller-owned transaction
+and returns the number deleted. Unit and local database tests cover owner
+isolation, expired rows, repeated calls and rollback, preserving other accounts,
+profiles and guest sessions. It does not revoke provider sessions or complete a
+password reset; recovery authorization and commit remain the caller's duties.
+
 ## Internal password-reset adapters
 
 The reset-input parser accepts only email, a six-to-ten-digit ASCII recovery

@@ -52,29 +52,33 @@ class JsonStream(httpx2.AsyncByteStream):
         yield self.body
 
 
-def json_response(payload: dict[str, object]) -> httpx2.Response:
+def json_response(payload: dict[str, object], status_code: int = 200) -> httpx2.Response:
     return httpx2.Response(
-        200,
+        status_code,
         headers={"Content-Type": "application/json"},
         stream=JsonStream(payload),
     )
 
 
 @pytest.mark.parametrize(
-    "rollback_after_auth",
-    [False, True],
-    ids=["commit", "rollback"],
-)
-@pytest.mark.parametrize(
-    "access_expired",
-    [False, True],
-    ids=["current-access", "refreshed-access"],
+    ("access_expired", "rollback_after_auth", "provider_failure"),
+    [
+        pytest.param(False, False, "none", id="current-commit"),
+        pytest.param(False, True, "none", id="current-rollback"),
+        pytest.param(True, False, "none", id="refreshed-commit"),
+        pytest.param(True, True, "none", id="refreshed-rollback"),
+        pytest.param(False, False, "rejected", id="current-provider-rejected"),
+        pytest.param(True, False, "rejected", id="refreshed-provider-rejected"),
+        pytest.param(False, False, "unavailable", id="current-provider-unavailable"),
+        pytest.param(True, False, "unavailable", id="refreshed-provider-unavailable"),
+    ],
 )
 def test_http_authentication_obeys_transaction_boundary(
     integration_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
     access_expired: bool,
     rollback_after_auth: bool,
+    provider_failure: str,
 ) -> None:
     user_id = uuid4()
     provider_session_id = uuid4()
@@ -138,8 +142,23 @@ def test_http_authentication_obeys_transaction_boundary(
 
     key_requests: list[httpx2.Request] = []
     refresh_requests: list[httpx2.Request] = []
+    session_requests: list[httpx2.Request] = []
 
     def provider(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET" and str(request.url) == ISSUER + "/user":
+            session_requests.append(request)
+            expected_access = replacement_access if access_expired else initial_access
+            assert request.headers["authorization"] == f"Bearer {expected_access}"
+            assert request.headers["apikey"] == "sb_publishable_synthetic_test_key"
+            assert request.content == b""
+            assert len(refresh_requests) == int(access_expired)
+            if provider_failure != "none":
+                return json_response(
+                    {"code": "session_not_found", "msg": "private-provider-detail"},
+                    403 if provider_failure == "rejected" else 503,
+                )
+            return json_response({"id": str(user_id), "is_anonymous": False})
+
         if request.method == "GET" and str(request.url) == ISSUER + "/.well-known/jwks.json":
             key_requests.append(request)
             return json_response({"keys": [public_jwk]})
@@ -271,9 +290,39 @@ def test_http_authentication_obeys_transaction_boundary(
             with integration_engine.connect() as observer:
                 after = observer.execute(statement).one()
 
-            assert commit_attempts == 1
             assert len(key_requests) == 1
             assert len(refresh_requests) == int(access_expired)
+            assert len(session_requests) == 1
+
+            for secret in (
+                browser_token,
+                initial_access,
+                replacement_access,
+                OLD_REFRESH,
+                NEW_REFRESH,
+                "private-provider-detail",
+            ):
+                assert secret not in response.text
+
+            if provider_failure != "none":
+                assert commit_attempts == 0
+                assert dict(after._mapping) == dict(before._mapping)
+                if provider_failure == "rejected":
+                    assert response.status_code == 401
+                    assert response.json() == {"detail": "Invalid or expired account session."}
+                    cleared: SimpleCookie = SimpleCookie()
+                    cleared.load(response.headers["set-cookie"])
+                    assert cleared[COOKIE_NAME].value == ""
+                    assert cleared[COOKIE_NAME]["max-age"] == "0"
+                else:
+                    assert response.status_code == 503
+                    assert response.json() == {
+                        "detail": "Account sessions are temporarily unavailable."
+                    }
+                    assert "set-cookie" not in response.headers
+                return
+
+            assert commit_attempts == 1
 
             if rollback_after_auth:
                 assert response.status_code == 503

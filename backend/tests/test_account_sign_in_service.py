@@ -31,7 +31,7 @@ from app.account_sign_in import (
     AccountSignInUnavailable,
     SignedInAccountTokens,
 )
-from app.account_tokens import InvalidAccountToken
+from app.account_tokens import InvalidAccountToken, VerifiedAccount
 from app.config import Settings
 
 pytestmark = pytest.mark.anyio
@@ -54,6 +54,7 @@ class SignInMaterial:
     tokens: SignedInAccountTokens
     created: CreatedAccountSession
     sign_in: AsyncMock
+    authenticate: AsyncMock
     create_session: AsyncMock
     commit: AsyncMock
     events: list[str]
@@ -96,6 +97,21 @@ def material(monkeypatch: pytest.MonkeyPatch) -> SignInMaterial:
 
     events: list[str] = []
     commit = AsyncMock()
+
+    async def authenticate(
+        *args: object,
+        **kwargs: object,
+    ) -> VerifiedAccount:
+        events.append("verify")
+        return VerifiedAccount(
+            user_id=created.user_id,
+            session_id=uuid4(),
+            assurance_level="aal1",
+            access_token_expires_at=now + timedelta(minutes=5),
+        )
+
+    authenticate_mock = AsyncMock(side_effect=authenticate)
+    monkeypatch.setattr(service, "authenticate_active_account_token", authenticate_mock)
 
     async def provider_sign_in(
         *args: object,
@@ -143,6 +159,7 @@ def material(monkeypatch: pytest.MonkeyPatch) -> SignInMaterial:
         tokens=tokens,
         created=created,
         sign_in=sign_in,
+        authenticate=authenticate_mock,
         create_session=create,
         commit=commit,
         events=events,
@@ -174,6 +191,7 @@ async def test_returns_session_after_commit_and_connection_release(
     assert result is material.created
     assert material.events == [
         "provider",
+        "verify",
         "begin",
         "create",
         "commit",
@@ -187,6 +205,12 @@ async def test_returns_session_after_commit_and_connection_release(
         settings=material.settings,
         client=material.client,
         captcha_token=None,
+    )
+    material.authenticate.assert_awaited_once_with(
+        material.tokens.access_token,
+        settings=material.settings,
+        key_cache=material.key_cache,
+        client=material.client,
     )
     material.create_session.assert_awaited_once_with(
         material.connection,
@@ -225,6 +249,7 @@ async def test_missing_configuration_stops_before_provider_or_database(
 
     assert material.events == []
     material.sign_in.assert_not_awaited()
+    material.authenticate.assert_not_awaited()
     material.engine.begin.assert_not_called()
     material.create_session.assert_not_awaited()
     material.commit.assert_not_awaited()
@@ -251,6 +276,7 @@ async def test_provider_failure_does_not_open_database_transaction(
     assert caught.value is failure
     assert material.events == []
     material.sign_in.assert_awaited_once()
+    material.authenticate.assert_not_awaited()
     material.engine.begin.assert_not_called()
     material.create_session.assert_not_awaited()
     material.commit.assert_not_awaited()
@@ -285,7 +311,7 @@ async def test_session_creation_failure_exits_transaction_without_commit(
         await invoke(material)
 
     assert caught.value is failure
-    assert material.events == ["provider", "begin", "rollback", "release"]
+    assert material.events == ["provider", "verify", "begin", "rollback", "release"]
     material.sign_in.assert_awaited_once()
     material.engine.begin.assert_called_once_with()
     material.create_session.assert_awaited_once()
@@ -310,7 +336,7 @@ async def test_commit_failure_prevents_returning_session(
         await invoke(material)
 
     assert caught.value is failure
-    assert material.events == ["provider", "begin", "create", "commit", "release"]
+    assert material.events == ["provider", "verify", "begin", "create", "commit", "release"]
     material.sign_in.assert_awaited_once()
     material.engine.begin.assert_called_once_with()
     material.create_session.assert_awaited_once()
@@ -327,6 +353,7 @@ async def test_forwards_captcha_without_persisting_it(
     assert result is material.created
     assert material.events == [
         "provider",
+        "verify",
         "begin",
         "create",
         "commit",
@@ -370,6 +397,7 @@ async def test_captcha_rejection_prevents_database_work(
 
     assert caught.value is failure
     assert material.events == []
+    material.authenticate.assert_not_awaited()
 
     material.sign_in.assert_awaited_once_with(
         EMAIL,
@@ -377,6 +405,37 @@ async def test_captcha_rejection_prevents_database_work(
         settings=material.settings,
         client=material.client,
         captcha_token=captcha_token,
+    )
+    material.engine.begin.assert_not_called()
+    material.create_session.assert_not_awaited()
+    material.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        InvalidAccountToken("Invalid account token."),
+        AccountAuthenticationUnavailable("Account authentication is unavailable."),
+        asyncio.CancelledError(),
+    ],
+    ids=["rejected", "unavailable", "cancelled"],
+)
+async def test_active_verification_failure_prevents_database_work(
+    material: SignInMaterial,
+    failure: BaseException,
+) -> None:
+    material.authenticate.side_effect = failure
+
+    with pytest.raises(type(failure)) as caught:
+        await invoke(material)
+
+    assert caught.value is failure
+    assert material.events == ["provider"]
+    material.authenticate.assert_awaited_once_with(
+        material.tokens.access_token,
+        settings=material.settings,
+        key_cache=material.key_cache,
+        client=material.client,
     )
     material.engine.begin.assert_not_called()
     material.create_session.assert_not_awaited()

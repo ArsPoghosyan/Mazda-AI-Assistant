@@ -127,6 +127,14 @@ def test_sign_in_obeys_database_commit_boundary(
     profile_statement = select(UserProfile.id).where(UserProfile.id == user_id)
 
     def provider(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET" and str(request.url) == ISSUER + "/user":
+            assert events == ["provider"]
+            assert request.headers["authorization"] == f"Bearer {access_token}"
+            assert request.headers["apikey"] == "sb_publishable_synthetic_test_key"
+            assert request.content == b""
+            events.append("verify")
+            return json_response({"id": str(user_id), "is_anonymous": False})
+
         if request.method == "GET":
             assert str(request.url) == ISSUER + "/.well-known/jwks.json"
             key_requests.append(request)
@@ -232,13 +240,13 @@ def test_sign_in_obeys_database_commit_boundary(
             profile = observer.scalar(profile_statement)
 
         if fail_commit:
-            assert events == ["provider", "begin", "commit"]
+            assert events == ["provider", "verify", "begin", "commit"]
             assert created is None
             assert stored is None
             assert profile is None
             return
 
-        assert events == ["provider", "begin", "commit", "returned"]
+        assert events == ["provider", "verify", "begin", "commit", "returned"]
         assert created is not None
         assert stored is not None
         assert profile == user_id

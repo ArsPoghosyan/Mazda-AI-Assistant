@@ -4,6 +4,7 @@ import httpx2
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.account_auth import authenticate_active_account_token
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import CreatedAccountSession, create_account_session
 from app.account_sign_in import AccountSignInUnavailable, sign_in_with_password
@@ -22,7 +23,8 @@ async def sign_in_account(
 ) -> CreatedAccountSession:
     """Return a browser credential only after successful database commit.
 
-    Provider sign-in occurs before opening the database transaction.
+    Provider sign-in and live session verification occur before opening the
+    database transaction. Session creation retains its own JWT verification.
     Verification, persistence, and commit failures propagate without retries.
     This service does not issue cookies or expose an HTTP endpoint.
     """
@@ -40,6 +42,13 @@ async def sign_in_account(
         settings=settings,
         client=client,
         captcha_token=captcha_token,
+    )
+
+    await authenticate_active_account_token(
+        tokens.access_token,
+        settings=settings,
+        key_cache=key_cache,
+        client=client,
     )
 
     async with engine.begin() as connection:

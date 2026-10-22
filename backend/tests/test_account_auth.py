@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -15,9 +16,14 @@ from pydantic_settings import SettingsConfigDict
 from app.account_auth import (
     AccountAuthenticationUnavailable,
     authenticate_account_token,
+    authenticate_active_account_token,
 )
 from app.account_key_cache import AccountKeyCache
 from app.account_key_fetch import AccountKeyFetchError
+from app.account_provider_session import (
+    AccountProviderSessionRejected,
+    AccountProviderSessionUnavailable,
+)
 from app.account_tokens import InvalidAccountToken, VerifiedAccount
 from app.config import Settings
 
@@ -293,3 +299,129 @@ async def test_cancellation_propagates(
 
     with pytest.raises(asyncio.CancelledError):
         await authenticate_account_token(token, settings=settings, key_cache=cache)
+
+
+async def test_active_auth_checks_provider_each_time_after_jwt_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    token: SecretStr,
+    cache: AccountKeyCache,
+    download: AsyncMock,
+) -> None:
+    check = AsyncMock()
+    monkeypatch.setattr("app.account_auth.check_provider_session", check)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
+            lambda request: pytest.fail("No live provider HTTP belongs in this test.")
+        )
+    ) as client:
+        first = await authenticate_active_account_token(
+            token, settings=settings, key_cache=cache, client=client
+        )
+        second = await authenticate_active_account_token(
+            token, settings=settings, key_cache=cache, client=client
+        )
+
+        assert first == second
+        assert first.user_id == USER_ID
+        assert first.session_id == SESSION_ID
+        assert check.await_count == 2
+        check.assert_awaited_with(token, verified_account=second, settings=settings, client=client)
+
+    download.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_error", "message"),
+    [
+        (AccountProviderSessionRejected, InvalidAccountToken, "Invalid account token."),
+        (
+            AccountProviderSessionUnavailable,
+            AccountAuthenticationUnavailable,
+            "Account authentication is unavailable.",
+        ),
+    ],
+)
+async def test_active_auth_maps_provider_failure_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    token: SecretStr,
+    cache: AccountKeyCache,
+    provider_error: type[Exception],
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    check = AsyncMock(side_effect=provider_error("private-provider-detail"))
+    monkeypatch.setattr("app.account_auth.check_provider_session", check)
+
+    async with httpx2.AsyncClient() as client:
+        with pytest.raises(expected_error) as caught:
+            await authenticate_active_account_token(
+                token, settings=settings, key_cache=cache, client=client
+            )
+
+    assert str(caught.value) == message
+    assert caught.value.__suppress_context__
+    assert token.get_secret_value() not in repr(caught.value)
+    check.assert_awaited_once()
+
+
+async def test_active_auth_rejects_invalid_jwt_before_provider_check(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    cache: AccountKeyCache,
+    download: AsyncMock,
+) -> None:
+    check = AsyncMock()
+    monkeypatch.setattr("app.account_auth.check_provider_session", check)
+
+    async with httpx2.AsyncClient() as client:
+        with pytest.raises(InvalidAccountToken):
+            await authenticate_active_account_token(
+                SecretStr("not-a-token"), settings=settings, key_cache=cache, client=client
+            )
+
+    check.assert_not_awaited()
+    download.assert_not_awaited()
+
+
+async def test_active_auth_requires_nonzero_signed_provider_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    signing_key: ec.EllipticCurvePrivateKey,
+    claims: dict[str, object],
+    cache: AccountKeyCache,
+) -> None:
+    check = AsyncMock()
+    monkeypatch.setattr("app.account_auth.check_provider_session", check)
+    claims["session_id"] = str(UUID(int=0))
+    token = SecretStr(jwt.encode(claims, signing_key, algorithm="ES256", headers={"kid": KEY_ID}))
+
+    async with httpx2.AsyncClient() as client:
+        with pytest.raises(InvalidAccountToken, match="Invalid account token"):
+            await authenticate_active_account_token(
+                token, settings=settings, key_cache=cache, client=client
+            )
+
+    check.assert_not_awaited()
+
+
+async def test_active_auth_propagates_provider_check_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    token: SecretStr,
+    cache: AccountKeyCache,
+) -> None:
+    cancellation = asyncio.CancelledError()
+    check = AsyncMock(side_effect=cancellation)
+    monkeypatch.setattr("app.account_auth.check_provider_session", check)
+
+    async with httpx2.AsyncClient() as client:
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await authenticate_active_account_token(
+                token, settings=settings, key_cache=cache, client=client
+            )
+
+    assert caught.value is cancellation
+    check.assert_awaited_once()
