@@ -94,7 +94,7 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   required CAPTCHA input, generic outcomes, and mocked failure/cancellation tests.
 - A default-disabled registration HTTP endpoint with trusted-Origin checks, a
   total deadline, and generic acknowledgements. It issues no application cookies;
-  the registration interface remains unimplemented.
+  its interface is available only in development.
 - Internal email-code confirmation parsing and a bounded Supabase verification
   adapter, with masked credentials, response validation, and mocked HTTP tests.
   Provider session credentials are discarded; application sign-in remains separate.
@@ -103,7 +103,8 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   confirmation, malformed input, provider failures, configuration gates, and deadlines.
 - Frontend registration and email-confirmation API helpers with explicit request
   fields, validated acknowledgement responses, controlled errors, cancellation,
-  and mocked API tests. These helpers are not connected to the interface yet.
+  and mocked API tests. Development forms connect these helpers inside the
+  existing account dialog, with a separate sign-in after email confirmation.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -112,7 +113,7 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   once and requires a fresh attempt after a failed submission.
 - Python lint/type checks and frontend proxy tests/lint/type/build checks.
 
-Account sign-up UI, chat, conversation persistence, vehicle selection,
+Chat, conversation persistence, vehicle selection,
 retrieval, and AI calls are not implemented. Expired guest
 sessions are rejected before refresh; automated guest-history cleanup is not implemented.
 Embeddings are planned with OpenAI `text-embedding-3-small` (1536 dimensions);
@@ -614,7 +615,9 @@ tests make no database or provider requests and do not enable account endpoints.
 Registration currently consists of configuration, bounded credential parsing,
 provider-response interpretation, and an internal `sign_up_with_password` adapter.
 `POST /api/v1/account/sign-up` connects these helpers without creating an
-application session. The sign-up and email-confirmation interfaces are not implemented.
+application session. Sign-up and email-confirmation interfaces are available only
+in development; the complete flow has been manually validated locally with the
+live provider, including email delivery and separate application sign-in.
 `ACCOUNT_SIGN_UP_API_ENABLED` defaults to false. The route's total timeout setting,
 `ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
 it does not change the adapter's independent five-second provider deadline.
@@ -655,9 +658,10 @@ headers and do not set or clear account or guest cookies. Registration does not
 require an application database connection, session-encryption key, or JWT lookup.
 
 Supabase email confirmation and CAPTCHA protection must be configured before
-registration is enabled. The planned flow uses one password field, an emailed
-verification code, and then the existing sign-in flow. Confirmation, delivery,
-and the complete registration flow have not been validated live. Offline tests
+registration is enabled. The development interface uses one password field, an emailed
+verification code, and then the existing sign-in flow. Manual local validation
+on 2026-10-22 covered registration, email delivery, code confirmation, separate
+sign-in, session restoration after refresh, sign-out, and signing in again. Offline tests
 use synthetic credentials and mocked HTTP to cover parsing, configuration,
 response classification, size limits, redirects, transport failures, deadlines,
 cancellation, and stream cleanup; they send no registration emails. HTTP tests
@@ -670,7 +674,8 @@ cookie preservation, and cancellation of stalled body/provider work.
 Email confirmation currently provides configuration, bounded JSON parsing,
 provider-response interpretation, and the internal `confirm_email_code` adapter.
 `POST /api/v1/account/confirm-email` connects these helpers without issuing an
-application session or cookie. The frontend confirmation interface is not implemented.
+application session or cookie. The frontend confirmation interface is available
+only in development and requires a separate sign-in after confirmation.
 The independent `ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED` flag defaults to false.
 The route's total timeout setting, `ACCOUNT_EMAIL_CONFIRMATION_TIMEOUT_SECONDS`,
 defaults to 15 seconds and accepts one to 30; the adapter has its own five-second deadline.
@@ -719,7 +724,7 @@ Offline tests use synthetic credentials, in-memory parser endpoints, and mocked
 provider HTTP. They cover feature defaults, timeout bounds, input masking and size
 limits, response classification, exact request forwarding, redirects, transport
 errors, cumulative response bounds, stalled requests/streams, cancellation, and
-cleanup. No live confirmation requests or email delivery checks have been made.
+cleanup. Separate manual local checks validated live email delivery and confirmation.
 Route tests use the real adapter with mocked provider HTTP to cover successful
 confirmation, exact credential forwarding, unchanged cookie headers, and
 Origin/feature/resource gates. They also check malformed input, rejected
@@ -771,8 +776,8 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, the signup and email-confirmation interfaces,
-password recovery, and Google sign-in remain unimplemented. The development-only
+default. Additional abuse controls, password recovery, and Google sign-in remain
+unimplemented. The development-only
 frontend sign-in flow is described below.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
@@ -975,8 +980,9 @@ successful sign-in, automatic dialog dismissal, account restoration after a page
 refresh, and successful sign-out. These checks validate the local development
 flow; production account access remains disabled and is not validated by them.
 
-The frontend does not yet provide registration, email-confirmation,
-password-recovery, or Google sign-in interfaces. Chat remains in development.
+Registration and email-confirmation forms are available only in development.
+Password-recovery and Google sign-in interfaces remain unimplemented. Chat remains
+in development.
 
 ## Frontend registration API foundation
 
@@ -993,7 +999,44 @@ and return only allowlisted status metadata. They do not persist credentials or
 automatically retry. Mocked tests cover request fields, controlled errors,
 malformed responses, unexpected statuses, and cancellation.
 
-The registration and confirmation interfaces are not implemented yet.
+The development account dialog switches between sign-in, registration, and
+email confirmation without replacing its native modal shell. Registration has
+one password field with a visibility toggle and a Turnstile check. Each proof is
+consumed once; failed submissions require a fresh check. Confirmation reuses the
+registration email and accepts a pasted or autofilled six-to-ten-digit code,
+preserving leading zeros. Codes and passwords are cleared from their inputs when
+submitted. The request hooks cancel after 15 seconds and on unmount, reject
+duplicate submissions, and do not automatically retry.
+
+After confirmation, an explicit "Continue to sign in" action opens a fresh
+sign-in form with the email prefilled. It does not establish an application
+session. Closing the dialog resets the flow and restores focus to its trigger.
+Automated tests mock provider requests. Manual local checks on 2026-10-22
+validated live registration, email delivery, code confirmation, separate sign-in,
+refresh restoration, sign-out, and signing in again. Both backend endpoint flags
+still default to false, and production registration is not enabled by these UI changes.
+
+For local registration testing, enable `ACCOUNT_SIGN_UP_API_ENABLED=true` and
+`ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED=true` in the ignored `backend/.env`, then
+restart FastAPI. Keep Supabase's email provider, email confirmation, and CAPTCHA
+protection enabled. The **Confirm signup** email template must contain
+`{{ .Token }}` so the recipient can enter the code in the confirmation form.
+Use a new email address you control; the generic registration acknowledgement
+does not guarantee a new account or a delivered email.
+
+The validated email-delivery setup uses Resend custom SMTP configured in
+Supabase Auth, with a verified authentication sending subdomain, tracking left
+unconfigured, and enforced TLS. SMTP credentials belong in Supabase's SMTP
+settings, not in frontend variables or repository files. Resend processes the
+recipient address and email content as part of delivery. Its documented storage
+location is the United States; selecting an EU sending region does not change
+that storage location. Provider data flows, retention, privacy notices, and
+production deployment checks still require review before enabling public
+registration. See [Resend's data-handling documentation](https://resend.com/security/gdpr).
+Setup references:
+[Supabase custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp),
+[email templates](https://supabase.com/docs/guides/auth/auth-email-templates), and
+[Resend's Supabase SMTP guide](https://resend.com/docs/send-with-supabase-smtp).
 
 ## Account sign-out endpoint
 
@@ -1296,8 +1339,10 @@ and recovery with a fresh proof after rejected or unavailable verification.
 Automated tests do not contact Cloudflare or prove live token replay protection.
 
 Public guest access still requires abuse controls and production guest-route/cookie
-forwarding. Account sign-in, session restoration, and sign-out are available only
-in development; registration and recovery interfaces remain unimplemented.
+forwarding. Account sign-in, session restoration, sign-out, registration, and
+email-confirmation interfaces are available only in development; password recovery
+remains unimplemented. Registration and confirmation have been manually validated
+locally; public deployment remains a separate step.
 
 ## License
 

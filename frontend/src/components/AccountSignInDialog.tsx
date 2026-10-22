@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, type RefObject } from 'react'
 import type { AccountSessionResponse } from '../api/account'
-import AccountSignInForm from './AccountSignInForm'
+import AccountAccessFlow from './AccountAccessFlow'
 
 type AccountSignInDialogProps = {
   open: boolean
@@ -80,7 +80,7 @@ export default function AccountSignInDialog({
         onFocus={() => focusEdge('last')}
       />
       {open && (
-        <AccountSignInForm
+        <AccountAccessFlow
           siteKey={siteKey}
           titleId={titleId}
           onClose={onClose}

@@ -126,7 +126,7 @@ test('focus guards wrap between the first and last available controls', async ()
   const { dialog } = await openDialog()
   act(() => options().callback('synthetic-proof'))
   const first = within(dialog).getByRole('button', { name: 'Close sign-in' })
-  const last = within(dialog).getByRole('button', { name: 'Sign in' })
+  const last = within(dialog).getByRole('button', { name: 'Create account' })
   // jsdom has no layout. Mark the boundary controls as visible for this check.
   const rectangles = [new DOMRect(0, 0, 100, 44)] as unknown as DOMRectList
   vi.spyOn(first, 'getClientRects').mockReturnValue(rectangles)
@@ -186,6 +186,107 @@ test('submits the sign-in request once and cancels it when the dialog closes', a
   })
   expect(screen.queryByText('Signed in. Chat is still in development.')).toBeNull()
 })
+
+test('registration and confirmation return to a separate sign-in inside the same dialog', async () => {
+  vi.mocked(fetch).mockImplementation(async (url) => {
+    if (url === '/api/v1/health') return healthResponse()
+    if (url === '/api/v1/account/sign-up') {
+      return Response.json({ status: 'accepted' }, { status: 202 })
+    }
+    if (url === '/api/v1/account/confirm-email') {
+      return Response.json({ status: 'confirmed' })
+    }
+    throw new Error('Unexpected request')
+  })
+
+  const { user, dialog } = await openDialog()
+  const modalOpens = vi.mocked(prototype.showModal).mock.calls.length
+
+  await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
+  await screen.findByText('Complete the check to continue.')
+
+  expect(screen.getByRole('dialog', { name: 'Create account' })).toBe(dialog)
+  expect(options().action).toBe('account_sign_up')
+  expect(document.activeElement).toBe(within(dialog).getByLabelText('Email'))
+
+  await user.type(within(dialog).getByLabelText('Email'), 'owner@example.test')
+  await user.type(within(dialog).getByLabelText('Password', { exact: true }), 'synthetic-password')
+  act(() => options().callback('synthetic-registration-proof'))
+  await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
+
+  await screen.findByRole('dialog', { name: 'Confirm your email' })
+  const code = within(dialog).getByLabelText('Verification code')
+  expect(document.activeElement).toBe(code)
+  expect(within(dialog).queryByLabelText('Password', { exact: true })).toBeNull()
+
+  await user.paste('00001234')
+  await user.click(within(dialog).getByRole('button', { name: 'Confirm email' }))
+  await screen.findByText('Email confirmed. You can now sign in.')
+
+  const confirmationCalls = vi.mocked(fetch).mock.calls.filter(
+    ([url]) => url === '/api/v1/account/confirm-email',
+  )
+  expect(confirmationCalls).toHaveLength(1)
+  expect(JSON.parse(String(confirmationCalls[0]?.[1]?.body))).toEqual({
+    email: 'owner@example.test', code: '00001234',
+  })
+  expect(vi.mocked(fetch).mock.calls.some(
+    ([url]) => url === '/api/v1/account/sign-in',
+  )).toBe(false)
+
+  await user.click(within(dialog).getByRole('button', { name: 'Continue to sign in' }))
+  await screen.findByText('Complete the check to continue.')
+
+  expect(screen.getByRole('dialog', { name: 'Sign in' })).toBe(dialog)
+  expect(within(dialog).getByLabelText<HTMLInputElement>('Email').value).toBe('owner@example.test')
+  expect(within(dialog).getByLabelText<HTMLInputElement>('Password', { exact: true }).value).toBe('')
+  expect(options().action).toBe('account_sign_in')
+  expect(vi.mocked(prototype.showModal)).toHaveBeenCalledTimes(modalOpens)
+  expect(document.body.style.overflow).toBe('hidden')
+  expect(vi.mocked(fetch).mock.calls.some(
+    ([url]) => url === '/api/v1/account/sign-in',
+  )).toBe(false)
+})
+
+test.each(['registration', 'confirmation'] as const)(
+  'closing from %s resets the flow and restores focus', async (stage) => {
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (url === '/api/v1/health') return healthResponse()
+      if (url === '/api/v1/account/sign-up') {
+        return Response.json({ status: 'accepted' }, { status: 202 })
+      }
+      throw new Error('Unexpected request')
+    })
+
+    const { user, trigger, dialog } = await openDialog()
+    await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
+    await screen.findByText('Complete the check to continue.')
+    await user.type(within(dialog).getByLabelText('Email'), 'owner@example.test')
+    await user.type(within(dialog).getByLabelText('Password', { exact: true }), 'synthetic-password')
+
+    if (stage === 'confirmation') {
+      act(() => options().callback('synthetic-registration-proof'))
+      await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
+      await screen.findByRole('dialog', { name: 'Confirm your email' })
+      await user.type(within(dialog).getByLabelText('Verification code'), '00001234')
+    }
+
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(document.body.style.overflow).toBe('')
+
+    await user.click(trigger)
+    await screen.findByText('Complete the check to continue.')
+
+    const reopened = screen.getByRole('dialog', { name: 'Sign in' })
+    expect(within(reopened).getByLabelText<HTMLInputElement>('Email').value).toBe('')
+    expect(within(reopened).getByLabelText<HTMLInputElement>('Password', { exact: true }).value).toBe('')
+    expect(within(reopened).queryByLabelText('Verification code')).toBeNull()
+    expect(options().action).toBe('account_sign_in')
+  },
+)
 
 test('unmount restores the previous body scroll setting', async () => {
   document.body.style.overflow = 'auto'

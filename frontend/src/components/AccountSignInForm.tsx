@@ -12,6 +12,8 @@ import TurnstileChallenge from './TurnstileChallenge'
 type AccountSignInFormProps = {
   siteKey: string
   titleId?: string
+  initialEmail?: string
+  onCreateAccount?: () => void
   onClose: () => void
   onSignedIn?: (session: AccountSessionResponse) => void
 }
@@ -19,6 +21,8 @@ type AccountSignInFormProps = {
 export default function AccountSignInForm({
   siteKey,
   titleId,
+  initialEmail = '',
+  onCreateAccount,
   onClose,
   onSignedIn,
 }: AccountSignInFormProps) {
@@ -105,7 +109,7 @@ export default function AccountSignInForm({
       </div>
 
       <p id={`${id}-help`} className="mt-2 text-sm text-muted">
-        Use your existing account. Account registration is coming later.
+        Use your email and password to sign in.
       </p>
 
       <form
@@ -131,6 +135,7 @@ export default function AccountSignInForm({
               id={`${id}-email`}
               name="email"
               type="email"
+              defaultValue={initialEmail}
               autoComplete="username"
               autoCapitalize="none"
               spellCheck={false}
@@ -212,6 +217,19 @@ export default function AccountSignInForm({
           {loading ? 'Signing in…' : ready ? 'Signed in' : 'Sign in'}
         </button>
       </form>
+      {signIn.enabled && onCreateAccount && (
+        <p className="mt-4 text-sm text-muted">
+          New here?{' '}
+          <button
+            type="button"
+            onClick={onCreateAccount}
+            disabled={fieldsDisabled}
+            className="inline-flex min-h-11 items-center font-medium text-accent enabled:hover:text-accent-hover disabled:opacity-60"
+          >
+            Create account
+          </button>
+        </p>
+      )}
     </section>
   )
 }
