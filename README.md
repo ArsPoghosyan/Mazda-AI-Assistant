@@ -1014,11 +1014,54 @@ Offline tests cover parser boundaries, configuration, response classification,
 HTTP request/response limits, redirects, transport errors, cancellation, route
 guards, and total deadlines. Tests also exercise the real application startup,
 route, and adapter together with mocked Supabase responses and resource cleanup.
-They send no emails and require no database. Live recovery email delivery,
-recovery-proof verification, password changes, and the frontend recovery interface
-remain unimplemented or unvalidated. The default-disabled request endpoint does
-not establish complete account-enumeration or abuse protection; public enablement
-still requires the remaining abuse controls and deployment review.
+They send no emails and require no database. Live recovery email delivery and a
+complete password-reset flow remain unvalidated. The internal verification and
+password-update adapters are described below. The default-disabled request
+endpoint does not establish complete account-enumeration or abuse protection;
+public enablement still requires the remaining abuse controls and deployment
+review.
+
+## Internal password-reset adapters
+
+The reset-input parser accepts only email, a six-to-ten-digit ASCII recovery
+code, and a new password. It limits the actual JSON body to 16 KiB, masks these
+values in model representations and validation errors, and rejects extra fields
+such as client-supplied user IDs, access tokens, and verification types. Leading
+zeros in codes and all password characters are preserved. Passwords have a
+structural length bound of one to 1,024 characters; Supabase remains responsible
+for enforcing the configured password-strength policy.
+
+The recovery-verification adapter submits email and code once to Supabase's
+`POST /verify` endpoint with the server-fixed type `recovery`. It validates the
+response structure and retains only a masked access token and provider account
+ID; refresh tokens and other provider data are discarded. The separate recovery
+identity helper uses the existing signing-key/JWT verification flow and requires
+the signed account ID to match the provider response. JWT validity alone does
+not establish recovery purpose: these credentials must originate from the
+server-controlled recovery-code exchange, never browser-supplied tokens.
+
+The password-update adapter accepts those credentials and the verified identity,
+rejects mismatched account IDs before sending a request, and submits only the
+unchanged new password to Supabase's `PUT /user` endpoint using the recovery
+bearer token. A successful response must identify the same non-anonymous account
+and contain no unexpected session-credential fields. Known password-policy or
+verification requirements produce controlled rejection errors; recognized
+client-wide rate limits remain distinct; unknown, malformed, transport, or server
+failures remain unavailable. Provider details are not returned in these errors.
+
+Each adapter refuses redirects, makes no automatic retry, limits provider work
+to five seconds, and reads at most 64 KiB of uncompressed JSON response data.
+Responses close on success, failure, and caller cancellation; cancellation
+propagates. A timeout or malformed reply can occur after a provider-side change,
+so an unavailable result does not establish that the password stayed unchanged.
+
+Offline tests cover input preservation and limits, response contracts, identity
+mismatches, masked errors, exact provider requests, redirect refusal, stream
+limits, deadlines, cancellation, and cleanup. They use synthetic credentials and
+mocked provider HTTP/authentication boundaries; existing account-authentication
+tests cover JWT verification. These helpers are not connected to a reset HTTP
+route or application service. Provider/application session cleanup, the frontend
+reset interface, and live recovery/password-reset validation remain outstanding.
 
 ## Frontend registration API foundation
 
