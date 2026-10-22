@@ -11,8 +11,10 @@ from uuid import UUID, uuid4
 import pytest
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
-from sqlalchemy import func, insert, select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy import delete, event, func, insert, select, text, update
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.account_session_invalidation import invalidate_account_sessions
 from app.account_token_encryption import AccountTokenCipher
@@ -201,3 +203,123 @@ def test_caller_rollback_restores_invalidated_sessions(
             assert (await connection.execute(all_statement)).all() == before
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_invalidation_waits_for_session_write_then_deletes_it(
+    integration_engine: Engine,
+) -> None:
+    owner_id = uuid4()
+
+    async def check() -> None:
+        engine = create_async_engine(
+            integration_engine.url,
+            poolclass=NullPool,
+            connect_args={"connect_timeout": 5, "hostaddr": "127.0.0.1"},
+            echo=False,
+            hide_parameters=True,
+        )
+
+        @event.listens_for(engine.sync_engine, "begin")
+        def restrict_transaction(connection: Connection) -> None:
+            connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
+            connection.exec_driver_sql("SET LOCAL ROLE askm6_app")
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT current_user = 'askm6_app' "
+                        "AND NOT rolsuper AND NOT rolbypassrls "
+                        "FROM pg_roles WHERE rolname = current_user"
+                    )
+                )
+                is True
+            )
+
+        try:
+            async with asyncio.timeout(10):
+                async with engine.begin() as connection:
+                    await connection.execute(insert(UserProfile).values(id=owner_id))
+                    session_id = await seed_session(connection, owner_id)
+
+                ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+                async def invalidate_and_commit() -> int:
+                    async with engine.begin() as worker:
+                        worker_pid = await worker.scalar(text("SELECT pg_backend_pid()"))
+                        assert isinstance(worker_pid, int)
+                        ready.set_result(worker_pid)
+                        count = await invalidate_account_sessions(
+                            worker,
+                            verified_account(owner_id),
+                        )
+
+                    return count
+
+                async with engine.connect() as observer:
+                    async with asyncio.TaskGroup() as group:
+                        async with engine.begin() as active:
+                            locked_id = await active.scalar(
+                                select(AccountSession.id)
+                                .where(AccountSession.id == session_id)
+                                .with_for_update()
+                            )
+                            assert locked_id == session_id
+
+                            locker_pid = await active.scalar(text("SELECT pg_backend_pid()"))
+                            assert isinstance(locker_pid, int)
+
+                            deletion = group.create_task(invalidate_and_commit())
+                            worker_pid = await ready
+
+                            while True:
+                                blocked = await observer.scalar(
+                                    text("SELECT :locker = ANY(pg_blocking_pids(:worker))"),
+                                    {"locker": locker_pid, "worker": worker_pid},
+                                )
+                                if blocked:
+                                    break
+                                await asyncio.sleep(0.01)
+
+                            assert not deletion.done()
+
+                            # Simulate a credential write while a session operation holds the lock.
+                            cipher = AccountTokenCipher(
+                                SecretStr(Fernet.generate_key().decode("ascii"))
+                            )
+                            updated_id = await active.scalar(
+                                update(AccountSession)
+                                .where(AccountSession.id == session_id)
+                                .values(
+                                    refresh_token_ciphertext=cipher.encrypt(
+                                        SecretStr("synthetic-rotated-refresh")
+                                    )
+                                )
+                                .returning(AccountSession.id)
+                            )
+                            assert updated_id == session_id
+
+                        # The credential write commits and releases its lock.
+                        assert await deletion == 1
+
+                    # A separate connection observes the committed deletion.
+                    assert (
+                        await observer.scalar(
+                            select(AccountSession.id).where(AccountSession.id == session_id)
+                        )
+                        is None
+                    )
+                    assert (
+                        await observer.scalar(
+                            select(UserProfile.id).where(UserProfile.id == owner_id)
+                        )
+                        == owner_id
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+    finally:
+        # The fixture guards the local test database; remove only this test's rows.
+        with integration_engine.begin() as connection:
+            connection.execute(delete(AccountSession).where(AccountSession.user_id == owner_id))
+            connection.execute(delete(UserProfile).where(UserProfile.id == owner_id))

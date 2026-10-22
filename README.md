@@ -1113,9 +1113,9 @@ Offline tests cover input preservation and limits, response contracts, identity
 mismatches, masked errors, exact provider requests, redirect refusal, stream
 limits, deadlines, cancellation, and cleanup. They use synthetic credentials and
 mocked provider HTTP/authentication boundaries; existing account-authentication
-tests cover JWT verification. The internal reset service described below connects
-these helpers; a reset HTTP route, frontend interface and live password-reset
-validation remain outstanding.
+tests cover JWT verification. The internal reset service and default-disabled
+HTTP route described below connect these helpers; the frontend interface and
+live password-reset validation remain outstanding.
 
 The separate recovery-session cleanup response interpreter accepts a no-content
 204 acknowledgement or an explicit 403 `session_not_found` reply from the
@@ -1164,10 +1164,75 @@ Independent connections check transaction visibility and rollback. Tests also
 model provider-side changes surviving a database failure and verify that a
 surviving local session is refused when the provider reports it revoked.
 These scenarios model provider behavior; they do not validate live Supabase
-password changes or revocation. The service still has no public reset endpoint.
+password changes or revocation.
 Live provider checks establish session validity at the time of the check; they
-cannot cancel work already authorized before a reset. Concurrent reset/sign-in/
-refresh scenarios still need reset-specific coverage before public enablement.
+cannot cancel work already authorized before a reset. The scenarios below cover
+selected reset/sign-in/refresh orderings with mocked provider behavior.
+A focused PostgreSQL concurrency test verifies that account-session invalidation
+waits for a session row lock, then deletes the row after a simulated credential
+write commits while preserving the profile. It observes actual database blocking;
+it does not exercise the complete provider refresh or sign-in flow.
+An additional deterministic integration scenario pauses the actual sign-in
+service at its live provider check, completes reset through the service or HTTP
+route, then models provider revocation. Sign-in is rejected before opening a
+database transaction, without retrying or recreating a session. This covers a
+provider check that finishes after reset.
+Another scenario pauses persistence after an initial successful live provider
+check, completes reset, then lets the already approved sign-in commit a new
+local row. Using that row's opaque cookie through the session HTTP route performs
+a fresh provider check and returns 401 with cookie clearing when revocation is
+reported. The rejected check does not update activity or credentials; other
+accounts, guests and profiles remain unchanged. This documents the stale-row
+possibility rather than promising every overlapping sign-in is cancelled.
+A further service/HTTP scenario starts a real refresh from an expired stored
+access token and pauses verification of its replacement token. After reset
+changes the password, the mocked provider rejects that session. Refresh rolls
+back without committing replacement credentials or activity; reset then commits
+session deletion. Events coordinate the ordering, and the pending task is cleaned
+up on failure. A separate approved-refresh scenario pauses immediately before
+storage after a successful live provider check, then lets the real refresh
+storage and transaction commit during reset. Independent connections verify the
+replacement credentials and activity become visible before reset commits their
+deletion. A subsequent session HTTP request rejects the deleted session with 401
+and cookie clearing. This does not revoke an authentication result already
+authorized in flight or validate hosted Supabase behavior.
+
+## Password-reset endpoint foundation
+
+`POST /api/v1/account/password-reset` is registered but disabled by default
+(`ACCOUNT_PASSWORD_RESET_API_ENABLED=false`). It requires a trusted origin before
+parsing and accepts only email, recovery code and new password as JSON, capped
+at 16 KiB of actual request bytes. Browser-supplied account IDs, provider tokens
+and recovery-purpose fields are rejected. Password characters and leading zeros
+in the recovery code are preserved. No account cookie or bearer login is needed;
+authorization comes from the server's recovery exchange and verified identity.
+
+The route requires database, provider-client and signing-key resources before
+reading credentials. Its total deadline includes parsing and the reset service,
+defaults to 15 seconds, and is configurable from 1–30 seconds through
+`ACCOUNT_PASSWORD_RESET_TIMEOUT_SECONDS`. Successful completion returns only
+`status: completed` and an instruction to sign in with the new password, after
+the service finishes provider cleanup and commits application-session deletion.
+It creates no login, returns no credentials and sets no cookies.
+
+Invalid or rejected resets return controlled 400 errors; unsupported content
+types return 415, oversized bodies return 413, and rejected origins return 403.
+Known provider rate limits return 429 without an invented retry time. Missing
+resources, a disabled endpoint, provider/cleanup failures, database errors and
+deadline expiry return generic 503 errors. Handled responses use
+`Cache-Control: no-store`. Cancellation propagates and no retry is added. As
+with the service, an unavailable response may follow an actual password change.
+
+Offline route tests cover registration, guards before parsing, exact service
+arguments, invalid input, metadata-only responses, error masking, deadlines,
+cancellation and waiting for service completion. They mock the reset service;
+guarded PostgreSQL tests separately run the reset scenarios through
+both the service and HTTP route with real JWT verification and mocked provider
+HTTP. They verify committed session deletion, ownership isolation, rollback,
+controlled HTTP errors and omission of credentials/cookies. The HTTP integration
+injects test-owned resources rather than exercising application startup.
+Frontend recovery/reset controls and live provider validation remain outstanding.
+Private feature flags are not enabled by these tests or example settings.
 
 ## Frontend registration API foundation
 

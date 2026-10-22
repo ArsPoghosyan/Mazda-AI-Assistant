@@ -1,4 +1,4 @@
-"""Password-reset orchestration with real JWT verification and guarded PostgreSQL."""
+"""Service and HTTP password resets with real JWT verification and guarded PostgreSQL."""
 
 import asyncio
 import json
@@ -19,9 +19,10 @@ from pydantic_settings import SettingsConfigDict
 from sqlalchemy import delete, event, func, insert, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
+import app.account_session_service as session_service
 from app.account_key_cache import AccountKeyCache
 from app.account_key_fetch import fetch_account_key_set
 from app.account_password_reset_service import (
@@ -39,9 +40,16 @@ from app.account_recovery_verification import (
     AccountRecoveryVerificationUnavailable,
 )
 from app.account_refresh import AccountRefreshRejected
+from app.account_refresh_verification import VerifiedAccountRefresh
+from app.account_session_auth import AuthenticatedAccountSession, LockedAccountSession
+from app.account_session_refresh import store_verified_account_refresh
 from app.account_session_transactions import authenticate_account_session_transaction
+from app.account_sessions import CreatedAccountSession
+from app.account_sign_in_service import sign_in_account
 from app.account_token_encryption import AccountTokenCipher
+from app.account_tokens import InvalidAccountToken
 from app.config import Settings
+from app.main import create_app
 from app.models import AccountSession, GuestSession, UserProfile
 
 pytestmark = pytest.mark.integration
@@ -65,11 +73,16 @@ class ResponseStream(httpx2.AsyncByteStream):
         yield self.body
 
 
+@pytest.mark.parametrize("boundary", ["service", "http"])
 @pytest.mark.parametrize(
     ("scenario", "expected_error"),
     [
         pytest.param("success", None, id="committed"),
         pytest.param("already-absent", None, id="recovery-session-already-absent"),
+        pytest.param("sign-in-overlap", None, id="reset-revokes-pending-sign-in"),
+        pytest.param("approved-sign-in", None, id="reset-refuses-late-approved-sign-in"),
+        pytest.param("refresh-overlap", None, id="reset-revokes-pending-refresh"),
+        pytest.param("approved-refresh", None, id="reset-deletes-approved-refresh"),
         pytest.param(
             "recovery-rejected", AccountRecoveryVerificationRejected, id="recovery-rejected"
         ),
@@ -100,6 +113,8 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
     integration_engine: Engine,
     scenario: str,
     expected_error: type[Exception] | None,
+    boundary: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_id = uuid4()
     other_user_id = uuid4()
@@ -133,6 +148,7 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
 
     recovery_token = make_access(user_id, recovery_session_id)
     old_access = make_access(user_id, old_provider_session_id)
+    refresh_access = make_access(user_id, old_provider_session_id)
     public_jwk = ECAlgorithm.to_jwk(signing_key.public_key(), as_dict=True)
     public_jwk.update(
         {"kid": "reset-integration-key", "alg": "ES256", "use": "sig", "key_ops": ["verify"]}
@@ -145,6 +161,8 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
             "supabase_auth_audience": "authenticated",
             "supabase_auth_publishable_key": PUBLISHABLE_KEY,
             "account_session_encryption_key": encryption_key,
+            "account_password_reset_api_enabled": True,
+            "csrf_trusted_origins": ("https://app.example.test",),
         }
     )
     owners = [user_id, other_user_id]
@@ -259,7 +277,11 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
                         token_hash=sha256(browser_token.encode("ascii")).digest(),
                         access_token_ciphertext=cipher.encrypt(SecretStr(access)),
                         refresh_token_ciphertext=cipher.encrypt(SecretStr("synthetic-old-refresh")),
-                        access_token_expires_at=access_expiry,
+                        access_token_expires_at=(
+                            database_now - timedelta(seconds=1)
+                            if scenario in {"refresh-overlap", "approved-refresh"} and is_old_active
+                            else access_expiry
+                        ),
                         created_at=database_now - timedelta(days=40),
                         last_seen_at=database_now - timedelta(days=10),
                         idle_expires_at=database_now
@@ -287,6 +309,119 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
             before_guest = connection.execute(guest_statement).one()
 
         async def run() -> None:
+            refresh_ready = asyncio.Event()
+            resume_refresh = asyncio.Event()
+            pending_refresh: asyncio.Task[AuthenticatedAccountSession | None] | None = None
+            refresh_events: list[str] = []
+            refresh_written_rows = before_sessions
+            checking_deleted_session = False
+            sign_in_ready = asyncio.Event()
+            resume_sign_in = asyncio.Event()
+            pending_sign_in: asyncio.Task[CreatedAccountSession] | None = None
+            sign_in_requests = 0
+            sign_in_checks = 0
+            sign_in_events: list[str] = []
+
+            class PausingSignInCache(AccountKeyCache):
+                """Pause persistence verification after real provider approval."""
+
+                lookups = 0
+
+                async def get_public_key(self, key_id: str) -> ec.EllipticCurvePublicKey:
+                    key = await super().get_public_key(key_id)
+                    self.lookups += 1
+                    if self.lookups == 2:
+                        assert sign_in_checks == 1
+                        assert not password_changed
+                        sign_in_ready.set()
+                        await resume_sign_in.wait()
+                    return key
+
+            async def concurrent_provider(request: httpx2.Request) -> httpx2.Response:
+                nonlocal sign_in_requests, sign_in_checks
+
+                if (
+                    scenario in {"sign-in-overlap", "approved-sign-in"}
+                    and request.method == "POST"
+                    and str(request.url) == ISSUER + "/token?grant_type=password"
+                ):
+                    sign_in_requests += 1
+                    assert request.headers["apikey"] == PUBLISHABLE_KEY
+                    assert json.loads(request.content) == {
+                        "email": EMAIL.get_secret_value(),
+                        "password": "synthetic-old-password",
+                    }
+                    return respond(
+                        200,
+                        {
+                            "access_token": old_access,
+                            "refresh_token": "synthetic-sign-in-refresh",
+                            "token_type": "bearer",
+                        },
+                    )
+
+                if (
+                    scenario in {"sign-in-overlap", "approved-sign-in"}
+                    and request.method == "GET"
+                    and str(request.url) == ISSUER + "/user"
+                ):
+                    sign_in_checks += 1
+                    assert request.headers["authorization"] == f"Bearer {old_access}"
+                    assert request.headers["apikey"] == PUBLISHABLE_KEY
+                    if scenario == "approved-sign-in":
+                        if not password_changed:
+                            assert sign_in_checks == 1
+                            return respond(200, {"id": str(user_id), "is_anonymous": False})
+                        assert sign_in_checks == 2
+                    else:
+                        assert not password_changed
+                        sign_in_ready.set()
+                        await resume_sign_in.wait()
+
+                if scenario in {"refresh-overlap", "approved-refresh"}:
+                    if (
+                        request.method == "POST"
+                        and str(request.url) == ISSUER + "/token?grant_type=refresh_token"
+                    ):
+                        assert request.headers["apikey"] == PUBLISHABLE_KEY
+                        assert json.loads(request.content) == {
+                            "refresh_token": "synthetic-old-refresh",
+                        }
+                        refresh_events.append("exchange")
+                        return respond(
+                            200,
+                            {
+                                "access_token": refresh_access,
+                                "refresh_token": "synthetic-rotated-refresh",
+                                "token_type": "bearer",
+                            },
+                        )
+
+                    if request.method == "GET" and str(request.url) == ISSUER + "/user":
+                        assert request.headers["authorization"] == f"Bearer {refresh_access}"
+                        assert request.headers["apikey"] == PUBLISHABLE_KEY
+                        assert not password_changed
+                        refresh_events.append("check")
+                        if scenario == "approved-refresh":
+                            return respond(200, {"id": str(user_id), "is_anonymous": False})
+                        refresh_ready.set()
+                        await resume_refresh.wait()
+                        assert password_changed
+                        return respond(403, {"code": "session_not_found"})
+
+                result = provider(request)
+                if (
+                    scenario in {"refresh-overlap", "approved-refresh"}
+                    and request.method == "POST"
+                    and str(request.url) == ISSUER + "/logout?scope=local"
+                ):
+                    # The refresh holds the row lock needed by reset's DELETE.
+                    # Reject it after provider-side reset, before waiting on that lock.
+                    assert password_changed and recovery_session_absent
+                    resume_refresh.set()
+
+                return result
+
             engine = create_async_engine(
                 integration_engine.url,
                 poolclass=NullPool,
@@ -297,7 +432,12 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
 
             @event.listens_for(engine.sync_engine, "begin")
             def restrict_transaction(connection: Connection) -> None:
-                events.append("begin")
+                if asyncio.current_task() is pending_refresh:
+                    refresh_events.append("begin")
+                elif scenario == "approved-sign-in" and asyncio.current_task() is pending_sign_in:
+                    sign_in_events.append("begin")
+                else:
+                    events.append("begin")
                 connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
                 connection.exec_driver_sql("SET LOCAL ROLE askm6_app")
                 assert (
@@ -313,19 +453,64 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
 
             @event.listens_for(engine.sync_engine, "commit")
             def inspect_commit(connection: Connection) -> None:
+                nonlocal refresh_written_rows
+                if checking_deleted_session:
+                    assert connection.execute(owner_statement).all() == []
+                    return
+                if asyncio.current_task() is pending_refresh:
+                    if scenario != "approved-refresh":
+                        raise AssertionError("A rejected refresh must not commit.")
+                    assert password_changed and recovery_session_absent
+                    refresh_events.append("commit")
+                    refresh_written_rows = connection.execute(sessions_statement).all()
+                    own_rows = [row for row in refresh_written_rows if row.user_id == user_id]
+                    refreshed_row = next(
+                        row
+                        for row in own_rows
+                        if row.provider_session_id == old_provider_session_id
+                    )
+                    assert cipher.decrypt(refreshed_row.access_token_ciphertext) == SecretStr(
+                        refresh_access
+                    )
+                    assert cipher.decrypt(refreshed_row.refresh_token_ciphertext) == SecretStr(
+                        "synthetic-rotated-refresh"
+                    )
+                    assert refreshed_row.access_token_expires_at == access_expiry
+                    old_row = next(row for row in before_sessions if row.id == refreshed_row.id)
+                    assert refreshed_row.last_seen_at > old_row.last_seen_at
+                    with integration_engine.connect() as observer:
+                        assert observer.execute(sessions_statement).all() == before_sessions
+                    return
+
+                if scenario == "approved-sign-in" and asyncio.current_task() is pending_sign_in:
+                    sign_in_events.append("commit")
+                    assert password_changed and recovery_session_absent
+                    late_row = connection.execute(owner_statement).one()
+                    assert late_row.id is not None
+                    with integration_engine.connect() as observer:
+                        assert observer.execute(owner_statement).all() == []
+                    return
+
                 events.append("commit")
                 assert password_changed and recovery_session_absent
                 assert connection.execute(owner_statement).all() == []
                 # Another transaction still sees the pre-reset rows until commit.
                 with integration_engine.connect() as observer:
-                    assert observer.execute(sessions_statement).all() == before_sessions
+                    assert observer.execute(sessions_statement).all() == (
+                        refresh_written_rows if scenario == "approved-refresh" else before_sessions
+                    )
                 if scenario == "commit-failed":
                     connection.exec_driver_sql("SELECT 1 / 0")
                     raise AssertionError("Expected PostgreSQL division by zero")
 
+            @event.listens_for(engine.sync_engine, "rollback")
+            def record_refresh_rollback(connection: Connection) -> None:
+                if asyncio.current_task() is pending_refresh:
+                    refresh_events.append("rollback")
+
             try:
                 async with httpx2.AsyncClient(
-                    transport=httpx2.MockTransport(provider),
+                    transport=httpx2.MockTransport(concurrent_provider),
                     trust_env=False,
                     follow_redirects=False,
                 ) as client:
@@ -334,7 +519,132 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
                         return await fetch_account_key_set(settings, client=client)
 
                     cache = AccountKeyCache(download_keys)
-                    if expected_error is None:
+                    if scenario in {"refresh-overlap", "approved-refresh"}:
+                        if scenario == "approved-refresh":
+                            original_store = store_verified_account_refresh
+
+                            async def paused_store(
+                                connection: AsyncConnection,
+                                session: LockedAccountSession,
+                                refreshed: VerifiedAccountRefresh,
+                                *,
+                                settings: Settings,
+                            ) -> AuthenticatedAccountSession | None:
+                                assert asyncio.current_task() is pending_refresh
+                                assert refresh_events == ["begin", "exchange", "check"]
+                                assert not password_changed
+                                refresh_ready.set()
+                                await resume_refresh.wait()
+                                assert password_changed and recovery_session_absent
+                                return await original_store(
+                                    connection, session, refreshed, settings=settings
+                                )
+
+                            monkeypatch.setattr(
+                                session_service, "store_verified_account_refresh", paused_store
+                            )
+
+                        async def refresh_keys() -> dict[str, object]:
+                            return {"keys": [public_jwk]}
+
+                        pending_refresh = asyncio.create_task(
+                            authenticate_account_session_transaction(
+                                engine,
+                                SecretStr(old_browser_token),
+                                settings=settings,
+                                client=client,
+                                key_cache=AccountKeyCache(refresh_keys),
+                            )
+                        )
+                        await asyncio.wait_for(refresh_ready.wait(), timeout=5)
+                        assert not pending_refresh.done()
+                        assert refresh_events == ["begin", "exchange", "check"]
+
+                    if scenario in {"sign-in-overlap", "approved-sign-in"}:
+
+                        async def sign_in_keys() -> dict[str, object]:
+                            return {"keys": [public_jwk]}
+
+                        sign_in_cache = (
+                            PausingSignInCache(sign_in_keys)
+                            if scenario == "approved-sign-in"
+                            else AccountKeyCache(sign_in_keys)
+                        )
+                        pending_sign_in = asyncio.create_task(
+                            sign_in_account(
+                                engine,
+                                EMAIL,
+                                SecretStr("synthetic-old-password"),
+                                settings=settings,
+                                client=client,
+                                key_cache=sign_in_cache,
+                            )
+                        )
+                        await asyncio.wait_for(sign_in_ready.wait(), timeout=5)
+                        assert not pending_sign_in.done()
+                        if scenario == "approved-sign-in":
+                            assert sign_in_events == ["begin"]
+
+                    if boundary == "http":
+                        application = create_app(settings)
+                        application.state.settings = settings
+                        application.state.database_engine = engine
+                        application.state.account_auth_client = client
+                        application.state.account_key_cache = cache
+
+                        async with httpx2.AsyncClient(
+                            transport=httpx2.ASGITransport(app=application),
+                            base_url="https://app.example.test",
+                            trust_env=False,
+                        ) as browser:
+                            response = await browser.post(
+                                "/api/v1/account/password-reset",
+                                json={
+                                    "email": EMAIL.get_secret_value(),
+                                    "code": CODE.get_secret_value(),
+                                    "new_password": NEW_PASSWORD.get_secret_value(),
+                                },
+                                headers={"Origin": "https://app.example.test"},
+                            )
+
+                        if expected_error is None:
+                            assert response.status_code == 200
+                            assert response.json() == {
+                                "status": "completed",
+                                "message": (
+                                    "Password reset completed. Sign in with your new password."
+                                ),
+                            }
+                            events.append("returned")
+                        else:
+                            expected_status = {
+                                "recovery-rejected": 400,
+                                "update-rejected": 400,
+                                "update-rate-limited": 429,
+                            }.get(scenario, 503)
+                            expected_detail = {
+                                400: "Password reset was rejected.",
+                                429: "Password reset is temporarily rate limited.",
+                                503: "Password reset is temporarily unavailable.",
+                            }[expected_status]
+
+                            assert response.status_code == expected_status
+                            assert response.json() == {"detail": expected_detail}
+
+                        assert response.headers["Cache-Control"] == "no-store"
+                        assert "set-cookie" not in response.headers
+                        assert "Retry-After" not in response.headers
+
+                        for private_value in (
+                            EMAIL.get_secret_value(),
+                            CODE.get_secret_value(),
+                            NEW_PASSWORD.get_secret_value(),
+                            recovery_token,
+                            "private-provider-detail",
+                        ):
+                            assert private_value not in response.text
+
+                    elif expected_error is None:
                         await reset_account_password(
                             engine,
                             EMAIL,
@@ -389,6 +699,153 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
                         else:
                             assert after_sessions == before_sessions
 
+                    if scenario == "sign-in-overlap":
+                        assert pending_sign_in is not None
+                        assert password_changed and recovery_session_absent
+
+                        resume_sign_in.set()
+                        with pytest.raises(InvalidAccountToken):
+                            await asyncio.wait_for(pending_sign_in, timeout=2)
+
+                        assert sign_in_requests == 1
+                        assert events[-1] == "old-session-check"
+                        assert events.count("begin") == 1
+                        assert events.count("commit") == 1
+
+                        with integration_engine.connect() as observer:
+                            assert observer.execute(owner_statement).all() == []
+                            assert observer.execute(profiles_statement).all() == before_profiles
+                            assert observer.execute(guest_statement).one() == before_guest
+                            assert observer.execute(sessions_statement).all() == after_sessions
+
+                    if scenario == "approved-sign-in":
+                        assert pending_sign_in is not None
+                        assert sign_in_checks == 1
+                        assert password_changed and recovery_session_absent
+                        resume_sign_in.set()
+                        created = await asyncio.wait_for(pending_sign_in, timeout=5)
+                        assert sign_in_events == ["begin", "commit"]
+                        assert sign_in_requests == 1
+
+                        with integration_engine.connect() as observer:
+                            late_rows = observer.execute(sessions_statement).all()
+                            own_rows = [row for row in late_rows if row.user_id == user_id]
+                            assert len(own_rows) == 1
+                            late_row = own_rows[0]
+                            assert late_row.id == created.session_id
+                            assert late_row.provider_session_id == old_provider_session_id
+                            assert (
+                                late_row.token_hash
+                                == sha256(created.token.get_secret_value().encode("ascii")).digest()
+                            )
+                            assert cipher.decrypt(late_row.access_token_ciphertext) == SecretStr(
+                                old_access
+                            )
+                            assert [row for row in late_rows if row.user_id == other_user_id] == (
+                                after_sessions
+                            )
+
+                        session_settings = settings.model_copy(
+                            update={
+                                "account_session_api_enabled": True,
+                                "account_cookie_secure": True,
+                            }
+                        )
+                        session_application = create_app(session_settings)
+                        session_application.state.settings = session_settings
+                        session_application.state.database_engine = engine
+                        session_application.state.account_auth_client = client
+                        session_application.state.account_key_cache = cache
+                        async with httpx2.AsyncClient(
+                            transport=httpx2.ASGITransport(app=session_application),
+                            base_url="https://app.example.test",
+                            trust_env=False,
+                        ) as browser:
+                            session_response = await browser.post(
+                                "/api/v1/account/session",
+                                headers={
+                                    "Origin": "https://app.example.test",
+                                    "Cookie": (
+                                        "__Host-askm6_account=" + created.token.get_secret_value()
+                                    ),
+                                },
+                            )
+
+                        assert session_response.status_code == 401
+                        assert session_response.json() == {
+                            "detail": "Invalid or expired account session."
+                        }
+                        assert session_response.headers["Cache-Control"] == "no-store"
+                        assert "Max-Age=0" in session_response.headers["Set-Cookie"]
+                        assert created.token.get_secret_value() not in session_response.text
+                        assert old_access not in session_response.text
+                        assert sign_in_checks == 2
+                        assert events[-1] == "old-session-check"
+                        assert sign_in_events == ["begin", "commit"]
+                        with integration_engine.connect() as observer:
+                            assert observer.execute(sessions_statement).all() == late_rows
+                            assert observer.execute(profiles_statement).all() == before_profiles
+                            assert observer.execute(guest_statement).one() == before_guest
+
+                    if scenario == "refresh-overlap":
+                        assert pending_refresh is not None
+                        with pytest.raises(AccountRefreshRejected):
+                            await asyncio.wait_for(pending_refresh, timeout=5)
+
+                        assert refresh_events == ["begin", "exchange", "check", "rollback"]
+                        with integration_engine.connect() as observer:
+                            assert observer.execute(owner_statement).all() == []
+                            assert observer.execute(sessions_statement).all() == after_sessions
+                            assert observer.execute(profiles_statement).all() == before_profiles
+                            assert observer.execute(guest_statement).one() == before_guest
+
+                    if scenario == "approved-refresh":
+                        assert pending_refresh is not None
+                        authenticated = await asyncio.wait_for(pending_refresh, timeout=5)
+                        assert authenticated is not None
+                        assert authenticated.account.user_id == user_id
+                        assert refresh_events == ["begin", "exchange", "check", "commit"]
+
+                        checking_deleted_session = True
+                        session_settings = settings.model_copy(
+                            update={
+                                "account_session_api_enabled": True,
+                                "account_cookie_secure": True,
+                            }
+                        )
+                        session_application = create_app(session_settings)
+                        session_application.state.settings = session_settings
+                        session_application.state.database_engine = engine
+                        session_application.state.account_auth_client = client
+                        session_application.state.account_key_cache = cache
+                        async with httpx2.AsyncClient(
+                            transport=httpx2.ASGITransport(app=session_application),
+                            base_url="https://app.example.test",
+                            trust_env=False,
+                        ) as browser:
+                            session_response = await browser.post(
+                                "/api/v1/account/session",
+                                headers={
+                                    "Origin": "https://app.example.test",
+                                    "Cookie": "__Host-askm6_account=" + old_browser_token,
+                                },
+                            )
+
+                        assert session_response.status_code == 401
+                        assert session_response.json() == {
+                            "detail": "Invalid or expired account session."
+                        }
+                        assert session_response.headers["Cache-Control"] == "no-store"
+                        assert "Max-Age=0" in session_response.headers["Set-Cookie"]
+                        assert old_browser_token not in session_response.text
+                        assert refresh_access not in session_response.text
+                        assert refresh_events == ["begin", "exchange", "check", "commit"]
+                        with integration_engine.connect() as observer:
+                            assert observer.execute(owner_statement).all() == []
+                            assert observer.execute(sessions_statement).all() == after_sessions
+                            assert observer.execute(profiles_statement).all() == before_profiles
+                            assert observer.execute(guest_statement).one() == before_guest
+
                     if password_changed and expected_error is not None:
                         # Surviving local rows must not authorize provider-revoked credentials.
                         with pytest.raises(AccountRefreshRejected):
@@ -405,6 +862,12 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
 
                     assert all(response.is_closed for response in responses)
             finally:
+                if pending_sign_in is not None:
+                    pending_sign_in.cancel()
+                    await asyncio.gather(pending_sign_in, return_exceptions=True)
+                if pending_refresh is not None:
+                    pending_refresh.cancel()
+                    await asyncio.gather(pending_refresh, return_exceptions=True)
                 await engine.dispose()
 
         asyncio.run(run(), loop_factory=asyncio.SelectorEventLoop)
