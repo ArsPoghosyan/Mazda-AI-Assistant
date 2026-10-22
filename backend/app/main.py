@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.account_email_confirmation_routes import router as account_email_confirmation_router
 from app.account_key_cache import AccountKeyCache
 from app.account_key_fetch import fetch_account_key_set
+from app.account_password_recovery_routes import router as account_password_recovery_router
 from app.account_routes import router as account_router
 from app.account_session_routes import router as account_session_router
 from app.account_sign_in_routes import router as account_sign_in_router
@@ -113,6 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(account_sign_out_router)
     application.include_router(account_sign_up_router)
     application.include_router(account_email_confirmation_router)
+    application.include_router(account_password_recovery_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

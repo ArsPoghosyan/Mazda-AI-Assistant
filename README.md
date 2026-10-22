@@ -776,9 +776,9 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, password recovery, and Google sign-in remain
-unimplemented. The development-only
-frontend sign-in flow is described below.
+default. Additional abuse controls, a complete password-reset flow, and Google
+sign-in remain unimplemented. The recovery-request endpoint and development-only
+frontend sign-in flow are described below.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
@@ -983,6 +983,42 @@ flow; production account access remains disabled and is not validated by them.
 Registration and email-confirmation forms are available only in development.
 Password-recovery and Google sign-in interfaces remain unimplemented. Chat remains
 in development.
+
+## Backend password-recovery requests
+
+`POST /api/v1/account/password-recovery` accepts only JSON containing email and
+CAPTCHA proof. It requires exactly one trusted browser origin, limits the actual
+request body to 16 KiB, masks input in validation errors, and rejects extra fields
+such as passwords, user IDs, codes, and redirect destinations. It returns HTTP 202
+with a generic acknowledgement and never creates an application session or issues
+a cookie. Acceptance does not confirm account existence or email delivery.
+
+`ACCOUNT_PASSWORD_RECOVERY_API_ENABLED` defaults to false. The route checks its
+feature flag and provider configuration before parsing the body.
+`ACCOUNT_PASSWORD_RECOVERY_TIMEOUT_SECONDS` defaults to 15 seconds, accepts one
+to 30 seconds, and bounds body reading plus provider work. The adapter submits
+email and CAPTCHA proof once to Supabase, refuses redirects, and limits the
+provider operation to five seconds and 64 KiB of uncompressed JSON response data.
+Supabase performs account CAPTCHA verification; the application does not consume
+the proof separately through Siteverify.
+
+Known account-dependent outcomes and address-specific email cooldowns receive
+the same generic acknowledgement without retrying. CAPTCHA rejection returns
+HTTP 403 with `X-Account-Verification: required`; rejected input returns 400;
+client-wide provider rate limits return 429; unavailable or unexpected responses
+return 503. No retry/reset time is invented when the provider has not supplied
+one. Handled responses use `Cache-Control: no-store` and omit provider details
+and credentials. Cancellation propagates and provider responses close.
+
+Offline tests cover parser boundaries, configuration, response classification,
+HTTP request/response limits, redirects, transport errors, cancellation, route
+guards, and total deadlines. Tests also exercise the real application startup,
+route, and adapter together with mocked Supabase responses and resource cleanup.
+They send no emails and require no database. Live recovery email delivery,
+recovery-proof verification, password changes, and the frontend recovery interface
+remain unimplemented or unvalidated. The default-disabled request endpoint does
+not establish complete account-enumeration or abuse protection; public enablement
+still requires the remaining abuse controls and deployment review.
 
 ## Frontend registration API foundation
 
@@ -1340,9 +1376,10 @@ Automated tests do not contact Cloudflare or prove live token replay protection.
 
 Public guest access still requires abuse controls and production guest-route/cookie
 forwarding. Account sign-in, session restoration, sign-out, registration, and
-email-confirmation interfaces are available only in development; password recovery
-remains unimplemented. Registration and confirmation have been manually validated
-locally; public deployment remains a separate step.
+email-confirmation interfaces are available only in development. Password recovery
+has a default-disabled backend request endpoint; its frontend and password-change
+flow remain unimplemented. Registration and confirmation have been manually
+validated locally; public deployment remains a separate step.
 
 ## License
 
