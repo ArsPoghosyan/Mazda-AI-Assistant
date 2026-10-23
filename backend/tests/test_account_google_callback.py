@@ -327,6 +327,40 @@ async def test_failure_stops_later_steps_and_never_retries(
         assert material.events[-2:] == ["session_rollback", "session_release"]
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_stage", "failure_type"),
+    [
+        ("consume", "consume_attempt", InvalidOAuthLoginMaterial),
+        ("exchange", "exchange_code", GoogleCodeExchangeRejected),
+        ("verify", "create_verified_session", InvalidAccountToken),
+    ],
+)
+async def test_rejection_diagnostics_never_log_credentials_or_error_text(
+    material: Material,
+    caplog: pytest.LogCaptureFixture,
+    operation: str,
+    expected_stage: str,
+    failure_type: type[Exception],
+) -> None:
+    marker = "synthetic-private-error-detail"
+    material.operations[operation].side_effect = failure_type(marker)
+    with pytest.raises(failure_type):
+        await invoke(material)
+
+    assert f"stage={expected_stage}" in caplog.text
+    assert marker not in caplog.text
+    for secret in (
+        material.code,
+        material.verifier,
+        material.tokens.access_token,
+        material.tokens.refresh_token,
+        material.created.token,
+    ):
+        assert secret.get_secret_value() not in caplog.text
+    assert material.browser_token not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
 @pytest.mark.parametrize("kind", ["empty", "corrupt", "wrong-key", "invalid-format"])
 async def test_unreadable_verifier_stops_after_committed_consumption(
     material: Material,

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
         min_length=1,
         max_length=128,
     )
+    supabase_auth_iat_clock_skew_seconds: int = Field(default=5, ge=0, le=30)
     account_session_encryption_key: SecretStr | None = None
     account_session_inactivity_days: int = Field(default=7, ge=1)
     account_session_absolute_lifetime_days: int = Field(default=30, ge=1)

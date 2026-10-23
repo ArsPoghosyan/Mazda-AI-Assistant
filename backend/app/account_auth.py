@@ -51,6 +51,7 @@ async def authenticate_account_token(
         public_key=public_key,
         issuer=str(issuer),
         audience=settings.supabase_auth_audience,
+        issued_at_leeway_seconds=settings.supabase_auth_iat_clock_skew_seconds,
     )
 
 

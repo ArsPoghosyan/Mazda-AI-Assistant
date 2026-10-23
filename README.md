@@ -389,6 +389,14 @@ The backend provides an offline account-token verifier using PyJWT and
 cryptography. Its caller supplies a trusted P-256 public key and the expected
 issuer and audience. It accepts only ES256, validates required identity and time
 claims, rejects anonymous/non-account identities, and limits token length.
+Account authentication allows a configurable five-second difference for the
+signed `iat` (issued-at) claim through `SUPABASE_AUTH_IAT_CLOCK_SKEW_SECONDS`
+(0–30 seconds; zero restores exact issued-at timing). The verifier requires a
+strict integer issued-at value, rejects values beyond that bound and requires
+issued-at to precede expiry. Expiry and optional not-before checks retain zero
+leeway; signature, issuer, audience and account checks are unchanged. This avoids
+intermittent rejection of freshly issued tokens when the provider clock is
+slightly ahead. Direct verifier callers remain strict unless they pass a bound.
 
 Successful verification also returns the access token's expiry as a
 timezone-aware UTC timestamp for future account-session handling. Expiry comes
@@ -1252,6 +1260,12 @@ Google and an existing confirmed email/password account with the same email.
 Supabase owns [automatic identity linking](https://supabase.com/docs/guides/auth/auth-identity-linking);
 the application uses its verified subject ID. These checks cover one local test
 setup, not every provider error, account-linking case or production deployment.
+First-time Google access uses the same OAuth flow: Supabase creates the managed
+account, then the verified callback creates its local profile/session. A callback
+failure can therefore leave a Supabase user without a completed application
+login. A fresh-token clock-skew regression has been reproduced and addressed.
+After the fix, a local live retest no longer reproduced the reported intermittent
+rejection; this does not establish reliability across all provider error cases.
 
 ### Configuration
 
@@ -1321,7 +1335,7 @@ are preserved. Artwork has a separate [source and brand notice](frontend/src/ass
 
 ### Validation and remaining release work
 
-The local checkpoint passed 2,889 backend tests, including opt-in guarded
+The local checkpoint passed 2,924 backend tests, including opt-in guarded
 PostgreSQL tests, and 352 frontend tests (134 API and 218 UI/hook/helper cases).
 Backend lint, formatting and typing checks, frontend lint, TypeScript and the
 production build also passed. External provider operations are mocked in
@@ -1339,6 +1353,9 @@ cleanup, broader provider/linking checks, upstream provider-method assurance,
 partial-provider-session failure/cleanup review, and deployment/security/privacy
 review. Cancellation cannot guarantee delivery of a cookie-clearing response to
 a disconnected browser. Local success does not establish production readiness.
+Rejected callback completion logs only a fixed stage and exception category;
+token rejection logs only a category. Codes, token values, account identifiers,
+provider error text and exception tracebacks are excluded from those diagnostics.
 
 ## Frontend registration API foundation
 

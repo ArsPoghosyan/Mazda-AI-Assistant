@@ -1,5 +1,6 @@
 """Verify managed-account tokens using a trusted public key."""
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -18,6 +19,7 @@ from pydantic import (
 
 _MAX_TOKEN_CHARACTERS = 8192
 _MAX_KEY_ID_CHARACTERS = 128
+_logger = logging.getLogger(__name__)
 
 
 class InvalidAccountToken(ValueError):
@@ -90,8 +92,12 @@ def verify_account_token(
     public_key: ec.EllipticCurvePublicKey,
     issuer: str,
     audience: str,
+    issued_at_leeway_seconds: int = 0,
 ) -> VerifiedAccount:
-    """Verify an ES256 token and return its account identity."""
+    """Verify ES256 identity with bounded issued-at skew, never expiry grace."""
+
+    if type(issued_at_leeway_seconds) is not int or not 0 <= issued_at_leeway_seconds <= 30:
+        raise ValueError("Issued-at clock skew must be between 0 and 30 seconds.")
 
     if not isinstance(public_key.curve, ec.SECP256R1):
         raise ValueError("Account verification requires a P-256 public key.")
@@ -109,6 +115,9 @@ def verify_account_token(
             issuer=issuer,
             audience=audience,
             options={
+                # Validate iat as a strict integer below, with its own narrow
+                # tolerance. A global JWT leeway would also relax exp and nbf.
+                "verify_iat": False,
                 "require": [
                     "iss",
                     "aud",
@@ -124,8 +133,15 @@ def verify_account_token(
         )
 
         claims = _AccountClaims.model_validate(payload)
-    except (jwt.InvalidTokenError, ValidationError):
+    except (jwt.InvalidTokenError, ValidationError) as error:
+        _logger.warning("Account token rejected: %s", type(error).__name__)
         raise InvalidAccountToken("Invalid account token.") from None
+
+    if claims.iat > datetime.now(UTC).timestamp() + issued_at_leeway_seconds:
+        _logger.warning("Account token rejected: issued_at_in_future")
+        raise InvalidAccountToken("Invalid account token.")
+    if claims.iat >= claims.exp:
+        raise InvalidAccountToken("Invalid account token.")
 
     if claims.is_anonymous:
         raise InvalidAccountToken("Invalid account token.")

@@ -1,6 +1,7 @@
 """Complete a browser-bound Google callback without issuing cookies."""
 
 import asyncio
+import logging
 
 import httpx2
 from pydantic import SecretStr
@@ -13,11 +14,14 @@ from app.account_google_exchange import (
 )
 from app.account_google_session import create_google_account_session
 from app.account_key_cache import AccountKeyCache
-from app.account_oauth_material import recover_oauth_pkce_verifier
+from app.account_oauth_material import InvalidOAuthLoginMaterial, recover_oauth_pkce_verifier
 from app.account_oauth_transactions import consume_oauth_login_attempt_transaction
 from app.account_sessions import CreatedAccountSession
 from app.account_token_encryption import AccountTokenCipher
+from app.account_tokens import InvalidAccountToken
 from app.config import Settings
+
+_logger = logging.getLogger(__name__)
 
 
 async def complete_google_callback(
@@ -52,6 +56,7 @@ async def complete_google_callback(
 
     cipher = AccountTokenCipher(encryption_key)
 
+    stage = "consume_attempt"
     try:
         async with asyncio.timeout(settings.account_google_oauth_timeout_seconds):
             consumed = await consume_oauth_login_attempt_transaction(
@@ -59,11 +64,13 @@ async def complete_google_callback(
                 browser_token,
             )
 
+            stage = "recover_verifier"
             verifier = recover_oauth_pkce_verifier(
                 consumed.pkce_verifier_ciphertext,
                 cipher=cipher,
             )
 
+            stage = "exchange_code"
             tokens = await exchange_google_authorization_code(
                 code,
                 verifier,
@@ -71,6 +78,7 @@ async def complete_google_callback(
                 client=client,
             )
 
+            stage = "create_verified_session"
             created = await create_google_account_session(
                 engine,
                 tokens,
@@ -81,4 +89,8 @@ async def complete_google_callback(
 
         return created
     except TimeoutError:
+        _logger.warning("Google callback unavailable: stage=%s reason=timeout", stage)
         raise GoogleCodeExchangeUnavailable("Google sign-in is unavailable.") from None
+    except (InvalidOAuthLoginMaterial, GoogleCodeExchangeRejected, InvalidAccountToken) as error:
+        _logger.warning("Google callback rejected: stage=%s reason=%s", stage, type(error).__name__)
+        raise
