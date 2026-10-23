@@ -16,6 +16,7 @@ type AccountSignInFormProps = {
   titleId?: string
   initialEmail?: string
   onCreateAccount?: () => void
+  onForgotPassword?: (email: string) => void
   onClose: () => void
   onSignedIn?: (session: AccountSessionResponse) => void
 }
@@ -25,6 +26,7 @@ export default function AccountSignInForm({
   titleId,
   initialEmail = '',
   onCreateAccount,
+  onForgotPassword,
   onClose,
   onSignedIn,
 }: AccountSignInFormProps) {
@@ -37,7 +39,7 @@ export default function AccountSignInForm({
   const generation = useRef(0)
   const active = useRef(false)
   const formElement = useRef<HTMLFormElement>(null)
-  const accessOperation = useRef<'email' | 'google' | null>(null)
+  const accessOperation = useRef<'email' | 'google' | 'navigation' | null>(null)
 
   const [verified, setVerified] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -216,15 +218,31 @@ export default function AccountSignInForm({
               className="min-h-11 w-full rounded-control border border-control-border bg-background px-3 py-2 text-base text-foreground disabled:opacity-60"
             />
 
-            <button
-              type="button"
-              aria-controls={`${id}-password`}
-              aria-pressed={showPassword}
-              onClick={() => setShowPassword((current) => !current)}
-              className="inline-flex min-h-11 items-center text-sm text-accent hover:text-accent-hover"
-            >
-              Show password
-            </button>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                aria-controls={`${id}-password`}
+                aria-pressed={showPassword}
+                onClick={() => setShowPassword((current) => !current)}
+                className="inline-flex min-h-11 items-center text-sm text-accent hover:text-accent-hover"
+              >
+                Show password
+              </button>
+              {signIn.enabled && onForgotPassword && (
+                <button type="button" disabled={fieldsDisabled} onClick={() => {
+                  if (fieldsDisabled || accessOperation.current) return
+                  accessOperation.current = 'navigation'
+                  const email = emailInput.current?.value ?? ''
+                  const password = formElement.current?.elements.namedItem('password')
+                  if (password instanceof HTMLInputElement) password.value = ''
+                  proof.current = null
+                  generation.current += 1
+                  setVerified(false)
+                  setShowPassword(false)
+                  onForgotPassword(email)
+                }} className="inline-flex min-h-11 items-center text-sm text-accent enabled:hover:text-accent-hover disabled:opacity-60">Forgot password?</button>
+              )}
+            </div>
           </div>
         </fieldset>
 

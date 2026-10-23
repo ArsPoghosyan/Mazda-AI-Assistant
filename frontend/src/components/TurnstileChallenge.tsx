@@ -3,7 +3,7 @@ import { loadTurnstile, type TurnstileApi } from '../lib/turnstile'
 
 type TurnstileChallengeProps = {
   siteKey: string
-  action?: 'guest_start' | 'account_sign_in' | 'account_sign_up'
+  action?: 'guest_start' | 'account_sign_in' | 'account_sign_up' | 'account_password_recovery'
   onToken: (token: string) => void
   onInvalidated: () => void
 }

@@ -108,6 +108,11 @@ backend tests/lint/types and frontend tests/lint/build. Results are available in
   fields, validated acknowledgement responses, controlled errors, cancellation,
   and mocked API tests. Development forms connect these helpers inside the
   existing account dialog, with a separate sign-in after email confirmation.
+- Development-only Forgot password flow in the same dialog: CAPTCHA-protected
+  recovery email request, code/new-password form and explicit return to sign-in.
+  Mocked tests cover validation, cancellation, single-use proofs, sensitive-field
+  clearing and navigation races. Recovery email delivery, reset, old-password
+  rejection and new-password sign-in have been manually validated locally.
 - An internal Turnstile verifier with exact hostname/action checks, bounded
   Siteverify requests, controlled failures, and offline HTTP/cancellation tests.
 - Guest first-use verification before session creation, bounded optional JSON
@@ -787,9 +792,9 @@ The adapter does not persist passwords, verify JWT identity, create database
 sessions, or issue browser cookies. The returned pair must still pass the existing
 JWT-verification/session-creation flow before establishing an application session.
 The HTTP sign-in route described below connects that flow but is disabled by
-default. Additional abuse controls, a complete password-reset flow, and Google
-sign-in remain unimplemented. The recovery-request endpoint and development-only
-frontend sign-in flow are described below.
+default. Additional abuse controls and production authentication deployment
+remain outstanding. The recovery/reset endpoints, development forms and Google
+sign-in flow are described below.
 
 Offline tests use synthetic credentials and mocked HTTP. They cover request
 headers/body, credential preservation, missing configuration, input guards,
@@ -995,7 +1000,8 @@ Registration and email-confirmation forms are available only in development.
 The development-only Google option appears in both the sign-in and create-account
 views when explicitly configured. Google return hints are handled through the existing
 backend session check. Local Google sign-in has been manually confirmed;
-production Google deployment and password-recovery UI remain outstanding.
+production Google deployment remains outstanding. Local password recovery has
+also been manually validated through email delivery, reset and separate sign-in.
 Chat remains in development.
 
 ## Backend password-recovery requests
@@ -1028,12 +1034,54 @@ Offline tests cover parser boundaries, configuration, response classification,
 HTTP request/response limits, redirects, transport errors, cancellation, route
 guards, and total deadlines. Tests also exercise the real application startup,
 route, and adapter together with mocked Supabase responses and resource cleanup.
-They send no emails and require no database. Live recovery email delivery and a
-complete password-reset flow remain unvalidated. The internal verification and
+They send no emails and require no database. Separate manual local checks have
+validated recovery email delivery and a complete password-reset flow, as recorded
+under the development forms below. The internal verification and
 password-update adapters are described below. The default-disabled request
 endpoint does not establish complete account-enumeration or abuse protection;
 public enablement still requires the remaining abuse controls and deployment
 review.
+
+### Frontend recovery-request helper
+
+`requestAccountPasswordRecovery` sends only email and CAPTCHA proof to the
+existing recovery endpoint, once, with same-origin credentials, no caching and
+redirects rejected. It accepts only HTTP 202 with `status: "accepted"`, returns
+only that neutral metadata and ignores untrusted server messages or credentials.
+Acceptance does not confirm account existence or delivery.
+
+Rejected requests, explicit CAPTCHA rejection and rate limiting have distinct
+error classes. Other failures use controlled messages; error bodies and private
+transport/parser details are not exposed. No retry delay is invented. An optional
+`AbortSignal` preserves cancellation during the request and response reading;
+the development-only hook below owns the deadline and duplicate-start guard.
+
+All 32 focused recovery-helper tests and the full 197-test API suite passed with mocked
+requests. Frontend lint, TypeScript and production build also passed. No recovery
+emails were sent by these tests. Development recovery/reset controls use this
+helper; public enablement remains outstanding.
+
+### Frontend recovery-request hook
+
+`useAccountPasswordRecovery` is development-only and exposes idle, loading,
+accepted and error feedback. Mounting does not request recovery. Ref-based guards
+block duplicate starts before a React render and after acceptance. It passes an
+abort signal to the request helper and aborts at 15 seconds; timers are cleared
+after completion or failure. Unmounting aborts a pending request, prevents later
+starts through old callbacks and ignores late replies.
+
+Accepted feedback stays neutral about account existence and email delivery.
+Rejected input, verification failures and rate limits use controlled messages;
+unknown errors omit private details. Retries require a new explicit start and
+are never automatic. Timeout feedback suggests checking email before trying
+again, because cancelling a request cannot recall an email already sent. The
+recovery form consumes each CAPTCHA proof and obtains a fresh proof for retry.
+
+All 13 focused hook tests passed, including StrictMode, immediate duplicates,
+typed errors, explicit retries, the exact deadline, late responses and timer/
+unmount cleanup. The full frontend suite passed 486 tests (197 API and 289
+UI/hook cases); lint, TypeScript and production build passed. These requests are
+mocked; separate manual local validation is recorded under the development forms.
 
 ## Internal provider-session response validation
 
@@ -1127,9 +1175,9 @@ Offline tests cover input preservation and limits, response contracts, identity
 mismatches, masked errors, exact provider requests, redirect refusal, stream
 limits, deadlines, cancellation, and cleanup. They use synthetic credentials and
 mocked provider HTTP/authentication boundaries; existing account-authentication
-tests cover JWT verification. The internal reset service and default-disabled
-HTTP route described below connect these helpers; the frontend interface and
-live password-reset validation remain outstanding.
+tests cover JWT verification. The internal reset service, default-disabled HTTP
+route and development forms described below connect these helpers. Separate
+manual local checks validated the live reset success path.
 
 The separate recovery-session cleanup response interpreter accepts a no-content
 204 acknowledgement or an explicit 403 `session_not_found` reply from the
@@ -1245,8 +1293,99 @@ both the service and HTTP route with real JWT verification and mocked provider
 HTTP. They verify committed session deletion, ownership isolation, rollback,
 controlled HTTP errors and omission of credentials/cookies. The HTTP integration
 injects test-owned resources rather than exercising application startup.
-Frontend recovery/reset controls and live provider validation remain outstanding.
+Development recovery/reset controls are connected and the success path has been
+manually validated locally with the live provider. Live failure, cancellation
+and concurrent-session behavior are not established by that manual check.
 Private feature flags are not enabled by these tests or example settings.
+
+### Frontend password-reset helper
+
+`resetAccountPassword` sends only email, recovery code and `new_password` to the
+existing reset endpoint, once, with same-origin credentials, no caching and
+redirects rejected. It preserves password characters and leading zeros in codes.
+Only HTTP 200 with `status: "completed"` confirms completion; the returned object
+contains no identity, session or provider credentials and does not establish login.
+
+Rejected input and rate limits have distinct error classes. Error responses and
+private transport/parser details are not exposed, and no retry time is invented.
+Network, unavailable and malformed-response messages preserve uncertainty: the
+backend may already have changed the password. They suggest trying the new
+password before starting recovery again. No automatic retries are made.
+An optional `AbortSignal` preserves cancellation during request/response reading;
+cancellation does not guarantee that a password change was prevented or undone.
+The development-only reset hook below owns the deadline and duplicate-submit guard.
+
+All 31 focused reset-helper tests and the full 197-test API suite passed with
+mocked requests; frontend lint, TypeScript and production build passed too. Tests
+changed no real passwords and sent no emails. Separate manual local recovery/reset
+validation is recorded below; public enablement remains outstanding.
+
+### Frontend password-reset hook
+
+`useAccountPasswordReset` is development-only and exposes idle, loading,
+completed and error feedback. It sends no request on mount, guards duplicate
+starts before a render and after confirmed completion, and returns only a
+success boolean. Completion instructs the user to sign in; it does not log in
+or expose the email, recovery code or password in the returned state.
+
+The hook passes an abort signal and aborts at 15 seconds, clears timers on every
+settled outcome, cancels on unmount and ignores late responses or saved callbacks
+after unmount. Only a response confirmed before the deadline reports completion.
+Known rejections and rate limits have fixed feedback. Unknown errors and timeouts
+preserve uncertainty and suggest trying the new password before starting recovery
+again. Cancelling a request cannot guarantee preventing or undoing a password
+change. No automatic retries or invented retry delays are added.
+
+All 14 focused hook tests passed, including StrictMode, immediate duplicates,
+typed/private errors, explicit retry, the exact deadline, late resolve/reject,
+timer cleanup, unmount cancellation and production gating. The full frontend
+suite passed 486 tests (197 API and 289 UI/hook cases), plus lint, TypeScript and
+production build. Provider calls are mocked; these tests changed no real passwords.
+The hooks are connected to the development forms below.
+
+### Development password-recovery and reset forms
+
+The sign-in dialog offers "Forgot password?" beside the password-visibility
+control. It opens recovery in the same modal, preserving the typed email and
+discarding the sign-in password and proof. The recovery form uses the existing
+rectangular Turnstile widget with `account_password_recovery`, consumes each
+proof once and requires fresh verification after failure. A neutral accepted
+reply moves to code entry; "I already have a recovery code" supports an existing
+email without automatically requesting another one.
+
+The reset form accepts a six-to-ten-digit code (including leading zeros) and
+one new-password field with a visibility toggle. It clears code/password before
+submitting and when unmounted, and never stores either in the parent flow.
+Only confirmed completion offers "Continue to sign in"; resetting does not log
+in. Error feedback preserves uncertainty. Returning to sign-in or requesting
+another code is explicit and never sends a new recovery email automatically.
+
+Both forms guard duplicate starts and stale submit events during navigation,
+block competing navigation while pending, keep Close available, and cancel
+through hook cleanup when dismissed. The dialog retains its focus guards,
+scroll behavior and native-cancel handler; closing/reopening resets its flow.
+Email/code focus and explicit post-reset sign-in focus are covered in tests.
+
+All 33 new form/dialog cases and the full 486-test frontend suite passed (197 API,
+289 UI/hook cases), plus lint, TypeScript and production build. Provider calls
+are mocked. Browser automation was unavailable; these tests do not establish
+live browser or provider behavior.
+
+Manual local checks on 2026-10-24 validated recovery email delivery, code-based
+password reset, explicit return to sign-in, rejection of the old password,
+successful sign-in with the new password, and session restoration after refresh.
+These checks used a user-controlled account and do not establish live failure,
+concurrent-session or production behavior.
+
+Local live validation requires explicit backend
+`ACCOUNT_PASSWORD_RECOVERY_API_ENABLED=true` and
+`ACCOUNT_PASSWORD_RESET_API_ENABLED=true`, with the existing database/auth/
+encryption/origin/CAPTCHA settings configured. These flags stay false in examples;
+local private settings were enabled manually for the live check. The Supabase
+Reset password email template must show the recovery code (`{{ .Token }}`) for
+this code-entry flow; a link-only
+template is insufficient. See [Supabase email templates](https://supabase.com/docs/guides/auth/auth-email-templates).
+Dashboard/email-template changes and live account operations remain manual steps.
 
 ## Google sign-in — local development
 
@@ -1344,7 +1483,7 @@ are preserved. Artwork has a separate [source and brand notice](frontend/src/ass
 ### Validation and remaining release work
 
 The backend checkpoint passed 2,924 tests, including opt-in guarded PostgreSQL
-tests. The latest frontend checkpoint passed 363 tests (134 API and 229
+tests. The latest frontend checkpoint passed 486 tests (197 API and 289
 UI/hook/helper cases), including Google access from both account dialogs.
 Backend lint, formatting and typing checks, frontend lint, TypeScript and the
 production build also passed. External provider operations are mocked in
@@ -1723,9 +1862,10 @@ Automated tests do not contact Cloudflare or prove live token replay protection.
 Public guest access still requires abuse controls and production guest-route/cookie
 forwarding. Account sign-in, session restoration, sign-out, registration, and
 email-confirmation interfaces are available only in development. Password recovery
-has a default-disabled backend request endpoint; its frontend and password-change
-flow remain unimplemented. Registration and confirmation have been manually
-validated locally; public deployment remains a separate step.
+has default-disabled backend request/reset endpoints and frontend request/reset
+helpers, hooks and development forms. Recovery email delivery, reset, old-password
+rejection and separate new-password sign-in have been manually validated locally,
+alongside registration and confirmation. Public deployment remains a separate step.
 
 ## License
 
