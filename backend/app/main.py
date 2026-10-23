@@ -107,7 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.database_engine = None
 
     application = FastAPI(
-        title="Mazda6 AI Assistant API",
+        title="Mazda AI Assistant API",
         version="0.1.0",
         lifespan=lifespan,
     )

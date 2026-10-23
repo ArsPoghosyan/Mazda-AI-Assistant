@@ -66,13 +66,17 @@ export default function LandingPage({
               id="landing-title"
               className="max-w-[19ch] text-4xl leading-tight font-semibold tracking-tight text-balance sm:text-5xl"
             >
-              Understand your Mazda&nbsp;6. Know where the answer comes from.
+              Understand your Mazda. Know where the answer comes from.
             </h1>
 
             <p className="mt-6 max-w-lg text-lg leading-relaxed text-muted">
-              An assistant in development for Mazda&nbsp;6 maintenance questions,
+              An assistant in development for Mazda maintenance questions,
               warning lights and vehicle information, with references you can
               inspect.
+            </p>
+
+            <p className="mt-3 max-w-lg text-sm text-muted">
+              Initial vehicle support is planned for Mazda&nbsp;6.
             </p>
 
             <div className="mt-8 flex flex-wrap items-start gap-3">

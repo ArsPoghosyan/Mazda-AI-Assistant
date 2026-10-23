@@ -1,9 +1,12 @@
-# Mazda 6 AI Assistant
+# Mazda AI Assistant
 
-[![Checks](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions/workflows/ci.yml)
+[![Checks](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml)
 
-An independent, unofficial Mazda 6 information assistant in early development.
+An independent, unofficial Mazda information assistant in early development.
 Unaffiliated with Mazda.
+
+The first version will support Mazda 6, starting with verified information for
+the 2020 model. Additional Mazda models may be added later.
 
 **Status: early development.** The frontend and API health-check foundation
 are deployed at [askm6.com](https://askm6.com). The full assistant is not available yet.
@@ -15,7 +18,7 @@ history. External contributions are not being accepted.
 
 Development proceeds in small, testable changes. GitHub Actions is configured for
 backend tests/lint/types and frontend tests/lint/build. Results are available in the
-[Actions tab](https://github.com/ArsPoghosyan/Mazda6-AI-Assistant/actions).
+[Actions tab](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions).
 
 ## Working now
 
