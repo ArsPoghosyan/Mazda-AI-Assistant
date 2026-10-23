@@ -35,6 +35,7 @@ let api: TurnstileApi
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'false')
   vi.mocked(signUpAccount).mockReset()
 
   api = {

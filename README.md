@@ -992,8 +992,8 @@ refresh, and successful sign-out. These checks validate the local development
 flow; production account access remains disabled and is not validated by them.
 
 Registration and email-confirmation forms are available only in development.
-The development-only Google sign-in option is available in the existing dialog
-when explicitly configured. Google return hints are handled through the existing
+The development-only Google option appears in both the sign-in and create-account
+views when explicitly configured. Google return hints are handled through the existing
 backend session check. Local Google sign-in has been manually confirmed;
 production Google deployment and password-recovery UI remain outstanding.
 Chat remains in development.
@@ -1250,8 +1250,13 @@ Private feature flags are not enabled by these tests or example settings.
 
 ## Google sign-in — local development
 
-Google sign-in is available in the development sign-in dialog alongside
-email/password access. Supabase manages Google's authorization flow; FastAPI
+The development sign-in and create-account dialogs both offer a full-width
+"Continue with Google" button alongside email/password access. Both use the same
+Google flow for first-time and returning users; Google access does not require
+the local email/password fields or an email-registration confirmation code.
+Local browser checks confirmed matching controls in both dialogs, successful
+Google access from the create-account dialog, and Escape/Close dismissal.
+Supabase manages Google's authorization flow; FastAPI
 exchanges the PKCE code, verifies the Supabase JWT and active provider session,
 and stores an encrypted account session before issuing an opaque HttpOnly cookie.
 No Google client secret or provider token belongs in the frontend. Google login
@@ -1338,8 +1343,9 @@ are preserved. Artwork has a separate [source and brand notice](frontend/src/ass
 
 ### Validation and remaining release work
 
-The local checkpoint passed 2,924 backend tests, including opt-in guarded
-PostgreSQL tests, and 352 frontend tests (134 API and 218 UI/hook/helper cases).
+The backend checkpoint passed 2,924 tests, including opt-in guarded PostgreSQL
+tests. The latest frontend checkpoint passed 363 tests (134 API and 229
+UI/hook/helper cases), including Google access from both account dialogs.
 Backend lint, formatting and typing checks, frontend lint, TypeScript and the
 production build also passed. External provider operations are mocked in
 automated tests. Coverage includes expiry/locking, single-use consumption,

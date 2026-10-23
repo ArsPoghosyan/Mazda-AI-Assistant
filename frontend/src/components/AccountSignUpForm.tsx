@@ -6,6 +6,8 @@ import {
   type FormEvent,
 } from 'react'
 import { useAccountSignUp } from '../hooks/useAccountSignUp'
+import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
+import GoogleAccessOption from './GoogleAccessOption'
 import TurnstileChallenge from './TurnstileChallenge'
 
 type AccountSignUpFormProps = {
@@ -24,12 +26,15 @@ export default function AccountSignUpForm({
   onSignIn,
 }: AccountSignUpFormProps) {
   const signUp = useAccountSignUp()
+  const google = useGoogleSignIn()
   const id = useId()
   const headingId = titleId ?? `${id}-title`
   const emailInput = useRef<HTMLInputElement>(null)
   const proof = useRef<string | null>(null)
   const generation = useRef(0)
   const active = useRef(false)
+  const formElement = useRef<HTMLFormElement>(null)
+  const accessOperation = useRef<'email' | 'google' | null>(null)
 
   const [verified, setVerified] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -37,10 +42,13 @@ export default function AccountSignUpForm({
 
   const loading = signUp.status === 'loading'
   const accepted = signUp.status === 'accepted'
-  const fieldsDisabled = !signUp.enabled || loading || accepted
-  const statusMessage = !signUp.enabled
-    ? 'Account registration is not available here yet.'
-    : signUp.message
+  const googleBusy = google.status === 'loading' || google.status === 'redirecting'
+  const fieldsDisabled = !signUp.enabled || loading || accepted || googleBusy
+  const statusMessage = googleBusy
+    ? ''
+    : !signUp.enabled
+      ? 'Account registration is not available here yet.'
+      : signUp.message
 
   useEffect(() => {
     active.current = true
@@ -54,7 +62,7 @@ export default function AccountSignUpForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
-    if (fieldsDisabled || !proof.current) return
+    if (fieldsDisabled || !proof.current || accessOperation.current) return
 
     const form = event.currentTarget
     const data = new FormData(form)
@@ -63,6 +71,7 @@ export default function AccountSignUpForm({
 
     if (typeof email !== 'string' || typeof password !== 'string') return
 
+    accessOperation.current = 'email'
     const captchaToken = proof.current
 
     // Consume the proof before another submit event can reuse it.
@@ -79,14 +88,39 @@ export default function AccountSignUpForm({
       passwordInput.value = ''
     }
 
-    const succeeded = await signUp.start({
-      email,
-      password,
-      captcha_token: captchaToken,
-    })
+    let completed = false
+    try {
+      completed = await signUp.start({
+        email,
+        password,
+        captcha_token: captchaToken,
+      })
 
-    if (succeeded && active.current) {
-      onAccepted(email)
+      if (completed && active.current) onAccepted(email)
+    } finally {
+      if (!completed && accessOperation.current === 'email') {
+        accessOperation.current = null
+      }
+    }
+  }
+
+  async function startGoogle() {
+    if (!google.enabled || loading || accepted || googleBusy || accessOperation.current) return
+
+    accessOperation.current = 'google'
+    proof.current = null
+    setVerified(false)
+    generation.current += 1
+    setAttempt(generation.current)
+    setShowPassword(false)
+
+    const passwordInput = formElement.current?.elements.namedItem('password')
+    if (passwordInput instanceof HTMLInputElement) passwordInput.value = ''
+
+    try {
+      await google.start()
+    } finally {
+      if (accessOperation.current === 'google') accessOperation.current = null
     }
   }
 
@@ -111,11 +145,23 @@ export default function AccountSignUpForm({
       </div>
 
       <p id={`${id}-help`} className="mt-2 text-sm text-muted">
-        Enter your email and choose a password. Confirm your email before
-        signing in.
+        {google.enabled
+          ? 'Choose Google or use your email and a password. Email registration requires confirmation.'
+          : 'Enter your email and choose a password. Confirm your email before signing in.'}
       </p>
 
+      {google.enabled && (
+        <GoogleAccessOption
+          statusId={`${id}-google-status`}
+          disabled={loading || accepted || googleBusy}
+          busy={googleBusy}
+          message={google.message}
+          onContinue={() => { void startGoogle() }}
+        />
+      )}
+
       <form
+        ref={formElement}
         method="post"
         onSubmit={submit}
         aria-labelledby={headingId}
@@ -177,7 +223,7 @@ export default function AccountSignUpForm({
           </div>
         </fieldset>
 
-        {signUp.enabled && !loading && !accepted && (
+        {signUp.enabled && !loading && !accepted && !googleBusy && (
           <TurnstileChallenge
             key={attempt}
             siteKey={siteKey}
@@ -225,7 +271,9 @@ export default function AccountSignUpForm({
           Already have an account?{' '}
           <button
             type="button"
-            onClick={onSignIn}
+            onClick={() => {
+              if (!fieldsDisabled && !accessOperation.current) onSignIn()
+            }}
             disabled={fieldsDisabled}
             className="inline-flex min-h-11 items-center font-medium text-accent enabled:hover:text-accent-hover disabled:opacity-60"
           >

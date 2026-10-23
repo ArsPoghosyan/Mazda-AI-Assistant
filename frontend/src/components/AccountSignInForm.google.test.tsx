@@ -95,7 +95,7 @@ test.each(['disabled', 'production', 'missing-issuer'])(
     if (reason === 'production') vi.stubEnv('DEV', false)
     if (reason === 'missing-issuer') vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', '')
     render(<AccountSignInForm siteKey="public-test-key" onClose={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: 'Sign in with Google' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Continue with Google' })).toBeNull()
     expect(screen.getByText('Use your email and password to sign in.')).toBeDefined()
     expect(startGoogleSignIn).not.toHaveBeenCalled()
   },
@@ -105,7 +105,7 @@ test('Google starts without email fields or CAPTCHA and reports progress accessi
   const pending = deferred<GoogleLoginStartResponse>()
   vi.mocked(startGoogleSignIn).mockReturnValueOnce(pending.promise)
   const { user, email, password, onSignedIn, onCreateAccount } = await mountForm()
-  const google = screen.getByRole('button', { name: 'Sign in with Google' })
+  const google = screen.getByRole('button', { name: 'Continue with Google' })
   expect(google.getAttribute('type')).toBe('button')
   expect(email.value).toBe('')
   expect(password.value).toBe('')
@@ -140,7 +140,7 @@ test('Google wins an immediate cross-mode race and clears password and stale pro
   await user.click(screen.getByRole('button', { name: 'Show password' }))
   const old = widgetOptions()
   act(() => old.callback('old-proof'))
-  const google = screen.getByRole('button', { name: 'Sign in with Google' })
+  const google = screen.getByRole('button', { name: 'Continue with Google' })
   const create = screen.getByRole('button', { name: 'Create account' })
 
   act(() => {
@@ -169,7 +169,7 @@ test('email wins an immediate cross-mode race and blocks Google after success', 
   await user.type(email, 'owner@example.test')
   await user.type(password, 'synthetic-private-password')
   act(() => widgetOptions().callback('email-proof'))
-  const google = screen.getByRole('button', { name: 'Sign in with Google' })
+  const google = screen.getByRole('button', { name: 'Continue with Google' })
   const create = screen.getByRole('button', { name: 'Create account' })
   act(() => {
     fireEvent.submit(form)
@@ -194,7 +194,7 @@ test('Google failure restores email only with a fresh proof and password', async
   await user.type(password, 'synthetic-private-password')
   const old = widgetOptions()
   act(() => old.callback('old-proof'))
-  await user.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+  await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
   await screen.findByText('Google sign-in is temporarily unavailable.')
   await screen.findByText('Complete the check to continue.')
   expect(email.closest('fieldset')?.disabled).toBe(false)
@@ -218,7 +218,7 @@ test('Google can retry explicitly after an error without an automatic second req
   vi.mocked(startGoogleSignIn).mockRejectedValueOnce(new Error('private-provider-detail'))
     .mockResolvedValueOnce(googleResult())
   const { user } = await mountForm()
-  const google = screen.getByRole('button', { name: 'Sign in with Google' })
+  const google = screen.getByRole('button', { name: 'Continue with Google' })
   await user.click(google)
   await screen.findByText('Google sign-in could not be started. Please try again.')
   expect(screen.queryByText('private-provider-detail')).toBeNull()
@@ -232,7 +232,7 @@ test('Close remains available and unmount cancels Google without navigation', as
   const pending = deferred<GoogleLoginStartResponse>()
   vi.mocked(startGoogleSignIn).mockReturnValueOnce(pending.promise)
   const { user, view, onClose } = await mountForm()
-  await user.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+  await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
   await user.click(screen.getByRole('button', { name: 'Close sign-in' }))
   expect(onClose).toHaveBeenCalledOnce()
   view.unmount()
@@ -241,7 +241,7 @@ test('Close remains available and unmount cancels Google without navigation', as
   expect(navigate).not.toHaveBeenCalled()
 })
 
-test('native dialog cancellation closes and aborts Google while returning focus', async () => {
+test.each(['sign_in', 'sign_up'])('native dialog cancellation closes and aborts Google from %s while returning focus', async (mode) => {
   const prototype = HTMLDialogElement.prototype
   const show = Object.getOwnPropertyDescriptor(prototype, 'showModal')
   const close = Object.getOwnPropertyDescriptor(prototype, 'close')
@@ -267,7 +267,11 @@ test('native dialog cancellation closes and aborts Google while returning focus'
   try {
     const user = userEvent.setup()
     render(<Harness />)
-    await user.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+    if (mode === 'sign_up') {
+      await user.click(screen.getByRole('button', { name: 'Create account' }))
+      expect(screen.getByRole('form', { name: 'Create account' })).toBeDefined()
+    }
+    await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
     fireEvent(screen.getByRole('dialog'), new Event('cancel', { cancelable: true }))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open sign-in' }))

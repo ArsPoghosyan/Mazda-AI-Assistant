@@ -6,9 +6,9 @@ import {
   type FormEvent,
 } from 'react'
 import type { AccountSessionResponse } from '../api/account'
-import googleIcon from '../assets/google-g.png'
 import { useAccountSignIn } from '../hooks/useAccountSignIn'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
+import GoogleAccessOption from './GoogleAccessOption'
 import TurnstileChallenge from './TurnstileChallenge'
 
 type AccountSignInFormProps = {
@@ -155,32 +155,13 @@ export default function AccountSignInForm({
       </p>
 
       {google.enabled && (
-        <div className="mt-6">
-          <button
-            type="button"
-            disabled={loading || ready || googleBusy}
-            aria-busy={googleBusy}
-            aria-describedby={`${id}-google-status`}
-            onClick={() => { void startGoogle() }}
-            className="google-sign-in-button flex min-h-12 w-full items-center justify-center gap-2.5 rounded-control border px-3 py-3 text-sm font-medium leading-5 disabled:opacity-60"
-          >
-            <img src={googleIcon} width={20} height={20} alt="" aria-hidden="true" className="h-5 w-5 shrink-0 object-contain" />
-            <span>Sign in with Google</span>
-          </button>
-          <p
-            id={`${id}-google-status`}
-            role="status"
-            aria-atomic="true"
-            className={google.message ? 'mt-3 text-sm text-muted' : 'sr-only'}
-          >
-            {google.message}
-          </p>
-          <div aria-hidden="true" className="mt-6 flex items-center gap-3 text-sm text-muted">
-            <span className="h-px flex-1 bg-divider" />
-            <span>or use email</span>
-            <span className="h-px flex-1 bg-divider" />
-          </div>
-        </div>
+        <GoogleAccessOption
+          statusId={`${id}-google-status`}
+          disabled={loading || ready || googleBusy}
+          busy={googleBusy}
+          message={google.message}
+          onContinue={() => { void startGoogle() }}
+        />
       )}
 
       <form
