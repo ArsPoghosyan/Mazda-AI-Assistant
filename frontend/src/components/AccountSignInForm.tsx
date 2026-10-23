@@ -6,7 +6,9 @@ import {
   type FormEvent,
 } from 'react'
 import type { AccountSessionResponse } from '../api/account'
+import googleIcon from '../assets/google-g.png'
 import { useAccountSignIn } from '../hooks/useAccountSignIn'
+import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import TurnstileChallenge from './TurnstileChallenge'
 
 type AccountSignInFormProps = {
@@ -27,12 +29,15 @@ export default function AccountSignInForm({
   onSignedIn,
 }: AccountSignInFormProps) {
   const signIn = useAccountSignIn()
+  const google = useGoogleSignIn()
   const id = useId()
   const headingId = titleId ?? `${id}-title`
   const emailInput = useRef<HTMLInputElement>(null)
   const proof = useRef<string | null>(null)
   const generation = useRef(0)
   const active = useRef(false)
+  const formElement = useRef<HTMLFormElement>(null)
+  const accessOperation = useRef<'email' | 'google' | null>(null)
 
   const [verified, setVerified] = useState(false)
   const [attempt, setAttempt] = useState(0)
@@ -40,7 +45,13 @@ export default function AccountSignInForm({
 
   const loading = signIn.status === 'loading'
   const ready = signIn.status === 'ready'
-  const fieldsDisabled = !signIn.enabled || loading || ready
+  const googleBusy = google.status === 'loading' || google.status === 'redirecting'
+  const fieldsDisabled = !signIn.enabled || loading || ready || googleBusy
+  const statusMessage = googleBusy
+    ? ''
+    : !signIn.enabled
+      ? 'Account sign-in is not available here yet.'
+      : signIn.message
 
   useEffect(() => {
     active.current = true
@@ -54,7 +65,7 @@ export default function AccountSignInForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
-    if (fieldsDisabled || !proof.current) return
+    if (fieldsDisabled || !proof.current || accessOperation.current) return
 
     const form = event.currentTarget
     const data = new FormData(form)
@@ -62,6 +73,8 @@ export default function AccountSignInForm({
     const password = data.get('password')
 
     if (typeof email !== 'string' || typeof password !== 'string') return
+
+    accessOperation.current = 'email'
 
     const captchaToken = proof.current
 
@@ -79,13 +92,40 @@ export default function AccountSignInForm({
       passwordInput.value = ''
     }
 
-    const session = await signIn.start({
-      email,
-      password,
-      captcha_token: captchaToken,
-    })
+    let completed = false
+    try {
+      const session = await signIn.start({
+        email,
+        password,
+        captcha_token: captchaToken,
+      })
+      completed = session !== null
+      if (session && active.current) onSignedIn?.(session)
+    } finally {
+      if (!completed && accessOperation.current === 'email') {
+        accessOperation.current = null
+      }
+    }
+  }
 
-    if (session && active.current) onSignedIn?.(session)
+  async function startGoogle() {
+    if (!google.enabled || loading || ready || googleBusy || accessOperation.current) return
+
+    accessOperation.current = 'google'
+    proof.current = null
+    setVerified(false)
+    generation.current += 1
+    setAttempt(generation.current)
+    setShowPassword(false)
+
+    const passwordInput = formElement.current?.elements.namedItem('password')
+    if (passwordInput instanceof HTMLInputElement) passwordInput.value = ''
+
+    try {
+      await google.start()
+    } finally {
+      if (accessOperation.current === 'google') accessOperation.current = null
+    }
   }
 
   return (
@@ -109,10 +149,42 @@ export default function AccountSignInForm({
       </div>
 
       <p id={`${id}-help`} className="mt-2 text-sm text-muted">
-        Use your email and password to sign in.
+        {google.enabled
+          ? 'Choose Google or use your email and password.'
+          : 'Use your email and password to sign in.'}
       </p>
 
+      {google.enabled && (
+        <div className="mt-6">
+          <button
+            type="button"
+            disabled={loading || ready || googleBusy}
+            aria-busy={googleBusy}
+            aria-describedby={`${id}-google-status`}
+            onClick={() => { void startGoogle() }}
+            className="google-sign-in-button flex min-h-12 w-full items-center justify-center gap-2.5 rounded-control border px-3 py-3 text-sm font-medium leading-5 disabled:opacity-60"
+          >
+            <img src={googleIcon} width={20} height={20} alt="" aria-hidden="true" className="h-5 w-5 shrink-0 object-contain" />
+            <span>Sign in with Google</span>
+          </button>
+          <p
+            id={`${id}-google-status`}
+            role="status"
+            aria-atomic="true"
+            className={google.message ? 'mt-3 text-sm text-muted' : 'sr-only'}
+          >
+            {google.message}
+          </p>
+          <div aria-hidden="true" className="mt-6 flex items-center gap-3 text-sm text-muted">
+            <span className="h-px flex-1 bg-divider" />
+            <span>or use email</span>
+            <span className="h-px flex-1 bg-divider" />
+          </div>
+        </div>
+      )}
+
       <form
+        ref={formElement}
         method="post"
         onSubmit={submit}
         aria-labelledby={headingId}
@@ -175,7 +247,7 @@ export default function AccountSignInForm({
           </div>
         </fieldset>
 
-        {signIn.enabled && !loading && !ready && (
+        {signIn.enabled && !loading && !ready && !googleBusy && (
           <TurnstileChallenge
             key={attempt}
             siteKey={siteKey}
@@ -199,12 +271,9 @@ export default function AccountSignInForm({
           id={`${id}-status`}
           role="status"
           aria-atomic="true"
-          className="min-h-6 text-sm text-muted"
+          className={statusMessage ? 'text-sm text-muted' : 'sr-only'}
         >
-          {!signIn.enabled
-            ? 'Account sign-in is not available here yet.'
-            : signIn.message ||
-              'Enter your details and complete human verification.'}
+          {statusMessage}
         </p>
 
         <button
@@ -222,7 +291,9 @@ export default function AccountSignInForm({
           New here?{' '}
           <button
             type="button"
-            onClick={onCreateAccount}
+            onClick={() => {
+              if (!fieldsDisabled && !accessOperation.current) onCreateAccount()
+            }}
             disabled={fieldsDisabled}
             className="inline-flex min-h-11 items-center font-medium text-accent enabled:hover:text-accent-hover disabled:opacity-60"
           >

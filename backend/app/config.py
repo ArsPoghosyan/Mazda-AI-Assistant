@@ -1,9 +1,10 @@
 """Validated backend configuration."""
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,6 +83,18 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    account_google_oauth_api_enabled: bool = False
+    account_google_oauth_timeout_seconds: int = Field(
+        default=15,
+        ge=1,
+        le=30,
+    )
+    account_google_oauth_attempt_lifetime_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=900,
+    )
+    account_google_oauth_callback_url: HttpUrl | None = None
     turnstile_secret_key: SecretStr | None = None
     turnstile_allowed_hostnames: tuple[str, ...] = ()
     turnstile_timeout_seconds: int = Field(
@@ -89,6 +102,61 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+
+    @field_validator("account_google_oauth_callback_url", mode="before")
+    @classmethod
+    def validate_raw_google_callback_url(cls, value: object) -> object:
+        """Reject ambiguous spellings before URL parsing can normalize them."""
+        if value is None:
+            return None
+        if not isinstance(value, (str, HttpUrl)):
+            raise ValueError("Invalid Google OAuth callback URL.")
+        raw = str(value)
+        if (
+            len(raw) > 2048
+            or any(ord(character) < 33 or ord(character) > 126 for character in raw)
+            or any(character in raw for character in ("\\", "?", "#"))
+        ):
+            raise ValueError("Invalid Google OAuth callback URL.")
+        try:
+            parsed = urlsplit(raw)
+        except ValueError:
+            raise ValueError("Invalid Google OAuth callback URL.") from None
+        if (
+            parsed.path != "/api/v1/account/google/callback"
+            or parsed.username is not None
+            or parsed.password is not None
+            or (
+                parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+            )
+        ):
+            raise ValueError("Invalid Google OAuth callback URL.")
+        return value
+
+    @field_validator("account_google_oauth_callback_url")
+    @classmethod
+    def validate_google_callback_url(
+        cls, value: HttpUrl | None, info: ValidationInfo
+    ) -> HttpUrl | None:
+        if value is None:
+            return None
+        if (
+            value.username is not None
+            or value.password is not None
+            or value.query is not None
+            or value.fragment is not None
+            or value.host is None
+            or "*" in value.host
+            or value.path != "/api/v1/account/google/callback"
+        ):
+            raise ValueError("Invalid Google OAuth callback URL.")
+        if value.scheme != "https" and not (
+            value.scheme == "http"
+            and value.host in ("127.0.0.1", "localhost", "[::1]")
+            and info.data.get("account_cookie_secure", True) is False
+        ):
+            raise ValueError("Google OAuth callbacks require HTTPS outside local development.")
+        return value
 
     @field_validator("supabase_auth_publishable_key")
     @classmethod

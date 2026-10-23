@@ -981,8 +981,11 @@ refresh, and successful sign-out. These checks validate the local development
 flow; production account access remains disabled and is not validated by them.
 
 Registration and email-confirmation forms are available only in development.
-Password-recovery and Google sign-in interfaces remain unimplemented. Chat remains
-in development.
+The development-only Google sign-in option is available in the existing dialog
+when explicitly configured. Google return hints are handled through the existing
+backend session check. Local Google sign-in has been manually confirmed;
+production Google deployment and password-recovery UI remain outstanding.
+Chat remains in development.
 
 ## Backend password-recovery requests
 
@@ -1233,6 +1236,109 @@ controlled HTTP errors and omission of credentials/cookies. The HTTP integration
 injects test-owned resources rather than exercising application startup.
 Frontend recovery/reset controls and live provider validation remain outstanding.
 Private feature flags are not enabled by these tests or example settings.
+
+## Google sign-in — local development
+
+Google sign-in is available in the development sign-in dialog alongside
+email/password access. Supabase manages Google's authorization flow; FastAPI
+exchanges the PKCE code, verifies the Supabase JWT and active provider session,
+and stores an encrypted account session before issuing an opaque HttpOnly cookie.
+No Google client secret or provider token belongs in the frontend. Google login
+does not automatically transfer guest data or match application accounts by email.
+
+Manual local checks confirmed successful Google sign-in, session persistence
+after refresh, sign-out, cancellation/retry, and the same account ID when using
+Google and an existing confirmed email/password account with the same email.
+Supabase owns [automatic identity linking](https://supabase.com/docs/guides/auth/auth-identity-linking);
+the application uses its verified subject ID. These checks cover one local test
+setup, not every provider error, account-linking case or production deployment.
+
+### Configuration
+
+Examples remain disabled. Local Google access requires existing database,
+Supabase issuer/publishable-key, session-encryption, trusted-origin and account
+session/sign-out configuration, plus:
+
+| Setting | Default / requirement |
+| --- | --- |
+| `ACCOUNT_GOOGLE_OAUTH_API_ENABLED` | `false`; explicitly enable for the local test |
+| `ACCOUNT_GOOGLE_OAUTH_CALLBACK_URL` | Unset; exact externally visible application callback |
+| `ACCOUNT_GOOGLE_OAUTH_TIMEOUT_SECONDS` | `15`, allowed range 1–30; backend work only |
+| `ACCOUNT_GOOGLE_OAUTH_ATTEMPT_LIFETIME_SECONDS` | `600`, allowed range 60–900; includes time on Google |
+| `VITE_GOOGLE_OAUTH_ENABLED` | `false`; the button also requires Vite development mode |
+| `VITE_SUPABASE_AUTH_ISSUER` | Public `https://YOUR_PROJECT_REF.supabase.co/auth/v1` |
+
+The application callback is
+`http://127.0.0.1:5173/api/v1/account/google/callback` for the Vite local setup.
+Add that exact URL to Supabase's
+[redirect allowlist](https://supabase.com/docs/guides/auth/redirect-urls).
+Google Cloud instead uses the hosted Supabase callback
+`https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback`; store the Google web
+client ID/secret in Supabase's Google provider settings. See the
+[Google provider setup guide](https://supabase.com/docs/guides/auth/social-login/auth-google).
+
+Callback configuration rejects credentials, query/fragment components, wildcard
+hosts and ambiguous path spellings. HTTPS is required except explicit loopback
+HTTP development with `ACCOUNT_COOKIE_SECURE=false`. The frontend validates the
+configured HTTPS issuer, exact authorization destination, fixed callback, future
+expiry and four unique Google/S256 parameters before navigating.
+
+### API and security boundaries
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /api/v1/account/google/start` | Trusted Origin, empty body and no query; commits a pending attempt and returns authorization URL/expiry metadata |
+| `GET /api/v1/account/google/callback` | Checks the browser binding, consumes the attempt once, exchanges the code and commits the verified account session |
+
+The migration `b731b533d299` adds `app.oauth_login_attempts`, a unique browser-token
+hash and expiry index, and grants `askm6_app` only SELECT/INSERT/DELETE on the new
+table. Browser tokens and PKCE verifiers are independent high-entropy values;
+only the token hash and encrypted verifier are stored. Consumption uses atomic
+DELETE/RETURNING and fresh database time after row-lock waits. Replacement proves
+the previous binding and uses a savepoint; failed/uncertain operations require a
+fresh flow and never automatically replay a code exchange.
+
+The short-lived binding cookie is HttpOnly, SameSite=Lax, host-only and root-path;
+secure mode uses `__Host-askm6_oauth`. Malformed/duplicate bindings are rejected.
+An existing account-cookie name requires explicit sign-out before another login,
+even if that cookie is stale. Guest cookies and data are preserved.
+
+The callback accepts one bounded `code` parameter and uses the fixed configured
+return origin, never request Host, forwarded headers or a browser return URL.
+It returns 303 with a fixed noncredential outcome fragment and clears the pending
+cookie on handled terminal responses. Codes/tokens are not reflected in errors.
+Account cookies are issued only after session commit. The exchange is bounded
+to five seconds and 64 KiB of uncompressed JSON, with no redirects or retries.
+
+Frontend return fragments are untrusted status hints: only the backend session
+check establishes sign-in. The dialog blocks simultaneous Google/email starts,
+clears typed passwords and prior CAPTCHA proofs on Google start, cancels pending
+starts on close/unmount, and permits explicit retries. The full-width Google
+button has one boundary, matching form alignment and balanced idle spacing;
+sign-in/sign-up omit redundant verification instructions and empty status rows.
+Original Google icon proportions, visible keyboard focus and meaningful feedback
+are preserved. Artwork has a separate [source and brand notice](frontend/src/assets/README.md).
+
+### Validation and remaining release work
+
+The local checkpoint passed 2,889 backend tests, including opt-in guarded
+PostgreSQL tests, and 352 frontend tests (134 API and 218 UI/hook/helper cases).
+Backend lint, formatting and typing checks, frontend lint, TypeScript and the
+production build also passed. External provider operations are mocked in
+automated tests. Coverage includes expiry/locking, single-use consumption,
+rollback/commit ordering, cookies, bounded exchange, callback rejection,
+destination validation, cancellation, retries, StrictMode and forged return hints.
+
+The standard Uvicorn access-log filter removes callback query values, including
+rejected callback subpaths. Hosting, reverse-proxy, custom access/error logging
+need separate review. The current Cloudflare Pages function proxies only health;
+production auth proxy/cookie/redirect handling is not implemented.
+
+Before public Google enablement, complete creation-abuse limits, expired-attempt
+cleanup, broader provider/linking checks, upstream provider-method assurance,
+partial-provider-session failure/cleanup review, and deployment/security/privacy
+review. Cancellation cannot guarantee delivery of a cookie-clearing response to
+a disconnected browser. Local success does not establish production readiness.
 
 ## Frontend registration API foundation
 

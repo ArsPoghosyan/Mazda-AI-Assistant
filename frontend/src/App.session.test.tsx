@@ -85,7 +85,12 @@ function mountApp() {
   )
 }
 
+let originalUrl: string
+let originalHistoryState: unknown
+
 beforeEach(() => {
+  originalUrl = window.location.href
+  originalHistoryState = window.history.state
   vi.stubEnv('DEV', true)
   vi.mocked(loadTurnstile).mockReset()
 })
@@ -94,6 +99,113 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
+  window.history.replaceState(originalHistoryState, '', originalUrl)
+})
+
+test.each([
+  ['success', 'Google sign-in could not be confirmed. Please sign in again.'],
+  ['rejected', 'Google sign-in was not completed. Please try again.'],
+  ['unavailable', 'Google sign-in is temporarily unavailable. Please try again.'],
+  [
+    'sign-out-required',
+    'The previous account session is no longer available. Please sign in again.',
+  ],
+])('shows the %s return message only after session rejection', async (outcome, message) => {
+  window.history.replaceState(null, '', `/#google-sign-in=${outcome}`)
+
+  const fetchMock = mockNetwork(
+    () => new Response(null, { status: 401 }),
+  )
+
+  mountApp()
+
+  await screen.findByText(message)
+
+  expect(window.location.hash).toBe('')
+  expect(
+    screen.getByRole('button', { name: 'Sign In' }).hasAttribute('disabled'),
+  ).toBe(false)
+  expect(
+    screen.getByRole('button', { name: 'Try as Guest' }).hasAttribute('disabled'),
+  ).toBe(false)
+  expect(
+    screen.queryByRole('button', { name: 'Signed in' }),
+  ).toBeNull()
+
+  expect(accountRequests(fetchMock)).toHaveLength(1)
+  expectOnlySessionAndHealthRequests(fetchMock)
+})
+
+test('Google success waits for backend verification before showing Signed in', async () => {
+  window.history.replaceState(null, '', '/#google-sign-in=success')
+
+  const pending = deferredResponse()
+  const fetchMock = mockNetwork(() => pending.promise)
+
+  mountApp()
+
+  await screen.findByText('API connected')
+
+  expect(
+    screen.getByRole('button', {
+      name: 'Checking account…',
+    }).hasAttribute('disabled'),
+  ).toBe(true)
+  expect(
+    screen.getByRole('button', { name: 'Try as Guest' }).hasAttribute('disabled'),
+  ).toBe(true)
+  expect(
+    screen.queryByRole('button', { name: 'Signed in' }),
+  ).toBeNull()
+
+  await act(async () => {
+    pending.resolve(Response.json(session))
+    await pending.promise
+  })
+
+  await screen.findByRole('button', { name: 'Signed in' })
+  expect(
+    screen.getByRole('button', { name: 'Try as Guest' }).hasAttribute('disabled'),
+  ).toBe(true)
+
+  expect(accountRequests(fetchMock)).toHaveLength(1)
+  expectOnlySessionAndHealthRequests(fetchMock)
+})
+
+test('Google return stays unavailable until an explicit session retry', async () => {
+  window.history.replaceState(null, '', '/#google-sign-in=success')
+
+  let attempts = 0
+  const fetchMock = mockNetwork(() => {
+    attempts += 1
+    return attempts === 1
+      ? new Response('synthetic-private-detail', { status: 503 })
+      : new Response(null, { status: 401 })
+  })
+
+  mountApp()
+
+  const retry = await screen.findByRole('button', {
+    name: 'Retry session check',
+  })
+
+  expect(
+    screen.getByRole('button', { name: 'Try as Guest' }).hasAttribute('disabled'),
+  ).toBe(true)
+  expect(document.body.textContent).not.toContain('synthetic-private-detail')
+  expect(accountRequests(fetchMock)).toHaveLength(1)
+
+  fireEvent.click(retry)
+
+  await screen.findByText(
+    'Google sign-in could not be confirmed. Please sign in again.',
+  )
+  expect(
+    screen.getByRole('button', { name: 'Try as Guest' }).hasAttribute('disabled'),
+  ).toBe(false)
+
+  expect(accountRequests(fetchMock)).toHaveLength(2)
+  expectOnlySessionAndHealthRequests(fetchMock)
 })
 
 test('blocks access while checking and restores the account once', async () => {

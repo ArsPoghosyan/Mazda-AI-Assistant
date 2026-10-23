@@ -38,6 +38,9 @@ export default function AccountSignUpForm({
   const loading = signUp.status === 'loading'
   const accepted = signUp.status === 'accepted'
   const fieldsDisabled = !signUp.enabled || loading || accepted
+  const statusMessage = !signUp.enabled
+    ? 'Account registration is not available here yet.'
+    : signUp.message
 
   useEffect(() => {
     active.current = true
@@ -198,12 +201,9 @@ export default function AccountSignUpForm({
           id={`${id}-status`}
           role="status"
           aria-atomic="true"
-          className="min-h-6 text-sm text-muted"
+          className={statusMessage ? 'text-sm text-muted' : 'sr-only'}
         >
-          {!signUp.enabled
-            ? 'Account registration is not available here yet.'
-            : signUp.message ||
-              'Enter your details and complete human verification.'}
+          {statusMessage}
         </p>
 
         <button

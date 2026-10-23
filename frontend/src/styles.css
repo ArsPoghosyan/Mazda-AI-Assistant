@@ -46,6 +46,18 @@ button:disabled {
   background: color-mix(in srgb, var(--color-background) 80%, transparent);
 }
 
+.google-sign-in-button {
+  background-color: #131314;
+  border-color: #8e918f;
+  color: #e3e3e3;
+  font-family: 'Roboto', Arial, sans-serif;
+  letter-spacing: 0.25px;
+}
+
+.google-sign-in-button:enabled:hover {
+  background-color: color-mix(in srgb, #e3e3e3 8%, #131314);
+}
+
 :where(a, button, input, select, textarea):focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 3px;

@@ -3,6 +3,10 @@ import {
   checkAccountSession,
   type AccountSessionResponse,
 } from '../api/account'
+import {
+  consumeGoogleReturn,
+  type GoogleReturnOutcome,
+} from '../lib/googleReturn'
 
 type AccountSessionState = {
   status: 'disabled' | 'checking' | 'signed_in' | 'signed_out' | 'unavailable'
@@ -10,9 +14,18 @@ type AccountSessionState = {
   message: string
 }
 
+const GOOGLE_RETURN_MESSAGES: Record<GoogleReturnOutcome, string> = {
+  success: 'Google sign-in could not be confirmed. Please sign in again.',
+  rejected: 'Google sign-in was not completed. Please try again.',
+  unavailable: 'Google sign-in is temporarily unavailable. Please try again.',
+  'sign-out-required':
+    'The previous account session is no longer available. Please sign in again.',
+}
+
 export function useAccountSession() {
   const enabled = import.meta.env.DEV
   const request = useRef<AbortController | null>(null)
+  const googleReturn = useRef<GoogleReturnOutcome | null | undefined>(undefined)
   const [attempt, setAttempt] = useState(0)
 
   const [state, setState] = useState<AccountSessionState>({
@@ -23,6 +36,10 @@ export function useAccountSession() {
 
   useEffect(() => {
     if (!enabled) return
+
+    if (googleReturn.current === undefined) {
+      googleReturn.current = consumeGoogleReturn()
+    }
 
     const controller = new AbortController()
     request.current = controller
@@ -53,15 +70,23 @@ export function useAccountSession() {
           setState({
             status: 'signed_out',
             session: null,
-            message: '',
+            message: googleReturn.current
+              ? GOOGLE_RETURN_MESSAGES[googleReturn.current]
+              : '',
           })
         } else {
           setState({
             status: 'signed_in',
             session,
-            message: 'Signed in. Chat is still in development.',
+            message:
+              googleReturn.current === 'sign-out-required'
+                ? 'You are already signed in. Sign out before choosing another account.'
+                : 'Signed in. Chat is still in development.',
           })
         }
+
+        // A completed session check has handled this return hint.
+        googleReturn.current = null
       } catch {
         if (!active) return
 

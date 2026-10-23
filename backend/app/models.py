@@ -3,7 +3,16 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, LargeBinary, MetaData, Uuid, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    LargeBinary,
+    MetaData,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -147,6 +156,61 @@ class AccountSession(Base):
         index=True,
     )
     absolute_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+
+class OAuthLoginAttempt(Base):
+    """Pending browser-bound OAuth attempt; not an authenticated session."""
+
+    __tablename__ = "oauth_login_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "octet_length(browser_token_hash) = 32",
+            name="browser_token_hash_length",
+        ),
+        CheckConstraint(
+            "octet_length(pkce_verifier_ciphertext) BETWEEN 1 AND 1024",
+            name="pkce_ciphertext_size",
+        ),
+        CheckConstraint(
+            "provider = 'google'",
+            name="provider_google_only",
+        ),
+        CheckConstraint(
+            "purpose = 'sign_in'",
+            name="purpose_sign_in_only",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="expiry_after_creation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+    )
+    browser_token_hash: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        unique=True,
+    )
+    pkce_verifier_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    provider: Mapped[str] = mapped_column(
+        String(16),
+        default="google",
+    )
+    purpose: Mapped[str] = mapped_column(
+        String(16),
+        default="sign_in",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         index=True,
     )
