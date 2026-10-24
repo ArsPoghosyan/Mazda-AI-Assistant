@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  AccountSignInRateLimitedError,
   AccountSignInRejectedError,
   AccountVerificationRequiredError,
   signInAccount,
@@ -106,6 +107,26 @@ test('blocks duplicate submissions while pending and after success', async () =>
 
 test.each([
   {
+    name: 'rate limit with retry time',
+    error: new AccountSignInRateLimitedError('61'),
+    message: 'Too many sign-in attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'one-second rate limit',
+    error: new AccountSignInRateLimitedError('1'),
+    message: 'Too many sign-in attempts. Please wait 1 second before trying again.',
+  },
+  {
+    name: 'rate limit without retry time',
+    error: new AccountSignInRateLimitedError(),
+    message: 'Too many sign-in attempts. Please try again later.',
+  },
+  {
+    name: 'rate limit with untrusted retry time',
+    error: new AccountSignInRateLimitedError('private-provider-detail'),
+    message: 'Too many sign-in attempts. Please try again later.',
+  },
+  {
     name: 'rejected credentials',
     error: new AccountSignInRejectedError(),
     message: 'Sign-in was rejected. Check your details and try again.',
@@ -199,6 +220,25 @@ test('aborts a stalled submission after 15 seconds', async () => {
   )
   expect(signInAccount).toHaveBeenCalledTimes(1)
   expect(vi.getTimerCount()).toBe(0)
+})
+
+test('a rate-limit wait message never schedules another credential submission', async () => {
+  vi.useFakeTimers()
+  vi.mocked(signInAccount).mockRejectedValueOnce(new AccountSignInRateLimitedError('61'))
+  const { result } = renderHook(useAccountSignIn, { wrapper: StrictMode })
+
+  await act(async () => {
+    expect(await result.current.start(credentials)).toBeNull()
+  })
+  expect(vi.getTimerCount()).toBe(0)
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000)
+  })
+  expect(result.current.message).toBe(
+    'Too many sign-in attempts. Please wait 61 seconds before trying again.',
+  )
+  expect(signInAccount).toHaveBeenCalledTimes(1)
 })
 
 test('unmount aborts the request and ignores its late result', async () => {

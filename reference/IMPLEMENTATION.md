@@ -924,7 +924,7 @@ including credential rejection or an uncertain provider result. See Supabase's
 [CAPTCHA setup](https://supabase.com/docs/guides/auth/auth-captcha).
 
 The configurable total deadline defaults to 15 seconds, accepts 1–30 seconds,
-and covers body reading, provider exchange, JWT verification, and database
+and covers rate-limit accounting, body reading, provider exchange, JWT verification, and database
 completion. The provider adapter retains its own five-second deadline. Successful
 responses contain only `user_id`, `expires_at`, and `absolute_expires_at`.
 The browser token is sent only in the account cookie; provider tokens and submitted
@@ -940,6 +940,7 @@ idle deadline. Responses use `Cache-Control: no-store`.
 | Omitted/null CAPTCHA proof, or explicit provider CAPTCHA rejection | 403 with `X-Account-Verification: required` |
 | Body over 16 KiB | 413 |
 | Missing or unsupported content type | 415 |
+| Application sign-in limit reached | 429 with `Retry-After` |
 | Disabled/unconfigured route, provider/verification/database failure, duplicate provider session, or timeout | 503 |
 
 Input errors use generic messages instead of Pydantic validation details that
@@ -993,6 +994,21 @@ discards results after unmount, and exposes controlled error messages. Neither
 credential rejection nor transport/provider failure triggers automatic retries.
 Closing the dialog cancels the browser request; cancellation does not guarantee
 that a provider exchange or database commit was undone, and it is not sign-out.
+
+HTTP 429 becomes a dedicated sign-in rate-limit error. Only decimal `Retry-After`
+seconds from 1 through 86,400 are accepted, matching the backend's maximum window;
+missing, malformed, oversized or unsupported date values use a generic wait
+message. Other statuses ignore this header. The existing status region announces
+the wait time without exposing or parsing the error body. This is the wait quoted
+at the failed attempt, not a live countdown or a browser-enforced lock. It schedules
+no retry and saves no credentials; a manual retry still requires a re-entered
+password and fresh proof, and the backend decides whether the limit has expired.
+Google access, registration and password recovery retain their existing behavior.
+The retry-feedback checkpoint passed 60 account API cases and 34 focused hook/form
+cases, then all 514 frontend tests (218 API and 296 UI/hook), lint, TypeScript and
+production build. Tests cover header bounds/fallbacks, status isolation, safe
+messages, no automatic retry, password clearing, proof renewal and Google access
+regressions. No live sign-in attempts were made for these tests.
 
 For local HTTP testing only, enable the required backend endpoints in the ignored
 `backend/.env`, retain a configured session encryption key, and use

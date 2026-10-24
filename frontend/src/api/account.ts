@@ -24,6 +24,21 @@ export class AccountSignInRejectedError extends Error {
   }
 }
 
+export class AccountSignInRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
+    super('Too many sign-in attempts. Please try again later.')
+    this.name = 'AccountSignInRateLimitedError'
+
+    // The backend supplies delta-seconds, bounded by its maximum rolling window.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
+  }
+}
+
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -60,6 +75,10 @@ export async function signInAccount(
   }
 
   if (!response.ok) {
+    if (response.status === 429) {
+      throw new AccountSignInRateLimitedError(response.headers.get('Retry-After'))
+    }
+
     if (response.status === 401) {
       throw new AccountSignInRejectedError()
     }

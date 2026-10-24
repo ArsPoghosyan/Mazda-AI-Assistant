@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  AccountSignInRateLimitedError,
   AccountSignInRejectedError,
   AccountVerificationRequiredError,
   signInAccount,
@@ -212,6 +213,16 @@ test('an expired proof disables submission again', async () => {
 
 test.each([
   {
+    name: 'rate limit',
+    error: new AccountSignInRateLimitedError('61'),
+    message: 'Too many sign-in attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'rate limit without a valid wait time',
+    error: new AccountSignInRateLimitedError('private-provider-detail'),
+    message: 'Too many sign-in attempts. Please try again later.',
+  },
+  {
     name: 'credential rejection',
     error: new AccountSignInRejectedError(),
     message: 'Sign-in was rejected. Check your details and try again.',
@@ -238,7 +249,9 @@ test.each([
 
   await user.click(screen.getByRole('button', { name: 'Sign in' }))
 
-  await screen.findByText(message)
+  const feedback = await screen.findByText(message)
+  expect(feedback.getAttribute('role')).toBe('status')
+  expect(feedback.getAttribute('aria-atomic')).toBe('true')
   await screen.findByText('Complete the check to continue.')
 
   expect(api.render).toHaveBeenCalledTimes(2)

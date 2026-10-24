@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AccountSignInRateLimitedError,
   AccountSignInRejectedError,
   AccountVerificationRequiredError,
   signInAccount,
@@ -86,6 +87,11 @@ export function useAccountSignIn() {
 
       if (timedOut) {
         message = 'Sign-in took too long. Please try again.'
+      } else if (error instanceof AccountSignInRateLimitedError) {
+        const seconds = error.retryAfterSeconds
+        message = seconds === null
+          ? error.message
+          : `Too many sign-in attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`
       } else if (error instanceof AccountVerificationRequiredError) {
         message = 'Verification was not accepted. Complete a new check.'
       } else if (error instanceof AccountSignInRejectedError) {

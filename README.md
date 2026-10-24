@@ -280,6 +280,8 @@ Both routes count before parsing or provider work, return 429 with
 request deadlines. They require the migrated runtime database and a configured
 HMAC secret; both have been validated locally. Invalid Origins/configuration do not
 reach counting; invalid bodies/provider failures after counting retain the attempt.
+Development sign-in displays validated retry seconds, with a generic wait message
+when unavailable; retries remain manual and require fresh verification.
 An internal cleanup helper deletes expired recovery/sign-in rows in one shared
 bounded batch and skips locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
 returning the count only after commit. Automatic invocation and production proxy
@@ -358,8 +360,8 @@ existed and succeeded after removing only the synthetic sign-in test record.
 
 Latest complete backend run: **3,581 passed including PostgreSQL**. Backend lint,
 formatting (206 files), typing (199 app/test files) and migration typing (seven files)
-passed. The previous frontend checkpoint passed lint, **486 tests** (197 API +
-289 UI/hook), strict TypeScript and production build; frontend files are unchanged.
+passed. Frontend lint, **514 tests** (218 API + 296 UI/hook), strict TypeScript and
+production build passed, including sign-in retry-message regressions.
 Automated limiter coverage includes concurrency, expiry,
 transaction failures, cancellation, restricted maintenance targets and disposal.
 Local manual checks confirmed guest verification, registration/email confirmation,

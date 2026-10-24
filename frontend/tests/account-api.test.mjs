@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  AccountSignInRateLimitedError,
   AccountVerificationRequiredError,
   checkAccountSession,
   signInAccount,
@@ -118,6 +119,80 @@ test('ignores the verification header on an unavailable response', async (t) => 
     message: 'Sign-in is temporarily unavailable. Please try again.',
   })
 })
+
+for (const seconds of [1, 61, 600, 86_400]) {
+  test(`reads a ${seconds}-second sign-in limit without reading private content or retrying`, async (t) => {
+    const response = new Response('private non-JSON provider response', {
+      status: 429,
+      headers: {
+        'Retry-After': String(seconds),
+        'X-Account-Verification': 'required',
+      },
+    })
+    const read = t.mock.method(response, 'json', async () => {
+      throw new Error('Error response body must not be read')
+    })
+    const request = t.mock.method(globalThis, 'fetch', async () => response)
+
+    await assert.rejects(signInAccount(credentials), (error) => {
+      assert.ok(error instanceof AccountSignInRateLimitedError)
+      assert.equal(error.name, 'AccountSignInRateLimitedError')
+      assert.equal(error.retryAfterSeconds, seconds)
+      assert.equal(error.message, 'Too many sign-in attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+    assert.equal(request.mock.callCount(), 1)
+    assert.equal(read.mock.callCount(), 0)
+  })
+}
+
+for (const [label, header] of [
+  ['missing', null],
+  ['empty', ''],
+  ['zero', '0'],
+  ['negative', '-1'],
+  ['fraction', '1.5'],
+  ['exponent', '1e3'],
+  ['too large', '86401'],
+  ['oversized', '9'.repeat(1000)],
+  ['date', 'Wed, 21 Oct 2030 07:28:00 GMT'],
+  ['private details', 'private-retry-detail'],
+  ['nonfinite', 'Infinity'],
+  ['not a number', 'NaN'],
+  ['multiple values', '10, 20'],
+]) {
+  test(`uses safe fallback for ${label} sign-in retry information`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response('private-body', {
+      status: 429,
+      headers: header === null ? {} : { 'Retry-After': header },
+    }))
+
+    await assert.rejects(signInAccount(credentials), (error) => {
+      assert.ok(error instanceof AccountSignInRateLimitedError)
+      assert.equal(error.retryAfterSeconds, null)
+      assert.equal(error.message, 'Too many sign-in attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+  })
+}
+
+for (const status of [401, 403, 503, 500]) {
+  test(`ignores Retry-After on HTTP ${status} sign-in responses`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response('private-body', {
+      status,
+      headers: { 'Retry-After': '61' },
+    }))
+
+    await assert.rejects(signInAccount(credentials), (error) => {
+      assert.equal(error instanceof AccountSignInRateLimitedError, false)
+      assert.equal(error.retryAfterSeconds, undefined)
+      assert.equal(error.message.includes('private-body'), false)
+      return true
+    })
+  })
+}
 
 for (const [label, body] of [
   ['null', null],
