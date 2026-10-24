@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import timedelta
-from secrets import token_urlsafe
+from secrets import token_bytes, token_urlsafe
 from unittest.mock import Mock
 
 import httpx2
@@ -20,7 +20,7 @@ from sqlalchemy.pool import NullPool
 from app.config import Settings
 from app.guest_session_service import EstablishedGuestSession, establish_guest_session
 from app.guest_tokens import hash_guest_token
-from app.models import GuestSession
+from app.models import AuthRateLimit, GuestSession
 
 pytestmark = pytest.mark.integration
 
@@ -52,6 +52,7 @@ def test_verified_creation_obeys_commit_boundary(
 ) -> None:
     raw_token = token_urlsafe(32)
     token_hash = hash_guest_token(raw_token)
+    key = token_bytes(32)
     generator = Mock(return_value=raw_token)
     monkeypatch.setattr("app.guest_sessions.generate_guest_token", generator)
 
@@ -72,6 +73,9 @@ def test_verified_creation_obeys_commit_boundary(
     events: list[str] = []
     requests: list[httpx2.Request] = []
     statement = select(GuestSession).where(GuestSession.token_hash == token_hash)
+    limit_statement = select(AuthRateLimit.request_times).where(
+        AuthRateLimit.purpose == "guest_creation", AuthRateLimit.key_hash == key
+    )
 
     provider_response = httpx2.Response(
         200,
@@ -87,7 +91,9 @@ def test_verified_creation_obeys_commit_boundary(
     )
 
     def provider(request: httpx2.Request) -> httpx2.Response:
-        assert events == []
+        assert events == ["begin", "limit-commit"]
+        with integration_engine.connect() as observer:
+            assert len(observer.execute(limit_statement).scalar_one()) == 1
         assert request.method == "POST"
         assert str(request.url) == ("https://challenges.cloudflare.com/turnstile/v0/siteverify")
         assert json.loads(request.content) == {
@@ -126,8 +132,12 @@ def test_verified_creation_obeys_commit_boundary(
 
         @event.listens_for(engine.sync_engine, "commit")
         def inspect_before_commit(connection: Connection) -> None:
+            stored = connection.execute(statement).one_or_none()
+            if stored is None:
+                assert len(connection.execute(limit_statement).scalar_one()) == 1
+                events.append("limit-commit")
+                return
             events.append("commit")
-            stored = connection.execute(statement).one()
             assert stored.token_hash == token_hash
 
             if fail_commit:
@@ -148,6 +158,7 @@ def test_verified_creation_obeys_commit_boundary(
                             challenge_token=SecretStr(CHALLENGE),
                             settings=settings,
                             client=client,
+                            creation_ip_key=lambda: key,
                         )
                     return None
 
@@ -157,6 +168,7 @@ def test_verified_creation_obeys_commit_boundary(
                     challenge_token=SecretStr(CHALLENGE),
                     settings=settings,
                     client=client,
+                    creation_ip_key=lambda: key,
                 )
                 events.append("returned")
                 return result
@@ -174,11 +186,11 @@ def test_verified_creation_obeys_commit_boundary(
             stored = observer.execute(statement).one_or_none()
 
         if fail_commit:
-            assert events == ["verify", "begin", "commit"]
+            assert events == ["begin", "limit-commit", "verify", "begin", "commit"]
             assert result is None
             assert stored is None
         else:
-            assert events == ["verify", "begin", "commit", "returned"]
+            assert events == ["begin", "limit-commit", "verify", "begin", "commit", "returned"]
             assert result is not None
             assert stored is not None
             assert result.token.get_secret_value() == raw_token
@@ -190,4 +202,9 @@ def test_verified_creation_obeys_commit_boundary(
             assert raw_token not in repr(result)
     finally:
         with integration_engine.begin() as connection:
+            connection.execute(
+                delete(AuthRateLimit).where(
+                    AuthRateLimit.purpose == "guest_creation", AuthRateLimit.key_hash == key
+                )
+            )
             connection.execute(delete(GuestSession).where(GuestSession.token_hash == token_hash))

@@ -7,7 +7,7 @@ import {
   signUpAccount,
   type AccountSignUpResponse,
 } from '../api/account-registration'
-import { startGoogleSignIn, type GoogleLoginStartResponse } from '../api/google'
+import { GoogleSignInRateLimitedError, startGoogleSignIn, type GoogleLoginStartResponse } from '../api/google'
 import { loadTurnstile, type TurnstileApi } from '../lib/turnstile'
 import AccountSignUpForm from './AccountSignUpForm'
 
@@ -21,7 +21,9 @@ vi.mock('../hooks/useGoogleSignIn', async (importOriginal) => {
     },
   }
 })
-vi.mock('../api/google', () => ({ startGoogleSignIn: vi.fn() }))
+vi.mock('../api/google', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/google')>(), startGoogleSignIn: vi.fn(),
+}))
 vi.mock('../api/account-registration', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/account-registration')>()
   return { ...actual, signUpAccount: vi.fn() }
@@ -188,8 +190,11 @@ test('email registration wins a same-render race and blocks Google after acknowl
   expect(startGoogleSignIn).not.toHaveBeenCalled()
 })
 
-test('a failed Google start allows email registration only with a fresh password and proof', async () => {
-  vi.mocked(startGoogleSignIn).mockRejectedValueOnce(new Error('Google sign-in is temporarily unavailable.'))
+test.each([
+  [new Error('Google sign-in is temporarily unavailable.'), 'Google sign-in is temporarily unavailable.'],
+  [new GoogleSignInRateLimitedError('61'), 'Too many Google sign-in attempts. Please wait 61 seconds before trying again.'],
+] as const)('a failed Google start %s allows email registration only with a fresh password and proof', async (error, message) => {
+  vi.mocked(startGoogleSignIn).mockRejectedValueOnce(error)
   vi.mocked(signUpAccount).mockResolvedValueOnce(acknowledgement)
   const { user, form, email, password, onAccepted } = await mountForm()
   await user.type(email, 'owner@example.test')
@@ -197,7 +202,7 @@ test('a failed Google start allows email registration only with a fresh password
   const old = widgetOptions()
   act(() => old.callback('old-proof'))
   await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
-  await screen.findByText('Google sign-in is temporarily unavailable.')
+  await screen.findByText(message)
   await screen.findByText('Complete the check to continue.')
   expect(email.closest('fieldset')?.disabled).toBe(false)
   expect(password.value).toBe('')
@@ -228,6 +233,39 @@ test('a rejected email registration releases the Google option for an explicit s
   expect(startGoogleSignIn).toHaveBeenCalledTimes(1)
   expect(navigate).toHaveBeenCalledExactlyOnceWith(destination)
   expect(onAccepted).not.toHaveBeenCalled()
+})
+
+test.each([
+  ['1', 'Too many Google sign-in attempts. Please wait 1 second before trying again.'],
+  ['61', 'Too many Google sign-in attempts. Please wait 61 seconds before trying again.'],
+  [null, 'Too many Google sign-in attempts. Please try again later.'],
+  ['private-provider-detail', 'Too many Google sign-in attempts. Please try again later.'],
+] as const)('registration announces a Google limit %s and permits manual retry', async (header, message) => {
+  vi.mocked(startGoogleSignIn).mockRejectedValueOnce(new GoogleSignInRateLimitedError(header))
+    .mockResolvedValueOnce(googleResult())
+  const { user, password, onAccepted, onSignIn } = await mountForm()
+  await user.type(password, 'synthetic-private-password')
+  await user.click(screen.getByRole('button', { name: 'Show password' }))
+  const google = screen.getByRole('button', { name: 'Continue with Google' })
+  await user.click(google)
+  const feedback = await screen.findByText(message)
+  expect(feedback.getAttribute('role')).toBe('status')
+  expect(feedback.getAttribute('aria-atomic')).toBe('true')
+  expect(google.getAttribute('aria-describedby')).toBe(feedback.id)
+  expect(google.hasAttribute('disabled')).toBe(false)
+  expect(google.getAttribute('aria-busy')).toBe('false')
+  expect(password.value).toBe('')
+  expect(password.type).toBe('password')
+  expect(screen.queryByText('private-provider-detail')).toBeNull()
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(1)
+  expect(signUpAccount).not.toHaveBeenCalled()
+  expect(navigate).not.toHaveBeenCalled()
+  expect(onAccepted).not.toHaveBeenCalled()
+  expect(onSignIn).not.toHaveBeenCalled()
+  await user.click(google)
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(2)
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(destination)
+  expect(screen.queryByText(message)).toBeNull()
 })
 
 test('Google errors hide provider details and retry only on another explicit click', async () => {

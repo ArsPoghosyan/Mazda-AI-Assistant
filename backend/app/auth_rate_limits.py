@@ -38,7 +38,13 @@ async def _count_attempt(
     key_hash: bytes,
     *,
     purpose: Literal[
-        "password_recovery", "sign_in", "sign_up", "email_confirmation", "password_reset"
+        "password_recovery",
+        "sign_in",
+        "sign_up",
+        "email_confirmation",
+        "password_reset",
+        "guest_creation",
+        "google_start",
     ],
     max_requests: int,
     window_seconds: int,
@@ -279,5 +285,75 @@ async def commit_password_reset_attempt(
     async with engine.begin() as connection:
         decision = await count_password_reset_attempt(
             connection, key_hash, max_requests=max_requests, window_seconds=window_seconds
+        )
+    return decision
+
+
+async def count_guest_creation_attempt(
+    connection: AsyncConnection,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Count new-guest attempts; active-session reuse has a separate path."""
+    return await _count_attempt(
+        connection,
+        key_hash,
+        purpose="guest_creation",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
+
+
+async def commit_guest_creation_attempt(
+    engine: AsyncEngine,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Release accounting before verification; the caller supplies the deadline."""
+    async with engine.begin() as connection:
+        decision = await count_guest_creation_attempt(
+            connection,
+            key_hash,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+        )
+    return decision
+
+
+async def count_google_start_attempt(
+    connection: AsyncConnection,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Count Google starts and replacements under their own shared IP budget."""
+    return await _count_attempt(
+        connection,
+        key_hash,
+        purpose="google_start",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
+
+
+async def commit_google_start_attempt(
+    engine: AsyncEngine,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Commit and release before attempt creation; the caller supplies the deadline."""
+    async with engine.begin() as connection:
+        decision = await count_google_start_attempt(
+            connection,
+            key_hash,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
         )
     return decision

@@ -17,6 +17,8 @@ from pydantic_settings import SettingsConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.auth_rate_limits import AuthRateLimitDecision
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.guest_cookies import set_guest_cookie
 from app.guest_sessions import ActiveGuestSession, CreatedGuestSession
@@ -42,6 +44,7 @@ class GuestAPI:
     create: AsyncMock
     refresh: AsyncMock
     verify: AsyncMock
+    limit: AsyncMock
     events: list[str]
 
 
@@ -51,13 +54,14 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Iterator[GuestAPI]:
         database_url=None,
         migration_database_url=None,
         guest_session_api_enabled=True,
+        auth_rate_limit_hmac_secret=SecretStr("ab" * 32),
         guest_cookie_secure=True,
         csrf_trusted_origins=(ORIGIN,),
         supabase_auth_issuer=None,
         supabase_auth_publishable_key=None,
         account_session_encryption_key=None,
-        turnstile_secret_key=None,
-        turnstile_allowed_hostnames=(),
+        turnstile_secret_key=SecretStr("synthetic-secret"),
+        turnstile_allowed_hostnames=("askm6.com",),
     )
     events: list[str] = []
     connection = MagicMock(spec=AsyncConnection)
@@ -86,6 +90,8 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Iterator[GuestAPI]:
     )
     refresh = AsyncMock(return_value=None)
     verify = AsyncMock()
+    limit = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    monkeypatch.setattr("app.guest_session_service.commit_guest_creation_attempt", limit)
 
     def record_cookie(
         response: Response,
@@ -105,7 +111,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Iterator[GuestAPI]:
     monkeypatch.setattr("app.guest_session_service.verify_turnstile_token", verify)
     monkeypatch.setattr("app.guest_routes.set_guest_cookie", record_cookie)
 
-    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+    with TestClient(create_app(settings), base_url=ORIGIN, client=("192.0.2.12", 12345)) as client:
         cast(FastAPI, client.app).state.turnstile_client = Mock(spec=httpx2.AsyncClient)
         yield GuestAPI(
             client=client,
@@ -115,6 +121,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Iterator[GuestAPI]:
             create=create,
             refresh=refresh,
             verify=verify,
+            limit=limit,
             events=events,
         )
 
@@ -364,3 +371,83 @@ def test_deadline_cancels_stalled_operation(
         api.verify.assert_not_awaited()
     else:
         api.verify.assert_awaited_once()
+
+
+def test_creation_limit_returns_retry_without_verification_or_cookie(api: GuestAPI) -> None:
+    api.limit.return_value = AuthRateLimitDecision(False, datetime.now(UTC), 127, None)
+    response = api.client.post(
+        "/api/v1/guest/session",
+        headers={"Origin": ORIGIN},
+        json={"turnstile_token": CHALLENGE},
+    )
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Guest session creation is temporarily rate limited."}
+    assert response.headers["Retry-After"] == "127"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert "X-Guest-Verification" not in response.headers
+    api.verify.assert_not_awaited()
+    api.create.assert_not_awaited()
+    api.engine.begin.assert_not_called()
+
+
+def test_active_guest_bypasses_cap_and_missing_key(api: GuestAPI) -> None:
+    api.settings.auth_rate_limit_hmac_secret = None
+    api.limit.return_value = AuthRateLimitDecision(False, datetime.now(UTC), 127, None)
+    api.client.cookies.set("__Host-askm6_guest", "B" * 43)
+    api.refresh.return_value = ActiveGuestSession(session_id=uuid4(), expires_at=EXPIRY)
+    response = api.client.post("/api/v1/guest/session", headers={"Origin": ORIGIN})
+    assert response.status_code == 200
+    assert "Retry-After" not in response.headers
+    api.limit.assert_not_awaited()
+    api.verify.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reason", ["secret", "peer", "accounting"])
+def test_unavailable_creation_protection_fails_closed(
+    api: GuestAPI,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if reason == "secret":
+        api.settings.auth_rate_limit_hmac_secret = None
+    elif reason == "peer":
+        monkeypatch.setattr(
+            "app.guest_routes.get_guest_creation_ip_key",
+            Mock(side_effect=ClientIPUnavailable("Client address is unavailable.")),
+        )
+    else:
+        api.limit.side_effect = SQLAlchemyError("private-database-detail")
+    response = api.client.post(
+        "/api/v1/guest/session",
+        headers={"Origin": ORIGIN},
+        json={"turnstile_token": CHALLENGE},
+    )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Guest sessions are temporarily unavailable."}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert "Retry-After" not in response.headers
+    api.verify.assert_not_awaited()
+    api.create.assert_not_awaited()
+
+
+def test_creation_limiter_obeys_total_deadline(api: GuestAPI) -> None:
+    api.settings.guest_session_timeout_seconds = 1
+    cancelled = False
+
+    async def stall(*args: object, **kwargs: object) -> None:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    api.limit.side_effect = stall
+    response = api.client.post("/api/v1/guest/session", headers={"Origin": ORIGIN})
+    assert response.status_code == 503
+    assert cancelled
+    assert "set-cookie" not in response.headers
+    api.verify.assert_not_awaited()
+    api.create.assert_not_awaited()

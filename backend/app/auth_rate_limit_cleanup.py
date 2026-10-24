@@ -14,7 +14,15 @@ async def _delete_expired_limits(
     *,
     batch_size: int,
     purposes: tuple[
-        Literal["password_recovery", "sign_in", "sign_up", "email_confirmation", "password_reset"],
+        Literal[
+            "password_recovery",
+            "sign_in",
+            "sign_up",
+            "email_confirmation",
+            "password_reset",
+            "guest_creation",
+            "google_start",
+        ],
         ...,
     ],
 ) -> int:
@@ -82,6 +90,8 @@ async def delete_expired_auth_rate_limits(
             "sign_up",
             "email_confirmation",
             "password_reset",
+            "guest_creation",
+            "google_start",
         ),
     )
 

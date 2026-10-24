@@ -6,6 +6,21 @@ export type GoogleLoginStartResponse = {
 const FAILURE = 'Google sign-in could not be started. Please try again.'
 const INVALID = 'Unexpected Google sign-in response.'
 
+export class GoogleSignInRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
+    super('Too many Google sign-in attempts. Please try again later.')
+    this.name = 'GoogleSignInRateLimitedError'
+
+    // Accept only bounded delta-seconds from this untrusted response header.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
+  }
+}
+
 function isCancelled(error: unknown, signal?: AbortSignal): boolean {
   return (
     signal?.aborted === true ||
@@ -41,6 +56,10 @@ export async function startGoogleSignIn(
 
   if (response.status === 409) {
     throw new Error('Sign out before starting another account login.')
+  }
+
+  if (response.status === 429) {
+    throw new GoogleSignInRateLimitedError(response.headers.get('Retry-After'))
   }
 
   if (response.status === 503) {

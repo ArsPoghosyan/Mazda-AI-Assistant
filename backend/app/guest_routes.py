@@ -10,11 +10,14 @@ from pydantic import BaseModel, SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_guest_creation_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 from app.guest_cookies import guest_cookie_name, set_guest_cookie
 from app.guest_session_requests import read_guest_challenge
-from app.guest_session_service import establish_guest_session
+from app.guest_session_service import GuestCreationRateLimited, establish_guest_session
 from app.turnstile import TurnstileRejected, TurnstileUnavailable
 
 router = APIRouter(prefix="/api/v1/guest", tags=["guest"])
@@ -43,6 +46,7 @@ def session_unavailable() -> HTTPException:
         403: {"description": "Origin or human verification was rejected."},
         413: {"description": "Guest-session request is too large."},
         415: {"description": "Guest-session input requires JSON."},
+        429: {"description": "New guest-session attempts are temporarily rate limited."},
         503: {"description": "Guest sessions are temporarily unavailable."},
     },
 )
@@ -81,7 +85,17 @@ async def ensure_guest_session(
                 challenge_token=challenge_token,
                 settings=settings,
                 client=client,
+                creation_ip_key=lambda: get_guest_creation_ip_key(request, settings),
             )
+    except GuestCreationRateLimited as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Guest session creation is temporarily rate limited.",
+            headers={
+                "Cache-Control": "no-store",
+                "Retry-After": str(error.retry_after_seconds),
+            },
+        ) from None
     except TurnstileRejected:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -91,7 +105,14 @@ async def ensure_guest_session(
                 "X-Guest-Verification": "required",
             },
         ) from None
-    except (TurnstileUnavailable, SQLAlchemyError, TimeoutError):
+    except (
+        TurnstileUnavailable,
+        SQLAlchemyError,
+        TimeoutError,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
+    ):
         raise session_unavailable() from None
 
     set_guest_cookie(

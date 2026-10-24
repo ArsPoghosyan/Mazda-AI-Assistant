@@ -29,6 +29,9 @@ from app.account_key_cache import AccountKeyCache
 from app.account_oauth_attempts import CreatedOAuthLoginAttempt, OAuthLoginAttemptUnavailable
 from app.account_oauth_cookies import oauth_cookie_name, set_oauth_cookie
 from app.account_oauth_material import InvalidOAuthLoginMaterial
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_google_start_ip_key
+from app.auth_rate_limits import AuthRateLimitDecision, AuthRateLimitUnavailable
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.main import create_app
 
@@ -55,6 +58,7 @@ class Material:
     commit: AsyncMock
     cookie: Mock
     events: list[str]
+    limit: AsyncMock
 
 
 @pytest.fixture
@@ -69,6 +73,7 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Iterator[Material]:
             "account_cookie_secure": True,
             "csrf_trusted_origins": (ORIGIN,),
             "account_google_oauth_api_enabled": True,
+            "auth_rate_limit_hmac_secret": "ab" * 32,
             "account_google_oauth_callback_url": "https://api.example.test/api/v1/account/google/callback",
         }
     )
@@ -118,8 +123,12 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Iterator[Material]:
     monkeypatch.setattr(transactions, "create_oauth_login_attempt", creation)
     monkeypatch.setattr(transactions, "replace_oauth_login_attempt", replacement)
     monkeypatch.setattr(routes, "set_oauth_cookie", cookie)
+    limit = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    monkeypatch.setattr(routes, "commit_google_start_attempt", limit)
     application = create_app(settings)
-    with TestClient(application, base_url="https://api.example.test") as client:
+    with TestClient(
+        application, base_url="https://api.example.test", client=("192.0.2.12", 12345)
+    ) as client:
         application.state.database_engine = engine
         application.state.account_auth_client = Mock(spec=httpx2.AsyncClient)
         application.state.account_key_cache = Mock(spec=AccountKeyCache)
@@ -135,6 +144,7 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Iterator[Material]:
             commit,
             cookie,
             events,
+            limit,
         )
 
 
@@ -366,7 +376,7 @@ def test_non_post_method_cannot_start_login(material: Material) -> None:
     assert material.events == []
 
 
-@pytest.mark.parametrize("stage", ["body", "create", "commit"])
+@pytest.mark.parametrize("stage", ["body", "limit", "create", "commit"])
 def test_overall_deadline_cancels_stalled_work_before_cookie_issuance(
     material: Material,
     monkeypatch: pytest.MonkeyPatch,
@@ -389,7 +399,9 @@ def test_overall_deadline_cancels_stalled_work_before_cookie_issuance(
 
         monkeypatch.setattr(Request, "stream", stream)
     else:
-        operation = material.create if stage == "create" else material.commit
+        operation = {"limit": material.limit, "create": material.create, "commit": material.commit}[
+            stage
+        ]
         operation.side_effect = block
     assert_failure(post(material), 503)
     assert cleaned_up == [True]
@@ -399,7 +411,7 @@ def test_overall_deadline_cancels_stalled_work_before_cookie_issuance(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stage", ["create", "commit"])
+@pytest.mark.parametrize("stage", ["limit", "create", "commit"])
 async def test_actual_caller_cancellation_propagates_without_cookie(
     material: Material,
     stage: str,
@@ -414,7 +426,9 @@ async def test_actual_caller_cancellation_propagates_without_cookie(
         finally:
             cleaned_up.set()
 
-    operation = material.create if stage == "create" else material.commit
+    operation = {"limit": material.limit, "create": material.create, "commit": material.commit}[
+        stage
+    ]
     operation.side_effect = block
 
     async def receive() -> dict[str, object]:
@@ -427,6 +441,7 @@ async def test_actual_caller_cancellation_propagates_without_cookie(
             "path": PATH,
             "headers": [],
             "query_string": b"",
+            "client": ("192.0.2.12", 12345),
             "app": material.application,
         },
         receive=receive,
@@ -452,3 +467,56 @@ async def test_actual_caller_cancellation_propagates_without_cookie(
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.mark.parametrize(
+    "cookie", [None, "__Host-askm6_oauth=bad", f"__Host-askm6_oauth={OLD_TOKEN}"]
+)
+def test_limit_denies_before_reading_binding_or_starting_transactions(
+    material: Material, cookie: str | None
+) -> None:
+    material.limit.return_value = AuthRateLimitDecision(
+        False, datetime.now(UTC), 61, datetime.now(UTC) + timedelta(seconds=61)
+    )
+    response = post(material, cookie)
+    assert_failure(response, 429)
+    assert response.json() == {"detail": "Google sign-in is temporarily rate limited."}
+    assert response.headers["Retry-After"] == "61"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert material.events == []
+    material.cookie.assert_not_called()
+    material.limit.assert_awaited_once_with(
+        material.engine,
+        get_google_start_ip_key(
+            Request({"type": "http", "client": ("192.0.2.12", 12345), "headers": []}),
+            material.settings,
+        ),
+        max_requests=10,
+        window_seconds=600,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", [SQLAlchemyError("synthetic-private"), AuthRateLimitUnavailable("synthetic-private")]
+)
+def test_accounting_failure_stops_before_binding_creation(
+    material: Material, failure: Exception
+) -> None:
+    material.limit.side_effect = failure
+    assert_failure(post(material), 503)
+    assert material.events == []
+    material.limit.assert_awaited_once()
+    material.cookie.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [AuthRateLimitKeyUnavailable("synthetic-private"), ClientIPUnavailable("synthetic-private")],
+)
+def test_key_failure_stops_before_accounting(
+    material: Material, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    monkeypatch.setattr(routes, "get_google_start_ip_key", Mock(side_effect=failure))
+    assert_failure(post(material), 503)
+    material.limit.assert_not_awaited()
+    assert material.events == []

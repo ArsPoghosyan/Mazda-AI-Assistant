@@ -67,6 +67,50 @@ test('loading the page does not create a guest session', async () => {
   expect(guestButton.hasAttribute('disabled')).toBe(false)
 })
 
+test.each([
+  ['1', 'Too many guest-access attempts. Please wait 1 second before trying again.'],
+  [null, 'Too many guest-access attempts. Please try again later.'],
+  ['private-provider-detail', 'Too many guest-access attempts. Please try again later.'],
+] as const)('shows an initial guest limit with Retry-After %s and offers manual retry', async (header, message) => {
+  const user = userEvent.setup()
+  let guestRequests = 0
+  const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+    if (input === '/api/v1/health') {
+      return Response.json({ status: 'ok', service: 'mazda6-assistant-api' })
+    }
+    if (input !== '/api/v1/guest/session') throw new Error('Unexpected request')
+    guestRequests += 1
+    return guestRequests === 1
+      ? Response.json({ detail: 'Private server details' }, {
+          status: 429,
+          headers: {
+            ...(header === null ? {} : { 'Retry-After': header }),
+            'X-Guest-Verification': 'required',
+          },
+        })
+      : Response.json({ status: 'ok', expires_at: '2030-01-01T12:00:00Z' })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<StrictMode><App /></StrictMode>)
+  await screen.findByText('API connected')
+  await user.click(screen.getByRole('button', { name: 'Try as Guest' }))
+  const feedback = await screen.findByText(message)
+  expect(feedback.getAttribute('role')).toBe('status')
+  expect(feedback.getAttribute('aria-atomic')).toBe('true')
+  expect(screen.queryByText('Human verification')).toBeNull()
+  expect(screen.queryByText(/private server details/i)).toBeNull()
+  const retry = screen.getByRole('button', { name: 'Try again' })
+  expect(retry.hasAttribute('disabled')).toBe(false)
+  expect(retry.getAttribute('aria-describedby')).toContain('access-status')
+  expect(guestRequests).toBe(1)
+  await user.click(retry)
+  await screen.findByText('Guest session ready. Chat is still in development.')
+  expect(guestRequests).toBe(2)
+  expect(screen.queryByText(message)).toBeNull()
+  expect(fetchMock.mock.calls.filter(([input]) => input === '/api/v1/guest/session')
+    .every(([, options]) => options?.body === undefined)).toBe(true)
+})
+
 test('starts one guest request and shows loading then success', async () => {
   const user = userEvent.setup()
 
@@ -548,11 +592,13 @@ test('requests verification and submits one proof before starting guest access',
   ).toBe(true)
 })
 test.each([
-  [403, 'Verification was not accepted. Please try again.'],
-  [503, 'Guest access could not be started. Please try again.'],
+  [403, 'Verification was not accepted. Please try again.', null],
+  [503, 'Guest access could not be started. Please try again.', null],
+  [429, 'Too many guest-access attempts. Please wait 61 seconds before trying again.', '61'],
+  [429, 'Too many guest-access attempts. Please try again later.', null],
 ] as const)(
   'requires a fresh proof after a token submission returns HTTP %s',
-  async (failureStatus, expectedMessage) => {
+  async (failureStatus, expectedMessage, retryAfter) => {
     vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')
 
     const user = userEvent.setup()
@@ -606,7 +652,7 @@ test.each([
               headers:
                 failureStatus === 403
                   ? { 'X-Guest-Verification': 'required' }
-                  : {},
+                  : retryAfter === null ? {} : { 'Retry-After': retryAfter },
             },
           )
         }
@@ -645,6 +691,9 @@ test.each([
     })
 
     await screen.findByText(expectedMessage)
+
+    expect(screen.getByText(expectedMessage).getAttribute('role')).toBe('status')
+    expect(screen.getByText(expectedMessage).getAttribute('aria-atomic')).toBe('true')
 
     expect(guestRequests).toBe(2)
     expect(screen.queryByText('Human verification')).toBeNull()

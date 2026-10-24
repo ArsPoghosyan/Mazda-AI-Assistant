@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { startGoogleSignIn } from '../src/api/google.ts'
+import { GoogleSignInRateLimitedError, startGoogleSignIn } from '../src/api/google.ts'
 
 const ISSUER = 'https://auth.example.test/auth/v1'
 const CALLBACK = 'http://127.0.0.1:5173/api/v1/account/google/callback'
@@ -119,6 +119,58 @@ test('rejects malformed JSON with a generic error', async (t) => {
   )
 
   await assert.rejects(start(), { message: INVALID })
+})
+
+for (const [label, header, seconds] of [
+  ['one second', '1', 1], ['61 seconds', '61', 61], ['maximum', '86400', 86400],
+  ['leading zeros', '00001', 1], ['missing', null, null], ['empty', '', null],
+  ['zero', '0', null], ['negative', '-1', null], ['positive sign', '+1', null],
+  ['fraction', '1.5', null], ['exponent', '1e2', null], ['too large', '86401', null],
+  ['six digits', '100000', null], ['oversized', '9'.repeat(1000), null],
+  ['multiple values', '1, 2', null], ['date', 'Wed, 21 Oct 2030 07:28:00 GMT', null],
+  ['private details', 'private-provider-detail', null], ['nonfinite', 'Infinity', null],
+]) {
+  test(`Google 429 uses safe retry guidance for ${label}`, async (t) => {
+    const response = new Response('private-provider-detail', {
+      status: 429, headers: header === null ? {} : { 'Retry-After': header },
+    })
+    const json = t.mock.method(response, 'json', async () => {
+      throw new Error('Error bodies must not be read')
+    })
+    const request = t.mock.method(globalThis, 'fetch', async () => response)
+    await assert.rejects(start(), (error) => {
+      assert.ok(error instanceof GoogleSignInRateLimitedError)
+      assert.equal(error.retryAfterSeconds, seconds)
+      assert.equal(error.message, 'Too many Google sign-in attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+    assert.equal(json.mock.callCount(), 0)
+    assert.equal(request.mock.callCount(), 1)
+  })
+}
+
+for (const [status, message] of [
+  [400, 'Please start Google sign-in again.'],
+  [409, 'Sign out before starting another account login.'],
+  [503, 'Google sign-in is temporarily unavailable.'],
+  [403, 'Google sign-in could not be started. Please try again.'],
+  [500, 'Google sign-in could not be started. Please try again.'],
+]) {
+  test(`Google HTTP ${status} ignores Retry-After`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response(null, {
+      status, headers: { 'Retry-After': '61' },
+    }))
+    await assert.rejects(start(), { name: 'Error', message })
+  })
+}
+
+test('Google success ignores Retry-After and retains destination validation', async (t) => {
+  const body = responseBody()
+  t.mock.method(globalThis, 'fetch', async () => Response.json(body, {
+    headers: { 'Retry-After': '61' },
+  }))
+  assert.deepEqual(await start(), body)
 })
 
 test('masks network errors without retrying', async (t) => {

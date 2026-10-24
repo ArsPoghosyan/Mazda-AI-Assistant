@@ -284,11 +284,54 @@ The parser enforces a 16 KiB limit on actual streamed bytes, independent of the
 claimed Content-Length.
 
 The service commits the refresh attempt before returning an active session or
-contacting Cloudflare. Verification runs without holding a database transaction
-or connection. A new creation transaction opens only after verification succeeds,
+counting a new-session attempt. New creation requires committed IP accounting
+before contacting Cloudflare. Verification runs without holding a database
+transaction or connection. A new creation transaction opens only after verification succeeds,
 and cookie material is returned only after commit. Active sessions can refresh
 even when the Turnstile client is unavailable. Verification does not establish a
 unique human identity or replace rate limits and message quotas.
+
+### Guest-creation abuse limit
+
+New-session attempts use the shared PostgreSQL rolling-window counter with fixed
+purpose `guest_creation` and HMAC namespace
+`askm6:auth-rate-limit:v1:guest_creation:ip:`. The starting policy is 10 attempts per
+rolling 600 seconds, configured through `GUEST_CREATION_IP_MAX_REQUESTS` (1–1,000)
+and `GUEST_CREATION_IP_WINDOW_SECONDS` (60–86,400). The backend needs the independent
+`AUTH_RATE_LIMIT_HMAC_SECRET`; raw peer addresses are not stored. Forwarding headers,
+challenge values and cookie clearing cannot select another budget. IPv4-mapped
+IPv6 uses the same canonical address. Production proxy trust remains pending.
+
+Origin/feature/database guards and bounded body parsing run first. An active
+cookie refresh commits and returns without resolving a fingerprint or charging
+the budget, even at the creation cap or without creation-verification resources.
+For missing, malformed, unknown or expired cookies, creation requires configured
+Turnstile resources and a usable peer/HMAC key. The limiter transaction commits
+and releases before any challenge verification or guest insert. A missing or
+rejected challenge, verification failure or later creation failure retains that
+attempt. The first challenge-triggering request and proof submission each count;
+malformed bodies and unavailable creation configuration do not. These are abuse
+attempt limits, separate from future accepted-AI-message quotas.
+
+A committed denial returns 429, `Cache-Control: no-store` and rounded-up
+`Retry-After` seconds, without verification, insertion, cookie changes or a
+verification-required header. Denied requests do not extend the window. Key,
+accounting, commit and deadline failures return generic 503 without creating a
+session. There are no automatic retries. The existing operation deadline covers
+parsing, refresh, accounting/lock waits, verification and creation.
+
+Migration `aefd9866f033` follows `0ffc842c5360`, broadening only the supported-purpose
+CHECK. It preserves records, indexes and restricted grants; downgrade refuses
+while guest-creation rows exist. Both guarded local databases are upgraded with
+no schema drift or private environment changes. Shared expired-row cleanup now
+includes guest creation under one total batch cap; automatic invocation remains
+pending. The development frontend shows dedicated guest retry guidance for 429.
+
+This checkpoint passed all 4,316 backend tests, including guarded PostgreSQL
+integration tests; Ruff, formatting and application/migration type checks passed.
+Coverage includes concurrent creation, active-cookie reuse at the cap, canonical
+IP identity, retry expiry, failed commits, lock deadlines, separate account
+budgets and six-purpose cleanup. Provider traffic is mocked in automated tests.
 
 `GUEST_SESSION_TIMEOUT_SECONDS` defaults to 15 and accepts one to 30 seconds.
 It bounds body reading, verification, and database work. Invalid input returns
@@ -325,6 +368,23 @@ A 403 response with `X-Guest-Verification: required` opens an explicit Turnstile
 widget. Ordinary Origin-related 403 responses do not trigger a challenge.
 Completing the widget submits its proof once as JSON. The backend verifies it
 before creating a session; a valid existing guest cookie skips the challenge.
+
+HTTP 429 becomes a dedicated guest rate-limit error. Only decimal `Retry-After`
+delta-seconds from 1 to 86,400 are accepted; missing, malformed, duplicate, date,
+or out-of-range values use generic try-later feedback. Error bodies and raw header
+values are never displayed. Other response statuses ignore `Retry-After`, and a
+verification-required header on 429 cannot open a challenge.
+
+The existing accessible status region announces the wait with correct singular
+or plural wording. This is static guidance from the last response, not a countdown
+or browser-enforced cooldown; the server remains authoritative. Retries require
+an explicit **Try again** action. No timer retries, proof replay or automatic
+widget submission is added. A rate-limited proof submission removes its widget;
+manual retry starts without a proof and requests a fresh challenge if required.
+API, hook and rendered App tests cover these paths with mocked network traffic.
+Frontend validation passed all 642 tests (307 API and 335 UI/hook), lint,
+TypeScript checking and the production build. Backend source is unchanged by
+this UI slice; its preceding 4,316-test result is recorded above.
 
 The local guest flow requires a running, migrated local database and a backend
 `DATABASE_URL` using the restricted application role. In the ignored `backend/.env`,
@@ -1141,8 +1201,8 @@ production proxy trust and automatic cleanup invocation remain pending. A bounde
 expired-row cleanup helper is implemented and tested, as described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
-for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up, confirmation and
-password reset require it. It must contain exactly
+for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up, confirmation,
+password reset, new guest creation and Google initiation require it. It must contain exactly
 64 ASCII hexadecimal characters encoding a separate 32-byte key; validation
 checks format, not randomness. The example value is empty, and no real secret
 is published. Local development uses a generated key in ignored configuration,
@@ -1268,7 +1328,7 @@ no automatic schedule has been connected.
 The `delete_expired_auth_rate_limits` and
 `commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
 transaction, deadline and failure behavior for a shared batch across recovery,
-sign-in, sign-up, confirmation and password reset.
+sign-in, sign-up, confirmation, password reset, guest creation and Google initiation.
 The existing recovery-only APIs retain their signatures and scope. Shared
 selection is ordered by expiry, fingerprint and purpose, with one total batch
 limit across all supported purposes. Deletion matches both key columns and rechecks expiry,
@@ -1922,12 +1982,14 @@ rejection; this does not establish reliability across all provider error cases.
 ### Configuration
 
 Examples remain disabled. Local Google access requires existing database,
-Supabase issuer/publishable-key, session-encryption, trusted-origin and account
+Supabase issuer/publishable-key, session-encryption, fingerprint-secret, trusted-origin and account
 session/sign-out configuration, plus:
 
 | Setting | Default / requirement |
 | --- | --- |
 | `ACCOUNT_GOOGLE_OAUTH_API_ENABLED` | `false`; explicitly enable for the local test |
+| `ACCOUNT_GOOGLE_OAUTH_IP_MAX_REQUESTS` | `10`, allowed range 1–1,000; initiation/replacement attempts per IP |
+| `ACCOUNT_GOOGLE_OAUTH_IP_WINDOW_SECONDS` | `600`, allowed range 60–86,400; rolling window |
 | `ACCOUNT_GOOGLE_OAUTH_CALLBACK_URL` | Unset; exact externally visible application callback |
 | `ACCOUNT_GOOGLE_OAUTH_TIMEOUT_SECONDS` | `15`, allowed range 1–30; backend work only |
 | `ACCOUNT_GOOGLE_OAUTH_ATTEMPT_LIFETIME_SECONDS` | `600`, allowed range 60–900; includes time on Google |
@@ -1953,7 +2015,7 @@ expiry and four unique Google/S256 parameters before navigating.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/v1/account/google/start` | Trusted Origin, empty body and no query; commits a pending attempt and returns authorization URL/expiry metadata |
+| `POST /api/v1/account/google/start` | Trusted Origin, empty body and no query; commits IP accounting before pending-attempt creation/replacement and returns authorization URL/expiry metadata |
 | `GET /api/v1/account/google/callback` | Checks the browser binding, consumes the attempt once, exchanges the code and commits the verified account session |
 
 The migration `b731b533d299` adds `app.oauth_login_attempts`, a unique browser-token
@@ -1963,6 +2025,31 @@ only the token hash and encrypted verifier are stored. Consumption uses atomic
 DELETE/RETURNING and fresh database time after row-lock waits. Replacement proves
 the previous binding and uses a savepoint; failed/uncertain operations require a
 fresh flow and never automatically replay a code exchange.
+
+Google initiation uses the shared atomic rolling-window limiter with its own
+`google_start` purpose and `askm6:auth-rate-limit:v1:google_start:ip:` HMAC namespace.
+The key comes only from the canonical ASGI peer; forwarded headers and browser
+cookie changes cannot select a different budget. Limiter rows store no raw IP. Resource,
+Origin, signed-in-cookie, query and body guards precede accounting. Once allowed,
+the count remains committed even if binding validation, attempt persistence,
+replacement or destination construction later fails.
+
+Accounting commits and releases its connection before reading the pending binding
+or creating/replacing an attempt. A committed denial returns 429 with bounded
+`Retry-After` seconds, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+It does not generate a destination, alter a pending attempt, set/clear cookies or
+contact the provider. Failed accounting, missing fingerprint configuration,
+unusable peer identity and deadline expiry return controlled 503 responses. The
+existing overall start deadline covers body reading, row-lock waits and both
+commits. Callback completion has no new initiation charge or HMAC requirement.
+
+Migration `46250b6b2d17` follows `aefd9866f033`, adding only the supported-purpose
+CHECK value; existing records, indexes and restricted grants are preserved.
+Downgrade refuses while Google-start rows exist instead of deleting them. Both
+guarded local databases are upgraded without drift or private configuration
+changes. Shared bounded cleanup includes all seven purposes under one total cap;
+automatic invocation remains pending. The development frontend displays validated
+retry guidance for Google-start 429 responses, with explicit manual retries.
 
 The short-lived binding cookie is HttpOnly, SameSite=Lax, host-only and root-path;
 secure mode uses `__Host-askm6_oauth`. Malformed/duplicate bindings are rejected.
@@ -1985,11 +2072,40 @@ sign-in/sign-up omit redundant verification instructions and empty status rows.
 Original Google icon proportions, visible keyboard focus and meaningful feedback
 are preserved. Artwork has a separate [source and brand notice](../frontend/src/assets/README.md).
 
+For initiation HTTP 429, the API raises a dedicated Google rate-limit error without
+reading the response body or accepting a destination. Only decimal `Retry-After`
+delta-seconds from 1 to 86,400 are used; missing, malformed, multiple, date or
+out-of-range values show a generic try-later message. Other statuses ignore this
+header. Both account dialogs announce the wait in the Google button's existing
+accessible status region, including singular/plural wording. This is static
+guidance from the last response, not a countdown or browser-enforced cooldown.
+The server owns enforcement; another click is required for every retry, and only
+a validated successful response can trigger navigation. There are no automatic
+requests, redirects or retained proof/credential submissions after a denial.
+Switching to email still requires a fresh password and verification proof. The
+existing timeout, cancellation, duplicate-start and production gates are retained.
+
 ### Validation and remaining release work
 
-The backend checkpoint passed 2,924 tests, including opt-in guarded PostgreSQL
-tests. The latest frontend checkpoint passed 486 tests (197 API and 289
-UI/hook/helper cases), including Google access from both account dialogs.
+The Google-initiation limiter checkpoint passed all 4,499 backend tests, including
+guarded PostgreSQL integration tests. The focused run passed 181 cases; coverage
+includes concurrent starts, canonical peer identity, pending-attempt preservation,
+failed accounting/creation/replacement commits, lock deadlines, other-operation
+budget isolation, seven-purpose cleanup and safe migration downgrade refusal.
+Ruff, formatting, application types and all 12 migration sources passed checks.
+This backend slice did not change frontend code. Its following UI slice adds
+the retry guidance described above; automated validation uses no live provider calls.
+
+The Google retry-guidance UI slice passed all 685 frontend tests (331 API and
+354 UI/hook), lint, TypeScript checking and the production build. Focused checks
+passed 53 Google API tests and 80 hook/dialog tests. Coverage includes safe header
+fallback, no navigation or automatic retries after 429, explicit successful retry,
+timeout precedence, unmount cancellation and fresh email credentials/proofs after
+Google denial. Backend code is unchanged by this UI slice.
+
+The earlier Google backend checkpoint passed 2,924 tests, including opt-in guarded
+PostgreSQL tests. The preceding frontend checkpoint passed 642 tests (307 API and
+335 UI/hook cases), including Google access from both account dialogs.
 Backend lint, formatting and typing checks, frontend lint, TypeScript and the
 production build also passed. External provider operations are mocked in
 automated tests. Coverage includes expiry/locking, single-use consumption,
@@ -2001,7 +2117,7 @@ rejected callback subpaths. Hosting, reverse-proxy, custom access/error logging
 need separate review. The current Cloudflare Pages function proxies only health;
 production auth proxy/cookie/redirect handling is not implemented.
 
-Before public Google enablement, complete creation-abuse limits, expired-attempt
+Before public Google enablement, complete expired-attempt
 cleanup, broader provider/linking checks, upstream provider-method assurance,
 partial-provider-session failure/cleanup review, and deployment/security/privacy
 review. Cancellation cannot guarantee delivery of a cookie-clearing response to

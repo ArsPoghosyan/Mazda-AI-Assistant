@@ -48,6 +48,8 @@ type CaseFactory = Callable[[], AbstractAsyncContextManager[CleanupCase]]
         (True, "sign_up"),
         (True, "email_confirmation"),
         (True, "password_reset"),
+        (True, "guest_creation"),
+        (True, "google_start"),
     ],
     ids=[
         "recovery-only",
@@ -56,6 +58,8 @@ type CaseFactory = Callable[[], AbstractAsyncContextManager[CleanupCase]]
         "shared-sign-up",
         "shared-confirmation",
         "shared-password-reset",
+        "shared-guest-creation",
+        "shared-google-start",
     ],
 )
 def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> CaseFactory:
@@ -125,6 +129,8 @@ def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> 
                                         "sign_up",
                                         "email_confirmation",
                                         "password_reset",
+                                        "guest_creation",
+                                        "google_start",
                                     ]
                                 ),
                                 AuthRateLimit.key_hash.in_(case.keys),
@@ -224,6 +230,8 @@ async def count_for_case(
         "sign_up": limiter.count_sign_up_attempt,
         "email_confirmation": limiter.count_email_confirmation_attempt,
         "password_reset": limiter.count_password_reset_attempt,
+        "guest_creation": limiter.count_guest_creation_attempt,
+        "google_start": limiter.count_google_start_attempt,
     }[case.purpose]
     return await function(connection, key, max_requests=max_requests, window_seconds=window_seconds)
 
@@ -237,6 +245,8 @@ async def commit_count_for_case(
         "sign_up": limiter.commit_sign_up_attempt,
         "email_confirmation": limiter.commit_email_confirmation_attempt,
         "password_reset": limiter.commit_password_reset_attempt,
+        "guest_creation": limiter.commit_guest_creation_attempt,
+        "google_start": limiter.commit_google_start_attempt,
     }[case.purpose]
     return await function(engine, key, max_requests=max_requests, window_seconds=window_seconds)
 
@@ -264,6 +274,8 @@ async def all_state(
         "sign_up",
         "email_confirmation",
         "password_reset",
+        "guest_creation",
+        "google_start",
     ):
         result.update(
             {
@@ -849,7 +861,38 @@ def test_five_purposes_share_one_batch_bound(case_factory: CaseFactory) -> None:
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
 
 
-def test_maintenance_deletes_reset_with_other_expired_purposes(
+def test_seven_purposes_share_one_total_batch_bound(case_factory: CaseFactory) -> None:
+    async def check() -> None:
+        async with case_factory() as case:
+            expiry = datetime.now(UTC) - timedelta(hours=1)
+            (key,) = await seed(case, [expiry], purpose="guest_creation")
+            purposes = (
+                "email_confirmation",
+                "guest_creation",
+                "google_start",
+                "password_recovery",
+                "password_reset",
+                "sign_in",
+                "sign_up",
+            )
+            for purpose in purposes:
+                if purpose != "guest_creation":
+                    await seed(case, [expiry], purpose=purpose, keys=[key])
+            before = await all_state(case)
+            deleted = await commit_batch(case, case.engine, batch_size=2, timeout_seconds=3)
+            assert deleted == (2 if case.shared else 1)
+            remaining = await all_state(case)
+            assert len(before) == 7 and len(remaining) == 7 - deleted
+            removed = set(sorted(purposes)[:2]) if case.shared else {"password_recovery"}
+            assert set(remaining) == {
+                (purpose, key) for purpose in purposes if purpose not in removed
+            }
+            assert all(value == before[identity] for identity, value in remaining.items())
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_maintenance_deletes_guest_with_other_expired_purposes(
     case_factory: CaseFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def check() -> None:
@@ -861,6 +904,8 @@ def test_maintenance_deletes_reset_with_other_expired_purposes(
                 "sign_up",
                 "email_confirmation",
                 "password_reset",
+                "guest_creation",
+                "google_start",
             ):
                 await seed(
                     case, [now - timedelta(hours=1), now + timedelta(hours=1)], purpose=purpose
@@ -872,9 +917,9 @@ def test_maintenance_deletes_reset_with_other_expired_purposes(
             )
             assert (
                 await maintenance.cleanup_local(
-                    maintenance_settings(), batch_size=5, timeout_seconds=3
+                    maintenance_settings(), batch_size=7, timeout_seconds=3
                 )
-                == 5
+                == 7
             )
             assert await all_state(case) == active
 

@@ -2,12 +2,15 @@ import { StrictMode } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  GoogleSignInRateLimitedError,
   startGoogleSignIn,
   type GoogleLoginStartResponse,
 } from '../api/google'
 import { useGoogleSignIn } from './useGoogleSignIn'
 
-vi.mock('../api/google', () => ({ startGoogleSignIn: vi.fn() }))
+vi.mock('../api/google', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/google')>(), startGoogleSignIn: vi.fn(),
+}))
 
 const ISSUER = 'https://auth.example.test/auth/v1'
 const DESTINATION = `${ISSUER}/authorize?${new URLSearchParams({
@@ -164,6 +167,83 @@ test.each([new Error('private-provider-detail'), 'private-provider-detail']) (
     expect(navigate).not.toHaveBeenCalled()
   },
 )
+
+test.each([
+  ['1', 'Too many Google sign-in attempts. Please wait 1 second before trying again.'],
+  ['61', 'Too many Google sign-in attempts. Please wait 61 seconds before trying again.'],
+  ['86400', 'Too many Google sign-in attempts. Please wait 86400 seconds before trying again.'],
+  [null, 'Too many Google sign-in attempts. Please try again later.'],
+  ['0', 'Too many Google sign-in attempts. Please try again later.'],
+  ['private-provider-detail', 'Too many Google sign-in attempts. Please try again later.'],
+] as const)('rate limit %s stays on the page until an explicit retry', async (header, message) => {
+  vi.useFakeTimers()
+  vi.mocked(startGoogleSignIn).mockRejectedValueOnce(new GoogleSignInRateLimitedError(header))
+  const { result, navigate } = mountHook()
+  await act(async () => { await result.current.start() })
+  expect(result.current.status).toBe('error')
+  expect(result.current.message).toBe(message)
+  expect(navigate).not.toHaveBeenCalled()
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(1)
+  expect(vi.getTimerCount()).toBe(0)
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(86_401_000) })
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(1)
+  expect(navigate).not.toHaveBeenCalled()
+  expect(result.current.message).toBe(message)
+
+  vi.mocked(startGoogleSignIn).mockResolvedValueOnce(validStart())
+  await act(async () => { await result.current.start() })
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(2)
+  expect(result.current.status).toBe('redirecting')
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(DESTINATION)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+test('ordinary errors cannot impersonate typed rate-limit guidance', async () => {
+  vi.mocked(startGoogleSignIn).mockRejectedValueOnce(new Error(
+    'Too many Google sign-in attempts. Please wait 61 seconds before trying again.',
+  ))
+  const { result, navigate } = mountHook()
+  await act(async () => { await result.current.start() })
+  expect(result.current.message).toBe(FAILURE)
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test('timeout feedback wins over a late rate-limit rejection', async () => {
+  vi.useFakeTimers()
+  const pending = deferredStart()
+  vi.mocked(startGoogleSignIn).mockReturnValue(pending.promise)
+  const { result, navigate } = mountHook()
+  let submission!: Promise<void>
+  act(() => { submission = result.current.start() })
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+  await act(async () => {
+    pending.reject(new GoogleSignInRateLimitedError('61'))
+    await submission
+  })
+  expect(result.current.status).toBe('error')
+  expect(result.current.message).toBe('Google sign-in took too long. Please try again.')
+  expect(navigate).not.toHaveBeenCalled()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+test('unmount ignores a late rate-limit response', async () => {
+  vi.useFakeTimers()
+  const pending = deferredStart()
+  vi.mocked(startGoogleSignIn).mockReturnValue(pending.promise)
+  const { result, unmount, navigate } = mountHook()
+  let submission!: Promise<void>
+  act(() => { submission = result.current.start() })
+  const signal = vi.mocked(startGoogleSignIn).mock.calls[0]?.[2]
+  unmount()
+  expect(signal?.aborted).toBe(true)
+  await act(async () => {
+    pending.reject(new GoogleSignInRateLimitedError('61'))
+    await submission
+  })
+  expect(navigate).not.toHaveBeenCalled()
+  expect(vi.getTimerCount()).toBe(0)
+})
 
 test('aborts a stalled request at 15 seconds and clears its timer', async () => {
   vi.useFakeTimers()

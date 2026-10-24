@@ -31,6 +31,9 @@ from app.account_oauth_transactions import (
 )
 from app.account_sessions import AccountSessionAlreadyExists, AccountSessionUnavailable
 from app.account_tokens import InvalidAccountToken
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_google_start_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable, commit_google_start_attempt
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 
@@ -59,6 +62,7 @@ def google_login_unavailable() -> HTTPException:
         400: {"description": "Invalid request or a fresh login start is required."},
         403: {"description": "Request origin is not allowed."},
         409: {"description": "Sign out before starting another account login."},
+        429: {"description": "Too many Google sign-in attempts; retry later."},
         503: {"description": "Google sign-in is temporarily unavailable."},
     },
 )
@@ -99,6 +103,19 @@ async def start_google_login(request: Request, response: Response) -> GoogleLogi
                         400, "Invalid Google sign-in request.", headers=dict(_HEADERS)
                     )
 
+            decision = await commit_google_start_attempt(
+                engine,
+                get_google_start_ip_key(request, settings),
+                max_requests=settings.account_google_oauth_ip_max_requests,
+                window_seconds=settings.account_google_oauth_ip_window_seconds,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Google sign-in is temporarily rate limited.",
+                    headers={**_HEADERS, "Retry-After": str(decision.retry_after_seconds)},
+                )
+
             previous = read_oauth_cookie(request, settings)
             if previous is None:
                 created = await create_oauth_login_attempt_transaction(engine, settings)
@@ -120,6 +137,9 @@ async def start_google_login(request: Request, response: Response) -> GoogleLogi
         OAuthLoginAttemptUnavailable,
         SQLAlchemyError,
         TimeoutError,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
     ):
         raise google_login_unavailable() from None
 

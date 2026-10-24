@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     guest_cookie_secure: bool = True
     csrf_trusted_origins: tuple[str, ...] = ()
     guest_session_api_enabled: bool = False
+    guest_creation_ip_max_requests: int = Field(default=10, ge=1, le=1000)
+    guest_creation_ip_window_seconds: int = Field(default=600, ge=60, le=86400)
     guest_session_timeout_seconds: int = Field(
         default=15,
         ge=1,
@@ -112,6 +114,8 @@ class Settings(BaseSettings):
         le=30,
     )
     account_google_oauth_api_enabled: bool = False
+    account_google_oauth_ip_max_requests: int = Field(default=10, ge=1, le=1000)
+    account_google_oauth_ip_window_seconds: int = Field(default=600, ge=60, le=86400)
     account_google_oauth_timeout_seconds: int = Field(
         default=15,
         ge=1,

@@ -4,11 +4,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from secrets import token_hex
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx2
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
@@ -17,10 +19,11 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.auth_rate_limit_keys import get_guest_creation_ip_key
 from app.config import Settings
 from app.guest_tokens import generate_guest_token, hash_guest_token
 from app.main import create_app
-from app.models import GuestSession
+from app.models import AuthRateLimit, GuestSession
 
 pytestmark = pytest.mark.integration
 
@@ -53,6 +56,8 @@ def test_http_creation_and_reuse_persist_the_same_session(
         database_url=None,
         migration_database_url=None,
         guest_session_api_enabled=True,
+        auth_rate_limit_hmac_secret=SecretStr(token_hex(32)),
+        guest_creation_ip_max_requests=1,
         guest_cookie_secure=True,
         guest_session_inactivity_days=30,
         csrf_trusted_origins=(origin,),
@@ -61,6 +66,13 @@ def test_http_creation_and_reuse_persist_the_same_session(
         account_session_encryption_key=None,
         turnstile_secret_key=SecretStr("synthetic-test-secret"),
         turnstile_allowed_hostnames=("askm6.com",),
+    )
+
+    key = get_guest_creation_ip_key(
+        Request({"type": "http", "client": ("192.0.2.12", 12345)}), settings
+    )
+    limit_statement = select(AuthRateLimit.request_times).where(
+        AuthRateLimit.purpose == "guest_creation", AuthRateLimit.key_hash == key
     )
 
     statement = select(
@@ -127,6 +139,8 @@ def test_http_creation_and_reuse_persist_the_same_session(
     provider_requests: list[httpx2.Request] = []
 
     def verify_challenge(request: httpx2.Request) -> httpx2.Response:
+        with integration_engine.connect() as observer:
+            assert len(observer.execute(limit_statement).scalar_one()) == 1
         assert request.method == "POST"
         assert str(request.url) == ("https://challenges.cloudflare.com/turnstile/v0/siteverify")
         assert json.loads(request.content) == {
@@ -171,6 +185,7 @@ def test_http_creation_and_reuse_persist_the_same_session(
         with TestClient(
             create_app(settings),
             base_url=origin,
+            client=("192.0.2.12", 12345),
             backend_options={"loop_factory": asyncio.SelectorEventLoop},
         ) as client:
             if initial_cookie != "missing":
@@ -214,6 +229,8 @@ def test_http_creation_and_reuse_persist_the_same_session(
             assert second.headers["Cache-Control"] == "no-store"
             # Only creation consumes a challenge; an active cookie refresh does not.
             assert len(provider_requests) == 1
+            with integration_engine.connect() as observer:
+                assert len(observer.execute(limit_statement).scalar_one()) == 1
 
             with integration_engine.connect() as connection:
                 after = connection.execute(statement).one()
@@ -244,6 +261,11 @@ def test_http_creation_and_reuse_persist_the_same_session(
             verifiers_to_delete.append(unknown_verifier)
 
         with integration_engine.begin() as connection:
+            connection.execute(
+                delete(AuthRateLimit).where(
+                    AuthRateLimit.purpose == "guest_creation", AuthRateLimit.key_hash == key
+                )
+            )
             connection.execute(
                 delete(GuestSession).where(GuestSession.token_hash.in_(verifiers_to_delete))
             )

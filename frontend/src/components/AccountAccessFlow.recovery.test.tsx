@@ -12,7 +12,9 @@ import AccountSignInDialog from './AccountSignInDialog'
 vi.mock('../api/account', async (original) => ({ ...await original<typeof import('../api/account')>(), signInAccount: vi.fn() }))
 vi.mock('../api/account-password-recovery', async (original) => ({ ...await original<typeof import('../api/account-password-recovery')>(), requestAccountPasswordRecovery: vi.fn() }))
 vi.mock('../api/account-password-reset', async (original) => ({ ...await original<typeof import('../api/account-password-reset')>(), resetAccountPassword: vi.fn() }))
-vi.mock('../api/google', () => ({ startGoogleSignIn: vi.fn() }))
+vi.mock('../api/google', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/google')>(), startGoogleSignIn: vi.fn(),
+}))
 vi.mock('../lib/turnstile', () => ({ loadTurnstile: vi.fn() }))
 
 const prototype = HTMLDialogElement.prototype

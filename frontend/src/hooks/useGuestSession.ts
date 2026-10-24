@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ensureGuestSession,
+  GuestRateLimitedError,
   GuestVerificationRequiredError,
 } from '../api/guest'
 
@@ -80,6 +81,17 @@ export function useGuestSession() {
         setState({
           status: 'error',
           message: 'Guest access took too long. Please try again.',
+        })
+      } else if (
+        !controller.signal.aborted &&
+        error instanceof GuestRateLimitedError
+      ) {
+        const seconds = error.retryAfterSeconds
+        setState({
+          status: 'error',
+          message: seconds === null
+            ? error.message
+            : `Too many guest-access attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`,
         })
       } else if (
         !controller.signal.aborted &&

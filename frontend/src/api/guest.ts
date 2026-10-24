@@ -10,6 +10,21 @@ export class GuestVerificationRequiredError extends Error {
   }
 }
 
+export class GuestRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
+    super('Too many guest-access attempts. Please try again later.')
+    this.name = 'GuestRateLimitedError'
+
+    // Treat response headers as untrusted; accept only bounded delta-seconds.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
+  }
+}
+
 export async function ensureGuestSession(
   signal?: AbortSignal,
   turnstileToken?: string,
@@ -28,6 +43,10 @@ export async function ensureGuestSession(
   })
 
   if (!response.ok) {
+    if (response.status === 429) {
+      throw new GuestRateLimitedError(response.headers.get('Retry-After'))
+    }
+
     if (response.status === 403) {
       if (response.headers.get('X-Guest-Verification') === 'required') {
         throw new GuestVerificationRequiredError()

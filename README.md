@@ -19,12 +19,12 @@ development; public guest/account access remains gated.
 | --- | --- |
 | Web/API | React landing page, live connectivity feedback, FastAPI health and database readiness endpoints |
 | Persistence | PostgreSQL/pgvector in Docker, SQLAlchemy pooling/TLS, Alembic, separate runtime/migration roles |
-| Guests | Opaque HttpOnly sessions, hashed tokens, expiry-safe refresh, Turnstile for new sessions |
+| Guests | Opaque HttpOnly sessions, hashed tokens, expiry-safe refresh, Turnstile, IP limits and manual retry guidance for new-session attempts |
 | Accounts | Supabase email/password registration, email-code confirmation, sign-in, session restoration and current-session sign-out |
-| Google | Browser-bound PKCE flow for new and returning accounts, verified callback, encrypted session storage |
+| Google | Browser-bound PKCE flow for new and returning accounts, IP limits with manual retry guidance, verified callback, encrypted session storage |
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
-| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset throttling and shared cleanup tested; automatic cleanup and public deployment pending |
+| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling and shared cleanup; automatic cleanup and public deployment pending |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
@@ -139,7 +139,9 @@ Sign-up throttling requires `bcae4df0f56a`, now verified on both local databases
 with unchanged application grants and no schema drift.
 Email-confirmation throttling requires `6ef221a79f00`, also verified on both
 local databases. Password-reset throttling requires `0ffc842c5360`, verified on
-both local databases. Integration tests require this current head.
+both local databases. Guest-creation throttling requires `aefd9866f033`, verified
+on both local databases with unchanged grants. Google initiation throttling requires
+`46250b6b2d17`, verified on both local databases. Integration tests require this head.
 
 Remote URLs require `sslmode=verify-full` and `sslrootcert` pointing to the CA
 certificate. Keep ordinary development on Docker. For an explicit Supabase
@@ -162,7 +164,11 @@ For local HTTP, set `CSRF_TRUSTED_ORIGINS=["http://127.0.0.1:5173"]`; origins ha
 no trailing slash. Use `GUEST_COOKIE_SECURE=false` / `ACCOUNT_COOKIE_SECURE=false`
 only for local HTTP, and restore secure cookies for HTTPS. Guest setup requires
 `TURNSTILE_SECRET_KEY` and `TURNSTILE_ALLOWED_HOSTNAMES=["127.0.0.1"]`; the frontend
-uses public `VITE_TURNSTILE_SITE_KEY`.
+uses public `VITE_TURNSTILE_SITE_KEY`. New guest attempts also require the backend
+`AUTH_RATE_LIMIT_HMAC_SECRET` and use `GUEST_CREATION_IP_MAX_REQUESTS=10` per rolling
+`GUEST_CREATION_IP_WINDOW_SECONDS=600`. Active-session reuse bypasses this budget;
+the initial challenge request and subsequent proof submission each count when a
+new session is needed. A local cap returns 429 with `Retry-After` seconds.
 
 Use a separate development Turnstile widget with hostname `127.0.0.1`, Managed
 mode and pre-clearance disabled. Hostnames exclude scheme, port and path; trusted
@@ -221,7 +227,7 @@ returned in JSON. Feature flags and full contracts are in the
 | `POST /api/v1/account/sign-out` | 204 after current application-session deletion commits; provider logout is separate |
 | `POST /api/v1/account/password-recovery` | 202 neutral acknowledgement; no guarantee of account existence or email delivery |
 | `POST /api/v1/account/password-reset` | Recovery code/new password, provider cleanup, committed application-session invalidation; fresh sign-in required |
-| `POST /api/v1/account/google/start` | Commit pending PKCE attempt; return authorization URL/expiry |
+| `POST /api/v1/account/google/start` | Enforce IP limit, commit pending PKCE attempt; return authorization URL/expiry |
 | `GET /api/v1/account/google/callback` | Consume bound attempt once; verify/commit account session; fixed-origin 303 outcome |
 
 Common request limits include 16 KiB of actual JSON bytes, strict field allowlists
@@ -279,6 +285,8 @@ the same bounds. Email confirmation has its own 10-attempt/600-second budget thr
 Password reset separately defaults to 10 attempts per rolling 600 seconds through
 `ACCOUNT_PASSWORD_RESET_IP_MAX_REQUESTS` and `ACCOUNT_PASSWORD_RESET_IP_WINDOW_SECONDS`,
 with the same bounds and no shared budget with recovery-email requests.
+Guest creation and Google initiation each default to 10 attempts per rolling 600
+seconds, using `GUEST_CREATION_IP_*` and `ACCOUNT_GOOGLE_OAUTH_IP_*` respectively.
 These are configurable starting policies.
 
 Canonical peer IPs become versioned HMAC-SHA256 fingerprints; raw IP/email fields
@@ -292,13 +300,16 @@ must be consistent across processes; a longer window cannot recover pruned data.
 Recovery, sign-in, sign-up, email confirmation and password reset count before parsing
 or provider work, return 429 with `Retry-After` when capped, and fail closed with 503
 on limiter failure under their request deadlines. They require the migrated runtime database and a configured
-HMAC secret; both have been validated locally. Invalid Origins/configuration do not
+HMAC secret; these prerequisites have been validated locally. Invalid Origins/configuration do not
 reach counting; invalid bodies/provider failures after counting retain the attempt.
-Development sign-in, sign-up, email confirmation and password reset display validated
+Guest creation and Google initiation validate bodies before counting. Google
+starts and replacements share their own IP budget; a denial preserves pending
+login state. Callback completion does not consume this initiation budget.
+Development sign-in, sign-up, email confirmation, password reset and Google access display validated
 retry seconds, with a generic wait message when unavailable. Retries remain manual;
 sign-in/sign-up require fresh human verification, and confirmation/reset clear the
 submitted secrets. Provider limits without a known wait stay generic.
-An internal cleanup helper deletes expired rows for all five operations in one shared
+An internal cleanup helper deletes expired rows for all seven operations in one shared
 bounded batch and skips locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
 returning the count only after commit. Automatic invocation and production proxy
 verification remain pending. A local maintenance command now provides explicit

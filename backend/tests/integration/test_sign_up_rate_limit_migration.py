@@ -26,8 +26,22 @@ class LimiterMigration(Protocol):
     def downgrade(self) -> None: ...
 
 
-@pytest.fixture(params=["sign_up", "email_confirmation", "password_reset"])
+@pytest.fixture(
+    params=["sign_up", "email_confirmation", "password_reset", "guest_creation", "google_start"]
+)
 def migration_case(request: pytest.FixtureRequest) -> tuple[str, str, str]:
+    if request.param == "google_start":
+        return (
+            "46250b6b2d17",
+            "google_start",
+            "ck_auth_rate_limits_purpose_supported_with_guest_creation",
+        )
+    if request.param == "guest_creation":
+        return (
+            "aefd9866f033",
+            "guest_creation",
+            "ck_auth_rate_limits_purpose_supported_with_password_reset",
+        )
     if request.param == "sign_up":
         return ("bcae4df0f56a", "sign_up", "ck_auth_rate_limits_purpose_supported")
     if request.param == "password_reset":
@@ -72,8 +86,12 @@ def migrator_connection(
             allowed_purposes = ["password_recovery", "sign_in", "sign_up"]
             if migration_case[0] != "bcae4df0f56a":
                 allowed_purposes.append("email_confirmation")
-            if migration_case[0] == "0ffc842c5360":
+            if migration_case[0] in ("0ffc842c5360", "aefd9866f033", "46250b6b2d17"):
                 allowed_purposes.append("password_reset")
+            if migration_case[0] in ("aefd9866f033", "46250b6b2d17"):
+                allowed_purposes.append("guest_creation")
+            if migration_case[0] == "46250b6b2d17":
+                allowed_purposes.append("google_start")
             if (
                 connection.scalar(
                     select(AuthRateLimit.key_hash)
@@ -165,10 +183,14 @@ def test_safe_transition_preserves_old_records_grants_and_indexes(
         pytest.skip("Existing new-purpose state prevents the transactional round-trip probe.")
     key = token_bytes(32)
     old_purposes: tuple[str, ...] = ("password_recovery", "sign_in")
-    if new_purpose in {"email_confirmation", "password_reset"}:
+    if new_purpose in {"email_confirmation", "password_reset", "guest_creation", "google_start"}:
         old_purposes = (*old_purposes, "sign_up")
-    if new_purpose == "password_reset":
+    if new_purpose in {"password_reset", "guest_creation", "google_start"}:
         old_purposes = (*old_purposes, "email_confirmation")
+    if new_purpose in {"guest_creation", "google_start"}:
+        old_purposes = (*old_purposes, "password_reset")
+    if new_purpose == "google_start":
+        old_purposes = (*old_purposes, "guest_creation")
     for purpose in old_purposes:
         connection.execute(
             insert(AuthRateLimit).values(

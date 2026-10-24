@@ -88,7 +88,7 @@ def main() -> int:
     parser = _MaintenanceArgumentParser(
         description=(
             "Delete one batch of expired local authentication limiter rows, "
-            "including email confirmation and password reset."
+            "including email confirmation, password reset, guest creation and Google initiation."
         )
     )
     parser.add_argument(

@@ -224,8 +224,8 @@ class AuthRateLimit(Base):
     __table_args__ = (
         CheckConstraint(
             "purpose IN ('password_recovery', 'sign_in', 'sign_up', 'email_confirmation', "
-            "'password_reset')",
-            name="purpose_supported_with_password_reset",
+            "'password_reset', 'guest_creation', 'google_start')",
+            name="purpose_supported_with_google_start",
         ),
         CheckConstraint(
             "octet_length(key_hash) = 32",

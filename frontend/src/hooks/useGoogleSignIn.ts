@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { startGoogleSignIn } from '../api/google'
+import { GoogleSignInRateLimitedError, startGoogleSignIn } from '../api/google'
 
 type GoogleSignInState = {
   status: 'idle' | 'loading' | 'redirecting' | 'error'
@@ -144,14 +144,18 @@ export function useGoogleSignIn(
 
       navigating.current = false
 
-      setState({
-        status: 'error',
-        message: timedOut
-          ? 'Google sign-in took too long. Please try again.'
-          : error instanceof Error && SAFE_MESSAGES.has(error.message)
-            ? error.message
-            : FAILURE,
-      })
+      let message = FAILURE
+      if (timedOut) {
+        message = 'Google sign-in took too long. Please try again.'
+      } else if (error instanceof GoogleSignInRateLimitedError) {
+        const seconds = error.retryAfterSeconds
+        message = seconds === null
+          ? error.message
+          : `Too many Google sign-in attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`
+      } else if (error instanceof Error && SAFE_MESSAGES.has(error.message)) {
+        message = error.message
+      }
+      setState({ status: 'error', message })
     } finally {
       window.clearTimeout(timeout)
 

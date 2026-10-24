@@ -33,7 +33,15 @@ type CaseFactory = Callable[[], AbstractAsyncContextManager[LimitCase]]
 
 
 @pytest.fixture(
-    params=["password_recovery", "sign_in", "sign_up", "email_confirmation", "password_reset"]
+    params=[
+        "password_recovery",
+        "sign_in",
+        "sign_up",
+        "email_confirmation",
+        "password_reset",
+        "guest_creation",
+        "google_start",
+    ]
 )
 def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> CaseFactory:
     purpose = str(request.param)
@@ -92,6 +100,8 @@ def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> 
                                     "sign_up",
                                     "email_confirmation",
                                     "password_reset",
+                                    "guest_creation",
+                                    "google_start",
                                 ]
                             ),
                             AuthRateLimit.key_hash.in_([key, other_key]),
@@ -153,6 +163,8 @@ async def count(
         "sign_up": limiter.commit_sign_up_attempt,
         "email_confirmation": limiter.commit_email_confirmation_attempt,
         "password_reset": limiter.commit_password_reset_attempt,
+        "guest_creation": limiter.commit_guest_creation_attempt,
+        "google_start": limiter.commit_google_start_attempt,
     }[selected]
     return await commit(
         case.engine,
@@ -326,6 +338,8 @@ def test_rollback_restores_previous_window(case_factory: CaseFactory, existing: 
                     "sign_up": limiter.count_sign_up_attempt,
                     "email_confirmation": limiter.count_email_confirmation_attempt,
                     "password_reset": limiter.count_password_reset_attempt,
+                    "guest_creation": limiter.count_guest_creation_attempt,
+                    "google_start": limiter.count_google_start_attempt,
                 }[case.purpose]
                 decision = await counter(connection, case.key, max_requests=3, window_seconds=600)
                 assert decision.allowed

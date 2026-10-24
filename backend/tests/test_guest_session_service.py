@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 import app.guest_session_service as service
+from app.auth_rate_limits import AuthRateLimitDecision
 from app.config import Settings
 from app.guest_sessions import ActiveGuestSession, CreatedGuestSession
 from app.turnstile import TurnstileRejected, TurnstileUnavailable
@@ -42,6 +43,8 @@ class GuestMaterial:
     verify: AsyncMock
     create: AsyncMock
     commit: AsyncMock
+    limit: AsyncMock
+    key: Mock
     events: list[str]
 
 
@@ -73,6 +76,9 @@ def material(monkeypatch: pytest.MonkeyPatch) -> GuestMaterial:
     events: list[str] = []
     transaction_open = False
     commit = AsyncMock()
+    limit = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    key = Mock(return_value=b"k" * 32)
+    monkeypatch.setattr(service, "commit_guest_creation_attempt", limit)
     refresh = AsyncMock(return_value=None)
 
     async def verify(
@@ -128,6 +134,8 @@ def material(monkeypatch: pytest.MonkeyPatch) -> GuestMaterial:
         verify=verify_mock,
         create=create_mock,
         commit=commit,
+        limit=limit,
+        key=key,
         events=events,
     )
 
@@ -144,6 +152,7 @@ async def invoke(
         challenge_token=challenge_token,
         settings=material.settings,
         client=material.client,
+        creation_ip_key=material.key,
     )
 
 
@@ -173,6 +182,8 @@ async def test_active_session_refreshes_without_turnstile(
     material.create.assert_not_awaited()
     material.engine.begin.assert_called_once_with()
     material.commit.assert_awaited_once_with()
+    material.limit.assert_not_awaited()
+    material.key.assert_not_called()
 
 
 async def test_new_session_verifies_before_opening_transaction(
@@ -376,3 +387,79 @@ async def test_commit_failure_never_returns_cookie_material(
         ]
         material.verify.assert_awaited_once()
         material.create.assert_awaited_once()
+
+
+async def test_creation_commits_limit_before_verification(material: GuestMaterial) -> None:
+    async def counted(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+        assert material.events == ["begin", "commit", "release"]
+        material.events.append("limit-released")
+        return AuthRateLimitDecision(True, datetime.now(UTC), 0, None)
+
+    material.limit.side_effect = counted
+    await invoke(material)
+    assert material.events == [
+        "begin",
+        "commit",
+        "release",
+        "limit-released",
+        "verify",
+        "begin",
+        "create",
+        "commit",
+        "release",
+    ]
+    material.limit.assert_awaited_once_with(
+        material.engine,
+        b"k" * 32,
+        max_requests=10,
+        window_seconds=600,
+    )
+    material.key.assert_called_once_with()
+
+
+async def test_denial_never_verifies_or_creates(material: GuestMaterial) -> None:
+    material.limit.return_value = AuthRateLimitDecision(False, datetime.now(UTC), 127, None)
+    with pytest.raises(service.GuestCreationRateLimited) as caught:
+        await invoke(material, browser_token=None)
+    assert caught.value.retry_after_seconds == 127
+    material.verify.assert_not_awaited()
+    material.create.assert_not_awaited()
+    material.engine.begin.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["client", "secret", "hostnames"])
+async def test_missing_verification_configuration_does_not_charge_creation(
+    material: GuestMaterial,
+    missing: str,
+) -> None:
+    if missing == "client":
+        material.client = None
+    elif missing == "secret":
+        material.settings.turnstile_secret_key = None
+    else:
+        material.settings.turnstile_allowed_hostnames = ()
+    with pytest.raises(TurnstileUnavailable):
+        await invoke(material, browser_token=None)
+    material.limit.assert_not_awaited()
+    material.key.assert_not_called()
+    material.verify.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [SQLAlchemyError("private"), asyncio.CancelledError()])
+async def test_limiter_failure_propagates_without_provider_or_retry(
+    material: GuestMaterial,
+    failure: BaseException,
+) -> None:
+    material.limit.side_effect = failure
+    with pytest.raises(type(failure)):
+        await invoke(material, browser_token=None)
+    material.limit.assert_awaited_once()
+    material.verify.assert_not_awaited()
+    material.create.assert_not_awaited()
+
+
+async def test_missing_challenge_is_still_a_counted_attempt(material: GuestMaterial) -> None:
+    with pytest.raises(TurnstileRejected):
+        await invoke(material, browser_token=None, challenge_token=None)
+    material.limit.assert_awaited_once()
+    material.verify.assert_not_awaited()
