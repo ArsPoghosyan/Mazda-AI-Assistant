@@ -2067,7 +2067,17 @@ uv run mypy
 uv run mypy migrations
 ```
 
-PostgreSQL integration tests are skipped unless `TEST_DATABASE_URL` is explicitly
+GitHub Actions has a separate `backend-integration` job using the same PostgreSQL
+17/pgvector image as local development. It creates a disposable `askm6_test`
+database, uses synthetic CI-only credentials, creates restricted migration and
+application roles, and reuses `backend/sql/bootstrap_schema.sql`. Alembic upgrades
+the empty database to head and checks for schema drift before integration tests
+run. Migration files are also type-checked. The test URL preserves the existing
+loopback, port, database and administrator guards; no provider secrets or private
+environment files are used. This job checks database behavior independently of
+the offline backend and frontend jobs.
+
+Local PostgreSQL integration tests are skipped unless `TEST_DATABASE_URL` is explicitly
 configured. They require the migrated local `askm6_test` database and the
 `askm6_app` role. The test URL must use `postgresql+psycopg://`, administrator
 `mazda6_admin`, host `127.0.0.1`, port `15432`, database `askm6_test`, and no query

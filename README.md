@@ -340,7 +340,14 @@ npm run build
 strict TypeScript checking. Automated external-provider calls are mocked; no live
 paid APIs are needed. jsdom layout/dialog stubs do not replace real browser checks.
 CI runs backend tests/lint/format/types and frontend tests/lint/build without
-provider secrets. PostgreSQL tests skip without explicit local configuration.
+provider secrets. A separate PostgreSQL job creates a disposable database with
+synthetic credentials, bootstraps restricted roles, applies all migrations, checks
+schema drift, runs integration tests, and type-checks migrations. Local PostgreSQL
+tests still require explicit configuration.
+
+The PostgreSQL job's bootstrap and commands were validated locally in disposable
+Linux containers: **352 integration tests passed**, schema drift was absent, and
+all six migration files passed typing. GitHub-hosted execution is pending.
 
 Latest complete backend run: **3,316 passed including PostgreSQL**. Backend lint,
 formatting (203 files), typing (197 app/test files) and migration typing (six files)

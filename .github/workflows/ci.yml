@@ -43,3 +43,75 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  backend-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17-bookworm
+        env:
+          POSTGRES_DB: askm6_test
+          POSTGRES_USER: mazda6_admin
+          # Synthetic credentials for this disposable CI database only.
+          POSTGRES_PASSWORD: ci_admin_password
+        ports:
+          - 127.0.0.1:15432:5432
+        options: >-
+          --health-cmd "pg_isready -U mazda6_admin -d askm6_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.1'
+
+      - run: uv sync --locked
+
+      - name: Bootstrap disposable test database
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$PG_CONTAINER" \
+            psql -U mazda6_admin -d askm6_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE askm6_migrator LOGIN NOINHERIT
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+            PASSWORD 'ci_migrator_password';
+          CREATE ROLE askm6_app LOGIN NOINHERIT
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+            PASSWORD 'ci_app_password';
+          REVOKE ALL ON DATABASE askm6_test FROM PUBLIC;
+          GRANT CONNECT ON DATABASE askm6_test TO askm6_migrator, askm6_app;
+          CREATE EXTENSION vector;
+          SQL
+
+          docker exec -i "$PG_CONTAINER" \
+            psql -U mazda6_admin -d askm6_test -v ON_ERROR_STOP=1 \
+            < sql/bootstrap_schema.sql
+
+      - name: Apply migrations and check schema drift
+        env:
+          MIGRATION_DATABASE_URL: postgresql+psycopg://askm6_migrator:ci_migrator_password@127.0.0.1:15432/askm6_test
+        run: |
+          uv run --locked alembic upgrade head
+          uv run --locked alembic check
+
+      - name: Run PostgreSQL integration tests
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://mazda6_admin:ci_admin_password@127.0.0.1:15432/askm6_test
+        run: uv run --locked pytest tests/integration -p no:cacheprovider --tb=short
+
+      - name: Type-check migrations
+        run: uv run --locked mypy migrations
