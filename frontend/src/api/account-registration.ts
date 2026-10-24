@@ -140,6 +140,21 @@ export class AccountEmailConfirmationRejectedError extends Error {
   }
 }
 
+export class AccountEmailConfirmationRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
+    super('Too many email confirmation attempts. Please try again later.')
+    this.name = 'AccountEmailConfirmationRateLimitedError'
+
+    // Accept only bounded delta-seconds; never expose untrusted header text.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
+  }
+}
+
 export async function confirmAccountEmail(
   credentials: AccountEmailConfirmationCredentials,
   signal?: AbortSignal,
@@ -174,6 +189,10 @@ export async function confirmAccountEmail(
   }
 
   if (response.status !== 200) {
+    if (response.status === 429) {
+      throw new AccountEmailConfirmationRateLimitedError(response.headers.get('Retry-After'))
+    }
+
     if (response.status === 400) {
       throw new AccountEmailConfirmationRejectedError()
     }

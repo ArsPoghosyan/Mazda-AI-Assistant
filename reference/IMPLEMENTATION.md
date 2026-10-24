@@ -807,15 +807,44 @@ flow requires a separate application sign-in after confirmation. A timeout or
 unusable response does not undo provider-side confirmation or code consumption.
 
 The HTTP endpoint requires an exact trusted Origin before reading credentials,
-then checks its feature flag and provider configuration. Its total deadline covers
-body reading and provider work. Successful responses contain only
+then checks its feature flag, provider configuration, runtime database and HMAC secret.
+It commits a separate IP attempt before parsing or provider work, using the fixed
+`askm6:auth-rate-limit:v1:email_confirmation:ip:` namespace and database purpose
+`email_confirmation`. The configurable starting policy is 10 attempts per rolling
+600 seconds: `ACCOUNT_EMAIL_CONFIRMATION_IP_MAX_REQUESTS` accepts 1–1,000 and
+`ACCOUNT_EMAIL_CONFIRMATION_IP_WINDOW_SECONDS` accepts 60–86,400. Existing recovery,
+sign-in and sign-up fingerprints and budgets remain independent.
+Its total deadline covers accounting, body reading and provider work.
+Successful responses contain only
 `{"status":"confirmed","message":"Email confirmed. You can now sign in."}`.
 Invalid input and known provider rejections return 400, an untrusted Origin 403,
 an oversized body 413, and an unsupported media type 415. Disabled/incomplete
-configuration, provider unavailability, and timeouts return a generic 503. These
+configuration, limiter/key failure, provider unavailability, and timeouts return a generic 503.
+A local cap returns 429 with rounded-up `Retry-After` seconds before parsing or
+provider work; denied requests do not extend the block. Invalid input and provider
+failures remain counted after an allowed attempt commits. Upstream 429 responses
+remain generic 503 without inventing a retry time. These
 responses use `Cache-Control: no-store` and never set or clear guest/account cookies.
-Confirmation requires no application database connection, session-encryption key,
-or signing-key lookup. It does not automatically retry a code submission.
+Confirmation requires a migrated runtime database and fingerprint secret, but no
+session-encryption key or signing-key lookup. It does not automatically retry a code submission.
+
+Migration `6ef221a79f00` follows `bcae4df0f56a` and broadens only the limiter purpose
+CHECK to include email confirmation. It preserves records, keys, indexes and grants.
+Downgrade validates the earlier three-purpose constraint first and refuses while
+confirmation records exist. Both guarded local databases were upgraded with no
+schema drift; private configuration files were unchanged. Shared cleanup now
+includes all four purposes under one total batch bound, retaining recovery-only APIs.
+Automatic cleanup scheduling and public proxy trust remain pending.
+The development confirmation UI displays validated retry seconds on local 429 responses,
+with safe fallback text when the header is unavailable or invalid. Codes clear on
+submission and retries remain manual; rate limiting never advances to sign-in.
+
+Validation passed all 3,943 backend tests, including 21 PostgreSQL confirmation HTTP
+cases and four rollback-only migration probes for the sign-up/confirmation extensions.
+Coverage includes concurrent caps, exact retry/expiry, failed accounting commits,
+bounded lock waits, namespace independence and shared cleanup limits. Backend lint,
+formatting (211 files), typing (202 app/test sources) and nine migration files passed.
+No live provider calls were needed; frontend code was unchanged in this checkpoint.
 
 Offline tests use synthetic credentials, in-memory parser endpoints, and mocked
 provider HTTP. They cover feature defaults, timeout bounds, input masking and size
@@ -826,7 +855,7 @@ Route tests use the real adapter with mocked provider HTTP to cover successful
 confirmation, exact credential forwarding, unchanged cookie headers, and
 Origin/feature/resource gates. They also check malformed input, rejected
 verification types, provider rejection/outage handling without retries, malformed
-success responses, unsupported methods, and cancellation of stalled body/provider
+success responses, unsupported methods, and cancellation of stalled accounting/body/provider
 work at the total deadline.
 Keep public registration and confirmation disabled until their complete flows,
 abuse controls, email configuration, and deployment behavior have been validated.
@@ -1112,7 +1141,7 @@ production proxy trust and automatic cleanup invocation remain pending. A bounde
 expired-row cleanup helper is implemented and tested, as described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
-for the IP-fingerprint helpers; enabled recovery, sign-in and sign-up require it. It must contain exactly
+for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up and confirmation require it. It must contain exactly
 64 ASCII hexadecimal characters encoding a separate 32-byte key; validation
 checks format, not randomness. The example value is empty, and no real secret
 is published. Local development uses a generated key in ignored configuration,
@@ -1237,7 +1266,7 @@ no automatic schedule has been connected.
 
 The `delete_expired_auth_rate_limits` and
 `commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
-transaction, deadline and failure behavior for a shared recovery/sign-in/sign-up batch.
+transaction, deadline and failure behavior for a shared recovery/sign-in/sign-up/confirmation batch.
 The existing recovery-only APIs retain their signatures and scope. Shared
 selection is ordered by expiry, fingerprint and purpose, with one total batch
 limit across all supported purposes. Deletion matches both key columns and rechecks expiry,
@@ -1256,7 +1285,7 @@ passed. Existing database rows are protected by locks, and tests delete only
 their own synthetic keys. No schema or private configuration change was needed.
 
 The `app.auth_rate_limit_maintenance` command loads runtime `Settings` and runs
-one shared batch across recovery, sign-in and sign-up. It accepts `--batch-size`
+one shared batch across recovery, sign-in, sign-up and email confirmation. It accepts `--batch-size`
 (default 100 total rows, range 1–1,000) and
 `--timeout-seconds` (default 5, greater than zero through 30). Invalid arguments
 are rejected before loading private settings; `--help` does not connect. Direct
@@ -1324,7 +1353,7 @@ checkpoint passed 242 tests, plus lint, changed-file formatting and typing
 The SQLAlchemy `AuthRateLimit` model defines `app.auth_rate_limits`, with a
 composite operation/fingerprint key, a required timezone-aware timestamp array
 bounded to 1,000 entries, and an indexed cleanup deadline. Constraints restrict
-the operation to password recovery, sign-in or sign-up, require a 32-byte fingerprint, and reject
+the operation to password recovery, sign-in, sign-up or email confirmation, require a 32-byte fingerprint, and reject
 NULL array entries and nonstandard array shapes. Raw IP addresses and email
 addresses are not fields in this table. The model imports and compiles to
 PostgreSQL DDL; lint, formatting, typing and 112 existing regression tests passed.
@@ -1957,14 +1986,21 @@ bodies are not parsed, and other statuses ignore the header. The existing status
 region announces the quoted wait, using singular/plural seconds. It is a snapshot
 from the failed attempt, with no live countdown, client lock or automatic retry;
 the backend remains responsible for enforcement. Password clearing and fresh-proof
-requirements apply, and rate limiting never advances to confirmation. Confirmation,
-Google access and sign-in keep their existing contracts.
+requirements apply, and rate limiting never advances to confirmation. Google access
+and sign-in keep their existing contracts.
 
-Retry-feedback validation passed 65 registration/confirmation API cases and 33
-focused sign-up hook/form/Google cases. The full frontend suite then passed all
-543 cases (240 API and 303 UI/hook), plus lint, TypeScript and production build.
+Email confirmation uses its own `AccountEmailConfirmationRateLimitedError` for HTTP
+429 and validates the same 1–86,400 second range without reading the error body.
+Missing or unsafe retry information uses fixed fallback text. Its hook reports a
+static wait message through the existing accessible status region; no countdown or
+automatic request is scheduled. The submitted code clears, a manual retry can use
+a replacement code, and only a successful confirmation reveals "Continue to sign in".
+
+Confirmation retry-feedback validation passed 86 registration/confirmation API
+cases and 30 focused confirmation hook/form cases. The full frontend suite passed
+574 cases (261 API and 313 UI/hook), plus lint, TypeScript and production build.
 Tests cover header bounds/fallbacks, status isolation, safe messages, manual retry,
-password clearing, proof renewal and no confirmation advance on failure. These
+password/code clearing, proof renewal and no flow advance on failure. These
 checks mock requests and send no registration emails.
 
 The development account dialog switches between sign-in, registration, and

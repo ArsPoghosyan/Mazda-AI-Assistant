@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app import auth_rate_limits as limiter
 
 
-@pytest.fixture(params=["password_recovery", "sign_in", "sign_up"])
+@pytest.fixture(params=["password_recovery", "sign_in", "sign_up", "email_confirmation"])
 def purpose(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
@@ -39,6 +39,7 @@ def test_invalid_parameters_fail_before_database_access(
         "password_recovery": limiter.count_password_recovery_attempt,
         "sign_in": limiter.count_sign_in_attempt,
         "sign_up": limiter.count_sign_up_attempt,
+        "email_confirmation": limiter.count_email_confirmation_attempt,
     }[purpose]
     with pytest.raises(ValueError, match="^Invalid authentication rate-limit parameters\\.$"):
         asyncio.run(counter(connection, key, max_requests=maximum, window_seconds=window))
@@ -53,6 +54,7 @@ def test_connection_must_already_have_a_transaction(purpose: str) -> None:
         "password_recovery": limiter.count_password_recovery_attempt,
         "sign_in": limiter.count_sign_in_attempt,
         "sign_up": limiter.count_sign_up_attempt,
+        "email_confirmation": limiter.count_email_confirmation_attempt,
     }[purpose]
     with pytest.raises(RuntimeError, match="requires an active transaction"):
         asyncio.run(counter(connection, b"k" * 32, max_requests=10, window_seconds=600))
@@ -78,6 +80,7 @@ def test_row_removed_before_lock_fails_closed_without_a_time_read_or_update(purp
         "password_recovery": limiter.count_password_recovery_attempt,
         "sign_in": limiter.count_sign_in_attempt,
         "sign_up": limiter.count_sign_up_attempt,
+        "email_confirmation": limiter.count_email_confirmation_attempt,
     }[purpose]
     with pytest.raises(limiter.AuthRateLimitUnavailable):
         asyncio.run(counter(connection, b"k" * 32, max_requests=10, window_seconds=600))
@@ -125,6 +128,7 @@ def test_wrapper_commits_before_return_and_never_retries_on_failure(
             "password_recovery": limiter.commit_password_recovery_attempt,
             "sign_in": limiter.commit_sign_in_attempt,
             "sign_up": limiter.commit_sign_up_attempt,
+            "email_confirmation": limiter.commit_email_confirmation_attempt,
         }[purpose]
         return await commit(engine, b"k" * 32, max_requests=10, window_seconds=600)
 

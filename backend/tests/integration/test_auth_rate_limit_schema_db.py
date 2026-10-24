@@ -30,7 +30,9 @@ def insert_limit(connection: Connection, **overrides: object) -> bytes:
     return key
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 def test_application_can_insert_lock_read_update_and_delete_window(
     app_connection: Connection,
     purpose: str,
@@ -62,7 +64,9 @@ def test_application_can_insert_lock_read_update_and_delete_window(
     assert app_connection.execute(statement).first() is None
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 def test_duplicate_key_rejects_insert_and_preserves_existing_state(
     app_connection: Connection,
     purpose: str,
@@ -80,7 +84,9 @@ def test_duplicate_key_rejects_insert_and_preserves_existing_state(
     assert app_connection.execute(statement).one() == original
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 @pytest.mark.parametrize("column", ["purpose", "key_hash", "request_times", "expires_at"])
 def test_required_fields_reject_null(app_connection: Connection, purpose: str, column: str) -> None:
     values: dict[str, object] = {"purpose": purpose, column: None}
@@ -90,7 +96,9 @@ def test_required_fields_reject_null(app_connection: Connection, purpose: str, c
     assert caught.value.orig.diag.column_name == column
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 @pytest.mark.parametrize("size", [0, 31, 33])
 def test_fingerprint_must_have_32_bytes(
     app_connection: Connection, purpose: str, size: int
@@ -108,11 +116,13 @@ def test_unsupported_operations_are_rejected(app_connection: Connection, purpose
     assert isinstance(caught.value.orig, CheckViolation)
     assert (
         caught.value.orig.diag.constraint_name
-        == "ck_auth_rate_limits_purpose_supported_with_sign_up"
+        == "ck_auth_rate_limits_purpose_supported_with_confirmation"
     )
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 @pytest.mark.parametrize("count", [0, 1, 10, 1000])
 def test_timestamp_array_size_boundaries_are_accepted(
     app_connection: Connection, purpose: str, count: int
@@ -127,7 +137,9 @@ def test_timestamp_array_size_boundaries_are_accepted(
     )
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 def test_timestamp_array_rejects_more_than_1000_entries(
     app_connection: Connection, purpose: str
 ) -> None:
@@ -137,7 +149,9 @@ def test_timestamp_array_rejects_more_than_1000_entries(
     assert caught.value.orig.diag.constraint_name == "ck_auth_rate_limits_request_times_size"
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 def test_timestamp_array_rejects_null_elements(app_connection: Connection, purpose: str) -> None:
     with pytest.raises(IntegrityError) as caught:
         insert_limit(app_connection, purpose=purpose, request_times=[None])
@@ -145,7 +159,9 @@ def test_timestamp_array_rejects_null_elements(app_connection: Connection, purpo
     assert caught.value.orig.diag.constraint_name == "ck_auth_rate_limits_request_times_no_nulls"
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 @pytest.mark.parametrize(
     "literal",
     [
@@ -176,7 +192,9 @@ def test_nonstandard_array_shapes_are_rejected(
     assert getattr(caught.value.orig, "sqlstate", None) in {"23514", "0A000"}
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 def test_timezone_offsets_preserve_the_same_instant(
     app_connection: Connection, purpose: str
 ) -> None:
@@ -192,7 +210,9 @@ def test_timezone_offsets_preserve_the_same_instant(
     assert row.expires_at == (instant + timedelta(minutes=10)).astimezone(UTC)
 
 
-@pytest.mark.parametrize("purpose", ["password_recovery", "sign_in", "sign_up"])
+@pytest.mark.parametrize(
+    "purpose", ["password_recovery", "sign_in", "sign_up", "email_confirmation"]
+)
 @pytest.mark.parametrize("column", ["purpose", "key_hash"])
 def test_application_cannot_reassign_key_columns(
     app_connection: Connection, purpose: str, column: str

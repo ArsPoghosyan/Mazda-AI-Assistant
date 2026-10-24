@@ -13,7 +13,7 @@ async def _delete_expired_limits(
     connection: AsyncConnection,
     *,
     batch_size: int,
-    purposes: tuple[Literal["password_recovery", "sign_in", "sign_up"], ...],
+    purposes: tuple[Literal["password_recovery", "sign_in", "sign_up", "email_confirmation"], ...],
 ) -> int:
     """Delete one batch; the caller owns commit, rollback and its deadline.
 
@@ -69,9 +69,11 @@ async def delete_expired_auth_rate_limits(
     *,
     batch_size: int = 100,
 ) -> int:
-    """Delete one shared batch of expired recovery, sign-in and sign-up records."""
+    """Delete one shared batch of expired authentication limiter records."""
     return await _delete_expired_limits(
-        connection, batch_size=batch_size, purposes=("password_recovery", "sign_in", "sign_up")
+        connection,
+        batch_size=batch_size,
+        purposes=("password_recovery", "sign_in", "sign_up", "email_confirmation"),
     )
 
 
@@ -126,7 +128,7 @@ async def commit_expired_auth_rate_limit_cleanup(
     timeout_seconds: float,
     batch_size: int = 100,
 ) -> int:
-    """Commit one shared recovery/sign-in/sign-up batch under the supplied deadline."""
+    """Commit one shared authentication limiter batch under the supplied deadline."""
     return await _commit_cleanup(
         engine, timeout_seconds=timeout_seconds, batch_size=batch_size, shared=True
     )

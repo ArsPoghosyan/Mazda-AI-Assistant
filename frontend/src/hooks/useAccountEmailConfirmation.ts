@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AccountEmailConfirmationRateLimitedError,
   AccountEmailConfirmationRejectedError,
   confirmAccountEmail,
   type AccountEmailConfirmationCredentials,
@@ -82,6 +83,11 @@ export function useAccountEmailConfirmation() {
 
       if (timedOut) {
         message = 'Email confirmation took too long. Please try again.'
+      } else if (error instanceof AccountEmailConfirmationRateLimitedError) {
+        const seconds = error.retryAfterSeconds
+        message = seconds === null
+          ? error.message
+          : `Too many email confirmation attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`
       } else if (error instanceof AccountEmailConfirmationRejectedError) {
         message =
           'Email confirmation was rejected. Check your email and code, then try again.'

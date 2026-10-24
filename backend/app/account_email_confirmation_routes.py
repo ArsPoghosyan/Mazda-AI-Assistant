@@ -6,6 +6,8 @@ from typing import Literal, cast
 import httpx2
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_email_confirmation import (
     AccountEmailConfirmationRejected,
@@ -15,6 +17,9 @@ from app.account_email_confirmation import (
 from app.account_email_confirmation_requests import (
     read_email_confirmation_credentials,
 )
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_email_confirmation_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable, commit_email_confirmation_attempt
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 
@@ -45,6 +50,7 @@ def email_confirmation_unavailable() -> HTTPException:
         403: {"description": "Request origin was rejected."},
         413: {"description": "Email confirmation request is too large."},
         415: {"description": "Email confirmation requires a JSON request."},
+        429: {"description": "Email confirmation requests are temporarily rate limited."},
         503: {"description": "Email confirmation is temporarily unavailable."},
     },
 )
@@ -62,9 +68,12 @@ async def confirm_email(
         httpx2.AsyncClient | None,
         request.app.state.account_auth_client,
     )
+    engine = cast(AsyncEngine | None, request.app.state.database_engine)
 
     if (
         client is None
+        or engine is None
+        or settings.auth_rate_limit_hmac_secret is None
         or settings.supabase_auth_issuer is None
         or settings.supabase_auth_publishable_key is None
     ):
@@ -72,6 +81,23 @@ async def confirm_email(
 
     try:
         async with asyncio.timeout(settings.account_email_confirmation_timeout_seconds):
+            key_hash = get_email_confirmation_ip_key(request, settings)
+            decision = await commit_email_confirmation_attempt(
+                engine,
+                key_hash,
+                max_requests=settings.account_email_confirmation_ip_max_requests,
+                window_seconds=settings.account_email_confirmation_ip_window_seconds,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Email confirmation is temporarily rate limited.",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Retry-After": str(decision.retry_after_seconds),
+                    },
+                )
+
             credentials = await read_email_confirmation_credentials(request)
 
             await confirm_email_code(
@@ -86,7 +112,14 @@ async def confirm_email(
             detail="Email confirmation was rejected.",
             headers={"Cache-Control": "no-store"},
         ) from None
-    except (AccountEmailConfirmationUnavailable, TimeoutError):
+    except (
+        AccountEmailConfirmationUnavailable,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
+        SQLAlchemyError,
+        TimeoutError,
+    ):
         raise email_confirmation_unavailable() from None
 
     response.headers["Cache-Control"] = "no-store"

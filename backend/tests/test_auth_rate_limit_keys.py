@@ -12,6 +12,7 @@ from starlette.types import Message, Scope
 
 from app.auth_rate_limit_keys import (
     AuthRateLimitKeyUnavailable,
+    get_email_confirmation_ip_key,
     get_password_recovery_ip_key,
     get_sign_in_ip_key,
     get_sign_up_ip_key,
@@ -28,8 +29,13 @@ type IPKeyFunction = Callable[[Request, Settings], bytes]
 
 
 @pytest.fixture(
-    params=[get_password_recovery_ip_key, get_sign_in_ip_key, get_sign_up_ip_key],
-    ids=["password-recovery", "sign-in", "sign-up"],
+    params=[
+        get_password_recovery_ip_key,
+        get_sign_in_ip_key,
+        get_sign_up_ip_key,
+        get_email_confirmation_ip_key,
+    ],
+    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation"],
 )
 def key_function(request: pytest.FixtureRequest) -> IPKeyFunction:
     return cast(IPKeyFunction, request.param)
@@ -72,8 +78,12 @@ def make_request(
             "7fbbd354fc2c094906e306f401d871671063854622d7350d1b95bcfd2859aef4",
         ),
         (get_sign_up_ip_key, "4463cd425efc8e868de301d289792479886b7a88ec8c00e49044ded7875e89ff"),
+        (
+            get_email_confirmation_ip_key,
+            "72b9edefd6197d30e7718c372e72c74cba639422b62b9cecc52d37a361c1c7d2",
+        ),
     ],
-    ids=["password-recovery", "sign-in", "sign-up"],
+    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation"],
 )
 def test_versioned_fingerprint_matches_fixed_hmac_reference(
     function: IPKeyFunction, expected: str
@@ -239,6 +249,11 @@ def test_all_auth_operations_have_independent_fingerprints(settings: Settings) -
     request = make_request()
     keys = {
         function(request, settings)
-        for function in (get_password_recovery_ip_key, get_sign_in_ip_key, get_sign_up_ip_key)
+        for function in (
+            get_password_recovery_ip_key,
+            get_sign_in_ip_key,
+            get_sign_up_ip_key,
+            get_email_confirmation_ip_key,
+        )
     }
-    assert len(keys) == 3
+    assert len(keys) == 4

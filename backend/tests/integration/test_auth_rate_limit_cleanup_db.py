@@ -46,8 +46,15 @@ type CaseFactory = Callable[[], AbstractAsyncContextManager[CleanupCase]]
         (True, "password_recovery"),
         (True, "sign_in"),
         (True, "sign_up"),
+        (True, "email_confirmation"),
     ],
-    ids=["recovery-only", "shared-recovery", "shared-sign-in", "shared-sign-up"],
+    ids=[
+        "recovery-only",
+        "shared-recovery",
+        "shared-sign-in",
+        "shared-sign-up",
+        "shared-confirmation",
+    ],
 )
 def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> CaseFactory:
     shared, purpose = request.param
@@ -110,7 +117,12 @@ def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> 
                         await connection.execute(
                             delete(AuthRateLimit).where(
                                 AuthRateLimit.purpose.in_(
-                                    ["password_recovery", "sign_in", "sign_up"]
+                                    [
+                                        "password_recovery",
+                                        "sign_in",
+                                        "sign_up",
+                                        "email_confirmation",
+                                    ]
                                 ),
                                 AuthRateLimit.key_hash.in_(case.keys),
                             )
@@ -207,6 +219,7 @@ async def count_for_case(
         "password_recovery": limiter.count_password_recovery_attempt,
         "sign_in": limiter.count_sign_in_attempt,
         "sign_up": limiter.count_sign_up_attempt,
+        "email_confirmation": limiter.count_email_confirmation_attempt,
     }[case.purpose]
     return await function(connection, key, max_requests=max_requests, window_seconds=window_seconds)
 
@@ -218,6 +231,7 @@ async def commit_count_for_case(
         "password_recovery": limiter.commit_password_recovery_attempt,
         "sign_in": limiter.commit_sign_in_attempt,
         "sign_up": limiter.commit_sign_up_attempt,
+        "email_confirmation": limiter.commit_email_confirmation_attempt,
     }[case.purpose]
     return await function(engine, key, max_requests=max_requests, window_seconds=window_seconds)
 
@@ -239,7 +253,7 @@ async def all_state(
     case: CleanupCase, connection: AsyncConnection | None = None
 ) -> dict[tuple[str, bytes], tuple[list[datetime], datetime]]:
     result = {}
-    for purpose in ("password_recovery", "sign_in", "sign_up"):
+    for purpose in ("password_recovery", "sign_in", "sign_up", "email_confirmation"):
         result.update(
             {
                 (purpose, key): value
@@ -780,13 +794,36 @@ def test_shared_cleanup_covers_all_three_purposes_with_one_bound(case_factory: C
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
 
 
-def test_maintenance_deletes_sign_up_with_other_expired_purposes(
+def test_four_purposes_share_one_batch_bound(case_factory: CaseFactory) -> None:
+    async def check() -> None:
+        async with case_factory() as case:
+            expiry = datetime.now(UTC) - timedelta(hours=1)
+            (key,) = await seed(case, [expiry], purpose="email_confirmation")
+            for purpose in ("password_recovery", "sign_in", "sign_up"):
+                await seed(case, [expiry], purpose=purpose, keys=[key])
+            before = await all_state(case)
+            deleted = await commit_batch(case, case.engine, batch_size=2, timeout_seconds=3)
+            assert deleted == (2 if case.shared else 1)
+            remaining = await all_state(case)
+            assert len(before) == 4 and len(remaining) == 4 - deleted
+            assert all(value == before[identity] for identity, value in remaining.items())
+            expected = (
+                {("sign_in", key), ("sign_up", key)}
+                if case.shared
+                else {("email_confirmation", key), ("sign_in", key), ("sign_up", key)}
+            )
+            assert set(remaining) == expected
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_maintenance_deletes_confirmation_with_other_expired_purposes(
     case_factory: CaseFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def check() -> None:
         async with case_factory() as case:
             now = datetime.now(UTC)
-            for purpose in ("password_recovery", "sign_in", "sign_up"):
+            for purpose in ("password_recovery", "sign_in", "sign_up", "email_confirmation"):
                 await seed(
                     case, [now - timedelta(hours=1), now + timedelta(hours=1)], purpose=purpose
                 )
@@ -797,9 +834,9 @@ def test_maintenance_deletes_sign_up_with_other_expired_purposes(
             )
             assert (
                 await maintenance.cleanup_local(
-                    maintenance_settings(), batch_size=3, timeout_seconds=3
+                    maintenance_settings(), batch_size=4, timeout_seconds=3
                 )
-                == 3
+                == 4
             )
             assert await all_state(case) == active
 

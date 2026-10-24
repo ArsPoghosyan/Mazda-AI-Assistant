@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  AccountEmailConfirmationRateLimitedError,
   AccountEmailConfirmationRejectedError,
   confirmAccountEmail,
   type AccountEmailConfirmationResponse,
@@ -105,6 +106,31 @@ test('blocks duplicates while pending and after confirmation', async () => {
 })
 
 test.each([
+  {
+    name: 'rate limit with a wait time',
+    error: new AccountEmailConfirmationRateLimitedError('61'),
+    message: 'Too many email confirmation attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'rate limit with a singular second',
+    error: new AccountEmailConfirmationRateLimitedError('1'),
+    message: 'Too many email confirmation attempts. Please wait 1 second before trying again.',
+  },
+  {
+    name: 'rate limit with the maximum wait',
+    error: new AccountEmailConfirmationRateLimitedError('86400'),
+    message: 'Too many email confirmation attempts. Please wait 86400 seconds before trying again.',
+  },
+  {
+    name: 'rate limit without a wait time',
+    error: new AccountEmailConfirmationRateLimitedError(),
+    message: 'Too many email confirmation attempts. Please try again later.',
+  },
+  {
+    name: 'rate limit with private retry details',
+    error: new AccountEmailConfirmationRateLimitedError('private-provider-detail'),
+    message: 'Too many email confirmation attempts. Please try again later.',
+  },
   {
     name: 'rejected code',
     error: new AccountEmailConfirmationRejectedError(),
@@ -233,6 +259,28 @@ test('does not accept a late response after timeout', async () => {
   )
   expect(confirmAccountEmail).toHaveBeenCalledTimes(1)
   expect(vi.getTimerCount()).toBe(0)
+})
+
+test('a rate-limit response never schedules another confirmation', async () => {
+  vi.useFakeTimers()
+  vi.mocked(confirmAccountEmail).mockRejectedValueOnce(
+    new AccountEmailConfirmationRateLimitedError('61'),
+  )
+  const { result } = renderHook(useAccountEmailConfirmation, { wrapper: StrictMode })
+
+  await act(async () => {
+    expect(await result.current.start(credentials)).toBe(false)
+  })
+  expect(vi.getTimerCount()).toBe(0)
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000)
+  })
+  expect(result.current.status).toBe('error')
+  expect(result.current.message).toBe(
+    'Too many email confirmation attempts. Please wait 61 seconds before trying again.',
+  )
+  expect(confirmAccountEmail).toHaveBeenCalledTimes(1)
 })
 
 test('unmount aborts the request and ignores its late result', async () => {

@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  AccountEmailConfirmationRateLimitedError,
   AccountEmailConfirmationRejectedError,
   confirmAccountEmail,
   type AccountEmailConfirmationResponse,
@@ -153,6 +154,26 @@ test('pastes a code, preserves leading zeros, and waits for explicit sign-in nav
 
 test.each([
   {
+    name: 'rate limit with retry seconds',
+    error: new AccountEmailConfirmationRateLimitedError('61'),
+    message: 'Too many email confirmation attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'rate limit with a singular second',
+    error: new AccountEmailConfirmationRateLimitedError('1'),
+    message: 'Too many email confirmation attempts. Please wait 1 second before trying again.',
+  },
+  {
+    name: 'rate limit without retry seconds',
+    error: new AccountEmailConfirmationRateLimitedError(),
+    message: 'Too many email confirmation attempts. Please try again later.',
+  },
+  {
+    name: 'rate limit with private retry details',
+    error: new AccountEmailConfirmationRateLimitedError('private-provider-detail'),
+    message: 'Too many email confirmation attempts. Please try again later.',
+  },
+  {
     name: 'rejected code',
     error: new AccountEmailConfirmationRejectedError(),
     message:
@@ -175,6 +196,9 @@ test.each([
 
   await screen.findByText(message)
 
+  expect(screen.getByRole('status').textContent).toBe(message)
+  expect(screen.getByRole('status').getAttribute('aria-atomic')).toBe('true')
+  expect(screen.queryByRole('button', { name: 'Continue to sign in' })).toBeNull()
   expect(code.value).toBe('')
   expect(code.closest('fieldset')?.disabled).toBe(false)
   expect(confirmAccountEmail).toHaveBeenCalledTimes(1)

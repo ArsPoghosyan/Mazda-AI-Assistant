@@ -24,7 +24,7 @@ development; public guest/account access remains gated.
 | Google | Browser-bound PKCE flow for new and returning accounts, verified callback, encrypted session storage |
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
-| Abuse controls | Recovery/sign-in/sign-up throttling and shared cleanup tested; automatic cleanup and public deployment pending |
+| Abuse controls | Recovery/sign-in/sign-up/email-confirmation throttling and shared cleanup tested; automatic cleanup and public deployment pending |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
@@ -137,6 +137,8 @@ verified on both local website and test databases. Migrate each target explicitl
 integration tests and enabled sign-in throttling require the current head.
 Sign-up throttling requires `bcae4df0f56a`, now verified on both local databases
 with unchanged application grants and no schema drift.
+Email-confirmation throttling requires `6ef221a79f00`, also verified on both
+local databases. Integration tests require this current head.
 
 Remote URLs require `sslmode=verify-full` and `sslrootcert` pointing to the CA
 certificate. Keep ordinary development on Docker. For an explicit Supabase
@@ -263,14 +265,18 @@ Defaults are 10 attempts per rolling 600 seconds, configurable through
 `AUTH_RATE_LIMIT_HMAC_SECRET` accepts 64 ASCII hexadecimal characters encoding
 an independent 32-byte key. The example placeholder stays empty; local development
 uses a separately generated key in ignored configuration. Format validation does
-not establish randomness. Enabled recovery, sign-in and sign-up require this secret.
+not establish randomness. Enabled recovery, sign-in, sign-up and email confirmation
+require this secret.
 
 Sign-in enforces a separate counter, configured for 30 attempts per rolling 600
 seconds by default through `ACCOUNT_SIGN_IN_IP_MAX_REQUESTS` and
 `ACCOUNT_SIGN_IN_IP_WINDOW_SECONDS`, with the same bounds as recovery.
 Sign-up independently defaults to 10 attempts per rolling 600 seconds through
 `ACCOUNT_SIGN_UP_IP_MAX_REQUESTS` and `ACCOUNT_SIGN_UP_IP_WINDOW_SECONDS`, with
-the same bounds. These are configurable starting policies.
+the same bounds. Email confirmation has its own 10-attempt/600-second budget through
+`ACCOUNT_EMAIL_CONFIRMATION_IP_MAX_REQUESTS` and
+`ACCOUNT_EMAIL_CONFIRMATION_IP_WINDOW_SECONDS`, with the same bounds.
+These are configurable starting policies.
 
 Canonical peer IPs become versioned HMAC-SHA256 fingerprints; raw IP/email fields
 are absent from `app.auth_rate_limits`. PostgreSQL locks each operation/fingerprint row,
@@ -280,14 +286,15 @@ up and account for a lowered cap. Allowed attempts remain counted after later
 provider failures; this differs from future AI-message quotas. Policy changes
 must be consistent across processes; a longer window cannot recover pruned data.
 
-Recovery, sign-in and sign-up count before parsing or provider work, return 429 with
-`Retry-After` when capped, and fail closed with 503 on limiter failure under their
+Recovery, sign-in, sign-up and email confirmation count before parsing or provider work,
+return 429 with `Retry-After` when capped, and fail closed with 503 on limiter failure under their
 request deadlines. They require the migrated runtime database and a configured
 HMAC secret; both have been validated locally. Invalid Origins/configuration do not
 reach counting; invalid bodies/provider failures after counting retain the attempt.
-Development sign-in and sign-up display validated retry seconds, with a generic wait message
-when unavailable; retries remain manual and require fresh verification.
-An internal cleanup helper deletes expired recovery/sign-in/sign-up rows in one shared
+Development sign-in, sign-up and email confirmation display validated retry seconds,
+with a generic wait message when unavailable. Retries remain manual; sign-in/sign-up
+require fresh human verification, and confirmation clears the submitted code.
+An internal cleanup helper deletes expired rows for all four operations in one shared
 bounded batch and skips locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
 returning the count only after commit. Automatic invocation and production proxy
 verification remain pending. A local maintenance command now provides explicit
@@ -363,10 +370,11 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-Latest complete backend run: **3,763 passed including PostgreSQL**. Backend lint,
-formatting (209 files), typing (201 app/test files) and migration typing (eight files)
-passed. Frontend lint, **543 tests** (240 API + 303 UI/hook), strict TypeScript and
-production build passed, including sign-in/sign-up retry-message regressions.
+Latest complete backend run: **3,943 passed including PostgreSQL**. Backend lint,
+formatting (211 files), typing (202 app/test files) and migration typing (nine files)
+passed, including confirmation throttling and four rollback-only migration probes.
+Latest frontend validation passed lint, **574 tests** (261 API + 313 UI/hook),
+strict TypeScript and production build, including sign-in/sign-up/confirmation retry messages.
 Automated limiter coverage includes concurrency, expiry,
 transaction failures, cancellation, restricted maintenance targets and disposal.
 Local manual checks confirmed guest verification, registration/email confirmation,
