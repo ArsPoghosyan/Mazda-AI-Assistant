@@ -37,7 +37,9 @@ async def _count_attempt(
     connection: AsyncConnection,
     key_hash: bytes,
     *,
-    purpose: Literal["password_recovery", "sign_in", "sign_up", "email_confirmation"],
+    purpose: Literal[
+        "password_recovery", "sign_in", "sign_up", "email_confirmation", "password_reset"
+    ],
     max_requests: int,
     window_seconds: int,
 ) -> AuthRateLimitDecision:
@@ -244,6 +246,38 @@ async def commit_email_confirmation_attempt(
     """Return only after accounting commits; the HTTP caller supplies its deadline."""
     async with engine.begin() as connection:
         decision = await count_email_confirmation_attempt(
+            connection, key_hash, max_requests=max_requests, window_seconds=window_seconds
+        )
+    return decision
+
+
+async def count_password_reset_attempt(
+    connection: AsyncConnection,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Count reset under its row lock; the caller owns commit and deadline."""
+    return await _count_attempt(
+        connection,
+        key_hash,
+        purpose="password_reset",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
+
+
+async def commit_password_reset_attempt(
+    engine: AsyncEngine,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Return only after accounting commits; the HTTP caller supplies its deadline."""
+    async with engine.begin() as connection:
+        decision = await count_password_reset_attempt(
             connection, key_hash, max_requests=max_requests, window_seconds=window_seconds
         )
     return decision

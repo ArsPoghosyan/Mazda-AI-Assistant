@@ -4,6 +4,8 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from secrets import token_hex
 from unittest.mock import AsyncMock, Mock
 
 import httpx2
@@ -30,6 +32,9 @@ from app.account_recovery_verification import (
     AccountRecoveryVerificationRejected,
     AccountRecoveryVerificationUnavailable,
 )
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_password_reset_ip_key
+from app.auth_rate_limits import AuthRateLimitDecision, AuthRateLimitUnavailable
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.main import create_app
 
@@ -56,6 +61,7 @@ class RouteMaterial:
     engine: Mock
     provider_client: Mock
     key_cache: Mock
+    counter: AsyncMock
 
 
 @pytest.fixture
@@ -68,9 +74,12 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
             "supabase_auth_publishable_key": "sb_publishable_synthetic_test_key",
             "account_session_encryption_key": None,
             "account_password_reset_api_enabled": True,
+            "auth_rate_limit_hmac_secret": token_hex(32),
             "csrf_trusted_origins": (ORIGIN,),
         }
     )
+    counter = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    monkeypatch.setattr("app.account_password_reset_routes.commit_password_reset_attempt", counter)
     service = AsyncMock(return_value=None)
     parse = AsyncMock(wraps=read_password_reset_credentials)
     monkeypatch.setattr("app.account_password_reset_routes.reset_account_password", service)
@@ -85,9 +94,17 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
     application.state.account_key_cache = key_cache
     application.include_router(router)
 
-    with TestClient(application) as client:
+    with TestClient(application, client=("192.0.2.12", 12345)) as client:
         yield RouteMaterial(
-            client, application, settings, service, parse, engine, provider_client, key_cache
+            client,
+            application,
+            settings,
+            service,
+            parse,
+            engine,
+            provider_client,
+            key_cache,
+            counter,
         )
 
 
@@ -130,6 +147,13 @@ def test_completed_reset_returns_only_metadata_without_login(material: RouteMate
         client=material.provider_client,
         key_cache=material.key_cache,
     )
+    key = get_password_reset_ip_key(
+        Request({"type": "http", "headers": [], "client": ("192.0.2.12", 12345)}),
+        material.settings,
+    )
+    material.counter.assert_awaited_once_with(
+        material.engine, key, max_requests=10, window_seconds=600
+    )
     material.engine.begin.assert_not_called()
 
 
@@ -157,6 +181,7 @@ def test_invalid_origin_stops_before_parsing(
     assert response.json() == {"detail": "Request origin is not allowed."}
     assert_private_response(response)
     material.parse.assert_not_awaited()
+    material.counter.assert_not_awaited()
     material.service.assert_not_awaited()
 
 
@@ -170,6 +195,7 @@ def test_disabled_endpoint_stops_before_parsing(material: RouteMaterial) -> None
     assert response.json() == {"detail": UNAVAILABLE}
     assert_private_response(response)
     material.parse.assert_not_awaited()
+    material.counter.assert_not_awaited()
     material.service.assert_not_awaited()
 
 
@@ -180,10 +206,13 @@ def test_origin_is_checked_even_when_reset_is_disabled(material: RouteMaterial) 
     assert response.status_code == 403
     assert_private_response(response)
     material.parse.assert_not_awaited()
+    material.counter.assert_not_awaited()
     material.service.assert_not_awaited()
 
 
-@pytest.mark.parametrize("missing", ["engine", "client", "key-cache", "issuer", "publishable-key"])
+@pytest.mark.parametrize(
+    "missing", ["engine", "client", "key-cache", "hmac", "issuer", "publishable-key"]
+)
 def test_missing_resources_stop_before_parsing(material: RouteMaterial, missing: str) -> None:
     if missing == "engine":
         material.application.state.database_engine = None
@@ -191,6 +220,8 @@ def test_missing_resources_stop_before_parsing(material: RouteMaterial, missing:
         material.application.state.account_auth_client = None
     elif missing == "key-cache":
         material.application.state.account_key_cache = None
+    elif missing == "hmac":
+        material.settings.auth_rate_limit_hmac_secret = None
     elif missing == "issuer":
         material.settings.supabase_auth_issuer = None
     else:
@@ -204,6 +235,7 @@ def test_missing_resources_stop_before_parsing(material: RouteMaterial, missing:
     assert response.json() == {"detail": UNAVAILABLE}
     assert_private_response(response)
     material.parse.assert_not_awaited()
+    material.counter.assert_not_awaited()
     material.service.assert_not_awaited()
 
 
@@ -298,7 +330,7 @@ def test_service_failures_are_masked_without_retry_or_login(
     material.service.assert_awaited_once()
 
 
-@pytest.mark.parametrize("stage", ["body", "service"])
+@pytest.mark.parametrize("stage", ["accounting", "body", "service"])
 def test_total_deadline_interrupts_stalled_work(
     material: RouteMaterial, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
@@ -313,7 +345,14 @@ def test_total_deadline_interrupts_stalled_work(
             cancelled = True
             raise
 
-    if stage == "body":
+    if stage == "accounting":
+
+        async def stalled_counter(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+            await stall()
+            raise AssertionError("Stalled accounting unexpectedly completed.")
+
+        material.counter.side_effect = stalled_counter
+    elif stage == "body":
 
         async def stalled_stream(request: Request) -> AsyncIterator[bytes]:
             yield b" "
@@ -333,13 +372,13 @@ def test_total_deadline_interrupts_stalled_work(
     assert response.json() == {"detail": UNAVAILABLE}
     assert_private_response(response)
     assert cancelled
-    if stage == "body":
+    if stage != "service":
         material.service.assert_not_awaited()
     else:
         material.service.assert_awaited_once()
 
 
-@pytest.mark.parametrize("stage", ["body", "service"])
+@pytest.mark.parametrize("stage", ["accounting", "body", "service"])
 def test_caller_cancellation_propagates_without_a_success_response(
     material: RouteMaterial, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
@@ -356,7 +395,14 @@ def test_caller_cancellation_propagates_without_a_success_response(
                 cancelled = True
                 raise
 
-        if stage == "body":
+        if stage == "accounting":
+
+            async def stalled_counter(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+                await stall()
+                raise AssertionError("Stalled accounting unexpectedly completed.")
+
+            material.counter.side_effect = stalled_counter
+        elif stage == "body":
 
             async def stalled_stream(request: Request) -> AsyncIterator[bytes]:
                 yield b" "
@@ -388,7 +434,7 @@ def test_caller_cancellation_propagates_without_a_success_response(
         assert cancelled
 
     asyncio.run(run())
-    if stage == "body":
+    if stage != "service":
         material.service.assert_not_awaited()
     else:
         material.service.assert_awaited_once()
@@ -429,5 +475,67 @@ def test_unsupported_methods_do_not_reach_service(material: RouteMaterial, metho
     response = material.client.request(method, PATH, headers={"Origin": ORIGIN})
 
     assert response.status_code == 405
+    material.parse.assert_not_awaited()
+    material.counter.assert_not_awaited()
+    material.service.assert_not_awaited()
+
+
+def test_local_cap_blocks_parsing_and_provider(material: RouteMaterial) -> None:
+    now = datetime.now(UTC)
+    material.counter.return_value = AuthRateLimitDecision(
+        False, now, 61, now + timedelta(seconds=61)
+    )
+    response = material.client.post(
+        PATH, content=b"not-json", headers={"Origin": ORIGIN, "Content-Type": "application/json"}
+    )
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Password reset is temporarily rate limited."}
+    assert_private_response(response)
+    assert response.headers["Retry-After"] == "61"
+    assert "X-Account-Verification" not in response.headers
+    material.parse.assert_not_awaited()
+    material.service.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SQLAlchemyError("private-provider-detail"),
+        AuthRateLimitUnavailable("private-provider-detail"),
+        TimeoutError("private-provider-detail"),
+    ],
+)
+def test_accounting_failure_has_no_provider_work(
+    material: RouteMaterial, failure: Exception
+) -> None:
+    material.counter.side_effect = failure
+    response = material.client.post(PATH, json=BODY, headers={"Origin": ORIGIN})
+    assert response.status_code == 503
+    assert response.json() == {"detail": UNAVAILABLE}
+    assert_private_response(response)
+    assert "Retry-After" not in response.headers
+    material.parse.assert_not_awaited()
+    material.service.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AuthRateLimitKeyUnavailable("private-provider-detail"),
+        ClientIPUnavailable("private-provider-detail"),
+    ],
+)
+def test_fingerprint_failure_never_counts(
+    material: RouteMaterial, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    monkeypatch.setattr(
+        "app.account_password_reset_routes.get_password_reset_ip_key",
+        Mock(side_effect=failure),
+    )
+    response = material.client.post(PATH, json=BODY, headers={"Origin": ORIGIN})
+    assert response.status_code == 503
+    assert response.json() == {"detail": UNAVAILABLE}
+    assert_private_response(response)
+    material.counter.assert_not_awaited()
     material.parse.assert_not_awaited()
     material.service.assert_not_awaited()

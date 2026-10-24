@@ -88,6 +88,22 @@ test('blocks duplicate resets and stale callbacks after confirmed completion', a
 
 test.each([
   {
+    name: 'rate limit with retry seconds', error: new AccountPasswordResetRateLimitedError('61'),
+    message: 'Too many password-reset attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'rate limit with a singular second', error: new AccountPasswordResetRateLimitedError('1'),
+    message: 'Too many password-reset attempts. Please wait 1 second before trying again.',
+  },
+  {
+    name: 'rate limit with the maximum wait', error: new AccountPasswordResetRateLimitedError('86400'),
+    message: 'Too many password-reset attempts. Please wait 86400 seconds before trying again.',
+  },
+  {
+    name: 'rate limit with private retry details', error: new AccountPasswordResetRateLimitedError('private-provider-detail'),
+    message: 'Too many password-reset attempts. Please try again later.',
+  },
+  {
     name: 'rejected input/code', error: new AccountPasswordResetRejectedError(),
     message: 'Password reset was rejected. Check your email, code and new password, then try again.',
   },
@@ -116,6 +132,20 @@ test.each([
   expect(vi.mocked(resetAccountPassword).mock.calls[1]?.[0]).toEqual(fresh)
   expect(result.current.status).toBe('completed')
   expect(vi.getTimerCount()).toBe(0)
+})
+
+test('a rate-limit response never schedules another password change', async () => {
+  vi.useFakeTimers()
+  vi.mocked(resetAccountPassword).mockRejectedValueOnce(new AccountPasswordResetRateLimitedError('61'))
+  const { result } = mountHook()
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+  expect(result.current.status).toBe('error')
+  expect(result.current.message).toBe(
+    'Too many password-reset attempts. Please wait 61 seconds before trying again.',
+  )
+  expect(resetAccountPassword).toHaveBeenCalledTimes(1)
 })
 
 test('aborts at exactly 15 seconds and preserves uncertainty without retrying', async () => {

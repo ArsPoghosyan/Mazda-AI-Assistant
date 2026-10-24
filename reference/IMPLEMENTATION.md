@@ -833,7 +833,7 @@ CHECK to include email confirmation. It preserves records, keys, indexes and gra
 Downgrade validates the earlier three-purpose constraint first and refuses while
 confirmation records exist. Both guarded local databases were upgraded with no
 schema drift; private configuration files were unchanged. Shared cleanup now
-includes all four purposes under one total batch bound, retaining recovery-only APIs.
+includes every supported purpose under one total batch bound, retaining recovery-only APIs.
 Automatic cleanup scheduling and public proxy trust remain pending.
 The development confirmation UI displays validated retry seconds on local 429 responses,
 with safe fallback text when the header is unavailable or invalid. Codes clear on
@@ -1141,7 +1141,8 @@ production proxy trust and automatic cleanup invocation remain pending. A bounde
 expired-row cleanup helper is implemented and tested, as described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
-for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up and confirmation require it. It must contain exactly
+for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up, confirmation and
+password reset require it. It must contain exactly
 64 ASCII hexadecimal characters encoding a separate 32-byte key; validation
 checks format, not randomness. The example value is empty, and no real secret
 is published. Local development uses a generated key in ignored configuration,
@@ -1266,7 +1267,8 @@ no automatic schedule has been connected.
 
 The `delete_expired_auth_rate_limits` and
 `commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
-transaction, deadline and failure behavior for a shared recovery/sign-in/sign-up/confirmation batch.
+transaction, deadline and failure behavior for a shared batch across recovery,
+sign-in, sign-up, confirmation and password reset.
 The existing recovery-only APIs retain their signatures and scope. Shared
 selection is ordered by expiry, fingerprint and purpose, with one total batch
 limit across all supported purposes. Deletion matches both key columns and rechecks expiry,
@@ -1285,7 +1287,8 @@ passed. Existing database rows are protected by locks, and tests delete only
 their own synthetic keys. No schema or private configuration change was needed.
 
 The `app.auth_rate_limit_maintenance` command loads runtime `Settings` and runs
-one shared batch across recovery, sign-in, sign-up and email confirmation. It accepts `--batch-size`
+one shared batch across recovery, sign-in, sign-up, email confirmation and password
+reset. It accepts `--batch-size`
 (default 100 total rows, range 1–1,000) and
 `--timeout-seconds` (default 5, greater than zero through 30). Invalid arguments
 are rejected before loading private settings; `--help` does not connect. Direct
@@ -1353,7 +1356,8 @@ checkpoint passed 242 tests, plus lint, changed-file formatting and typing
 The SQLAlchemy `AuthRateLimit` model defines `app.auth_rate_limits`, with a
 composite operation/fingerprint key, a required timezone-aware timestamp array
 bounded to 1,000 entries, and an indexed cleanup deadline. Constraints restrict
-the operation to password recovery, sign-in, sign-up or email confirmation, require a 32-byte fingerprint, and reject
+the operation to password recovery, sign-in, sign-up, email confirmation or password
+reset, require a 32-byte fingerprint, and reject
 NULL array entries and nonstandard array shapes. Raw IP addresses and email
 addresses are not fields in this table. The model imports and compiles to
 PostgreSQL DDL; lint, formatting, typing and 112 existing regression tests passed.
@@ -1720,6 +1724,38 @@ authorized in flight or validate hosted Supabase behavior.
 
 ## Password-reset endpoint foundation
 
+The route now requires the independent fingerprint secret and a database migrated
+through `0ffc842c5360`. It commits an IP attempt before reading credentials or
+starting the reset service, using fixed purpose `password_reset` and namespace
+`askm6:auth-rate-limit:v1:password_reset:ip:`. Its configurable starting policy is
+10 attempts per rolling 600 seconds: `ACCOUNT_PASSWORD_RESET_IP_MAX_REQUESTS`
+accepts 1–1,000 and `ACCOUNT_PASSWORD_RESET_IP_WINDOW_SECONDS` accepts 60–86,400.
+Recovery-email, sign-in, sign-up and confirmation budgets remain separate.
+
+A local cap returns no-store 429 with rounded-up `Retry-After` seconds, without
+parsing or provider work; denial leaves state unchanged. An allowed attempt stays
+counted after invalid input, provider failure or later reset transaction failure.
+Origin/readiness guards precede counting, and key/limiter/database failures return
+generic 503 under the total request deadline. Accounting commits before the reset
+service runs; its later session-invalidation commit still gates a successful response.
+Provider rate limits preserve their existing 429 without inventing a retry time.
+
+Migration `0ffc842c5360` follows `6ef221a79f00` and broadens only the purpose CHECK.
+It changes no records, indexes or grants; downgrade validates the four-purpose
+constraint first and refuses while password-reset records exist. Both guarded local
+databases were upgraded without drift or private configuration changes. Shared
+cleanup covers all five purposes under one total batch cap. Automatic scheduling
+and production proxy verification remain pending. The frontend displays validated
+retry seconds for local caps, preserving generic text for provider limits without
+a known wait. Retries remain manual and never advance to successful completion.
+
+Validation passed 560 focused offline tests and 57 focused PostgreSQL cases
+(23 reset-limit HTTP/accounting cases, 28 real reset-service/HTTP cases and six
+rollback-only migration probes). The full backend suite then passed all 4,127
+tests, including PostgreSQL, with no skips. Lint, formatting (213 files), typing
+(203 app/test sources) and ten migration files passed. Provider HTTP is mocked;
+these checks send no live recovery requests or password changes.
+
 `POST /api/v1/account/password-reset` is registered but disabled by default
 (`ACCOUNT_PASSWORD_RESET_API_ENABLED=false`). It requires a trusted origin before
 parsing and accepts only email, recovery code and new password as JSON, capped
@@ -1767,6 +1803,10 @@ contains no identity, session or provider credentials and does not establish log
 
 Rejected input and rate limits have distinct error classes. Error responses and
 private transport/parser details are not exposed, and no retry time is invented.
+Only HTTP 429 reads `Retry-After`; `AccountPasswordResetRateLimitedError` accepts
+integer delta-seconds from 1 through 86,400 into `retryAfterSeconds`. Missing,
+malformed, oversized, unsupported date and out-of-range headers yield null and
+fixed fallback text. Other statuses ignore the header, and error bodies stay unread.
 Network, unavailable and malformed-response messages preserve uncertainty: the
 backend may already have changed the password. They suggest trying the new
 password before starting recovery again. No automatic retries are made.
@@ -1774,7 +1814,7 @@ An optional `AbortSignal` preserves cancellation during request/response reading
 cancellation does not guarantee that a password change was prevented or undone.
 The development-only reset hook below owns the deadline and duplicate-submit guard.
 
-All 31 focused reset-helper tests and the full 197-test API suite passed with
+All 55 focused reset-helper tests and the full 285-test API suite passed with
 mocked requests; frontend lint, TypeScript and production build passed too. Tests
 changed no real passwords and sent no emails. Separate manual local recovery/reset
 validation is recorded below; public enablement remains outstanding.
@@ -1790,15 +1830,21 @@ or expose the email, recovery code or password in the returned state.
 The hook passes an abort signal and aborts at 15 seconds, clears timers on every
 settled outcome, cancels on unmount and ignores late responses or saved callbacks
 after unmount. Only a response confirmed before the deadline reports completion.
-Known rejections and rate limits have fixed feedback. Unknown errors and timeouts
+Known rejections have fixed feedback; rate limits show validated singular/plural
+retry seconds or safe generic text. This quotes the server's wait at the failed
+attempt, with no countdown, client lock or automatic password-change request.
+The existing status region announces the message; code and password clear, and
+visibility resets. A manual retry uses newly entered credentials, and only a
+confirmed reset reveals "Continue to sign in". Unknown errors and timeouts
 preserve uncertainty and suggest trying the new password before starting recovery
 again. Cancelling a request cannot guarantee preventing or undoing a password
 change. No automatic retries or invented retry delays are added.
 
-All 14 focused hook tests passed, including StrictMode, immediate duplicates,
+Focused reset validation passed 55 API cases and 57 hook/form/recovery-dialog cases,
+including StrictMode, immediate duplicates,
 typed/private errors, explicit retry, the exact deadline, late resolve/reject,
 timer cleanup, unmount cancellation and production gating. The full frontend
-suite passed 486 tests (197 API and 289 UI/hook cases), plus lint, TypeScript and
+suite passed 608 tests (285 API and 323 UI/hook cases), plus lint, TypeScript and
 production build. Provider calls are mocked; these tests changed no real passwords.
 The hooks are connected to the development forms below.
 

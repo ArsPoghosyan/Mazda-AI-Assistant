@@ -16,9 +16,17 @@ export class AccountPasswordResetRejectedError extends Error {
 }
 
 export class AccountPasswordResetRateLimitedError extends Error {
-  constructor() {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
     super('Too many password-reset attempts. Please try again later.')
     this.name = 'AccountPasswordResetRateLimitedError'
+
+    // Accept only bounded delta-seconds; provider limits may omit the header.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
   }
 }
 
@@ -60,7 +68,7 @@ export async function resetAccountPassword(
     }
 
     if (response.status === 429) {
-      throw new AccountPasswordResetRateLimitedError()
+      throw new AccountPasswordResetRateLimitedError(response.headers.get('Retry-After'))
     }
 
     if (response.status === 503) {

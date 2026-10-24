@@ -223,8 +223,9 @@ class AuthRateLimit(Base):
     __tablename__ = "auth_rate_limits"
     __table_args__ = (
         CheckConstraint(
-            "purpose IN ('password_recovery', 'sign_in', 'sign_up', 'email_confirmation')",
-            name="purpose_supported_with_confirmation",
+            "purpose IN ('password_recovery', 'sign_in', 'sign_up', 'email_confirmation', "
+            "'password_reset')",
+            name="purpose_supported_with_password_reset",
         ),
         CheckConstraint(
             "octet_length(key_hash) = 32",

@@ -26,10 +26,16 @@ class LimiterMigration(Protocol):
     def downgrade(self) -> None: ...
 
 
-@pytest.fixture(params=["sign_up", "email_confirmation"])
+@pytest.fixture(params=["sign_up", "email_confirmation", "password_reset"])
 def migration_case(request: pytest.FixtureRequest) -> tuple[str, str, str]:
     if request.param == "sign_up":
         return ("bcae4df0f56a", "sign_up", "ck_auth_rate_limits_purpose_supported")
+    if request.param == "password_reset":
+        return (
+            "0ffc842c5360",
+            "password_reset",
+            "ck_auth_rate_limits_purpose_supported_with_confirmation",
+        )
     return (
         "6ef221a79f00",
         "email_confirmation",
@@ -63,16 +69,20 @@ def migrator_connection(
             ) == ("askm6_test", "askm6_migrator")
             # Exercise each historical migration at its own revision, without
             # changing the recorded head or committing any DDL/data changes.
-            if migration_case[0] == "bcae4df0f56a":
-                if (
-                    connection.scalar(
-                        select(AuthRateLimit.key_hash)
-                        .where(AuthRateLimit.purpose == "email_confirmation")
-                        .limit(1)
-                    )
-                    is not None
-                ):
-                    pytest.skip("Existing confirmation state prevents the historical schema probe.")
+            allowed_purposes = ["password_recovery", "sign_in", "sign_up"]
+            if migration_case[0] != "bcae4df0f56a":
+                allowed_purposes.append("email_confirmation")
+            if migration_case[0] == "0ffc842c5360":
+                allowed_purposes.append("password_reset")
+            if (
+                connection.scalar(
+                    select(AuthRateLimit.key_hash)
+                    .where(AuthRateLimit.purpose.not_in(allowed_purposes))
+                    .limit(1)
+                )
+                is not None
+            ):
+                pytest.skip("Existing newer-purpose state prevents the historical schema probe.")
             with Operations.context(MigrationContext.configure(connection)):
                 for revision in scripts().walk_revisions(base=migration_case[0], head="head"):
                     if revision.revision == migration_case[0]:
@@ -155,8 +165,10 @@ def test_safe_transition_preserves_old_records_grants_and_indexes(
         pytest.skip("Existing new-purpose state prevents the transactional round-trip probe.")
     key = token_bytes(32)
     old_purposes: tuple[str, ...] = ("password_recovery", "sign_in")
-    if new_purpose == "email_confirmation":
+    if new_purpose in {"email_confirmation", "password_reset"}:
         old_purposes = (*old_purposes, "sign_up")
+    if new_purpose == "password_reset":
+        old_purposes = (*old_purposes, "email_confirmation")
     for purpose in old_purposes:
         connection.execute(
             insert(AuthRateLimit).values(

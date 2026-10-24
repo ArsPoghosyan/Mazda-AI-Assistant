@@ -16,6 +16,72 @@ const completion = { status: 'completed' }
 const failureMessage = 'Password reset could not be confirmed. Try signing in with your new password before starting recovery again.'
 const unexpectedMessage = 'Unexpected password-reset response. Try signing in with your new password before starting recovery again.'
 
+for (const seconds of [1, 61, 600, 86_400]) {
+  test(`reset reads a ${seconds}-second limit without reading the body or retrying`, async (t) => {
+    const response = new Response('private non-JSON password detail', {
+      status: 429,
+      headers: {
+        'Retry-After': String(seconds),
+        'X-Account-Verification': 'required',
+      },
+    })
+    const read = t.mock.method(response, 'json', async () => {
+      throw new Error('Error body must not be read')
+    })
+    const request = t.mock.method(globalThis, 'fetch', async () => response)
+    await assert.rejects(resetAccountPassword(credentials), (error) => {
+      assert.ok(error instanceof AccountPasswordResetRateLimitedError)
+      assert.equal(error.name, 'AccountPasswordResetRateLimitedError')
+      assert.equal(error.retryAfterSeconds, seconds)
+      assert.equal(error.message, 'Too many password-reset attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+    assert.equal(request.mock.callCount(), 1)
+    assert.equal(read.mock.callCount(), 0)
+    assert.equal(response.bodyUsed, false)
+  })
+}
+
+for (const [label, header] of [
+  ['missing', null], ['empty', ''], ['zero', '0'], ['negative', '-1'],
+  ['fraction', '1.5'], ['exponent', '1e3'], ['too large', '86401'],
+  ['oversized', '9'.repeat(1000)], ['date', 'Wed, 21 Oct 2030 07:28:00 GMT'],
+  ['private details', 'private-retry-detail'], ['nonfinite', 'Infinity'],
+  ['not a number', 'NaN'], ['multiple values', '10, 20'],
+]) {
+  test(`reset uses safe fallback for ${label} retry information`, async (t) => {
+    const response = new Response('private-password-detail', {
+      status: 429,
+      headers: header === null ? {} : { 'Retry-After': header },
+    })
+    const request = t.mock.method(globalThis, 'fetch', async () => response)
+    await assert.rejects(resetAccountPassword(credentials), (error) => {
+      assert.ok(error instanceof AccountPasswordResetRateLimitedError)
+      assert.equal(error.retryAfterSeconds, null)
+      assert.equal(error.message, 'Too many password-reset attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+    assert.equal(request.mock.callCount(), 1)
+    assert.equal(response.bodyUsed, false)
+  })
+}
+
+for (const status of [400, 401, 403, 413, 415, 500, 503]) {
+  test(`reset ignores Retry-After on HTTP ${status}`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response('private-password-detail', {
+      status, headers: { 'Retry-After': '61' },
+    }))
+    await assert.rejects(resetAccountPassword(credentials), (error) => {
+      assert.equal(error instanceof AccountPasswordResetRateLimitedError, false)
+      assert.equal(error.retryAfterSeconds, undefined)
+      assert.equal(error.message.includes('private-password-detail'), false)
+      return true
+    })
+  })
+}
+
 test('submits reset once, preserves credentials and returns only completion metadata', async (t) => {
   const controller = new AbortController()
   const request = t.mock.method(globalThis, 'fetch', async (url, options) => {

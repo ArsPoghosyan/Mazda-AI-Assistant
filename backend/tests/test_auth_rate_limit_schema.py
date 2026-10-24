@@ -67,8 +67,9 @@ def test_cleanup_deadline_preserves_timezone_information(ddl: str) -> None:
     ("name", "expression"),
     [
         (
-            "purpose_supported_with_confirmation",
-            "purpose IN ('password_recovery', 'sign_in', 'sign_up', 'email_confirmation')",
+            "purpose_supported_with_password_reset",
+            "purpose IN ('password_recovery', 'sign_in', 'sign_up', 'email_confirmation', "
+            "'password_reset')",
         ),
         ("key_hash_length", "octet_length(key_hash) = 32"),
         ("request_times_size", "cardinality(request_times) <= 1000"),

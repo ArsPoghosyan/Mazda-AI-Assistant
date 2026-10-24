@@ -13,7 +13,10 @@ async def _delete_expired_limits(
     connection: AsyncConnection,
     *,
     batch_size: int,
-    purposes: tuple[Literal["password_recovery", "sign_in", "sign_up", "email_confirmation"], ...],
+    purposes: tuple[
+        Literal["password_recovery", "sign_in", "sign_up", "email_confirmation", "password_reset"],
+        ...,
+    ],
 ) -> int:
     """Delete one batch; the caller owns commit, rollback and its deadline.
 
@@ -73,7 +76,13 @@ async def delete_expired_auth_rate_limits(
     return await _delete_expired_limits(
         connection,
         batch_size=batch_size,
-        purposes=("password_recovery", "sign_in", "sign_up", "email_confirmation"),
+        purposes=(
+            "password_recovery",
+            "sign_in",
+            "sign_up",
+            "email_confirmation",
+            "password_reset",
+        ),
     )
 
 

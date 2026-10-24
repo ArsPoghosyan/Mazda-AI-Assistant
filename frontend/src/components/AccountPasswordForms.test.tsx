@@ -240,6 +240,10 @@ test('reset preserves leading zeros/password bytes, clears secrets and waits for
 test.each([
   [new AccountPasswordResetRejectedError(), 'Password reset was rejected. Check your email, code and new password, then try again.'],
   [new AccountPasswordResetRateLimitedError(), 'Too many password-reset attempts. Please try again later.'],
+  [new AccountPasswordResetRateLimitedError('1'), 'Too many password-reset attempts. Please wait 1 second before trying again.'],
+  [new AccountPasswordResetRateLimitedError('61'), 'Too many password-reset attempts. Please wait 61 seconds before trying again.'],
+  [new AccountPasswordResetRateLimitedError('86400'), 'Too many password-reset attempts. Please wait 86400 seconds before trying again.'],
+  [new AccountPasswordResetRateLimitedError('private-provider-detail'), 'Too many password-reset attempts. Please try again later.'],
   [new Error('private-provider-detail'), 'Password reset could not be confirmed. Try signing in with your new password before starting recovery again.'],
 ])('reset failure clears sensitive fields and offers deliberate recovery choices', async (error, message) => {
   vi.mocked(resetAccountPassword).mockRejectedValueOnce(error)
@@ -248,6 +252,8 @@ test.each([
   await user.type(password, passwordValue)
   await user.click(screen.getByRole('button', { name: 'Reset password' }))
   await screen.findByText(message)
+  expect(screen.getByRole('status').textContent).toBe(message)
+  expect(screen.getByRole('status').getAttribute('aria-atomic')).toBe('true')
   expect(code.value).toBe('')
   expect(password.value).toBe('')
   expect(document.activeElement).toBe(code)
@@ -256,6 +262,38 @@ test.each([
   await user.click(screen.getByRole('button', { name: 'Request another code' }))
   expect(onRecover).toHaveBeenCalledOnce()
   expect(resetAccountPassword).toHaveBeenCalledTimes(1)
+})
+
+test('reset rate limits allow only a manual retry with newly entered credentials', async () => {
+  vi.mocked(resetAccountPassword)
+    .mockRejectedValueOnce(new AccountPasswordResetRateLimitedError('61'))
+    .mockResolvedValueOnce({ status: 'completed' })
+  const { user, code, password, onSignIn, onRecover } = mountReset()
+  await user.type(code, '001234')
+  await user.type(password, passwordValue)
+  await user.click(screen.getByRole('button', { name: 'Show password' }))
+  await user.click(screen.getByRole('button', { name: 'Reset password' }))
+  await screen.findByText('Too many password-reset attempts. Please wait 61 seconds before trying again.')
+  expect(code.value).toBe('')
+  expect(password.value).toBe('')
+  expect(password.type).toBe('password')
+  expect(screen.queryByRole('button', { name: 'Continue to sign in' })).toBeNull()
+  expect(resetAccountPassword).toHaveBeenCalledTimes(1)
+  expect(onSignIn).not.toHaveBeenCalled()
+  expect(onRecover).not.toHaveBeenCalled()
+
+  fireEvent.change(code, { target: { value: '000987' } })
+  fireEvent.change(password, { target: { value: 'fresh-synthetic-password' } })
+  await user.click(screen.getByRole('button', { name: 'Reset password' }))
+  await screen.findByText('Password reset completed. Sign in with your new password.')
+  expect(resetAccountPassword).toHaveBeenCalledTimes(2)
+  expect(vi.mocked(resetAccountPassword).mock.calls[1]?.[0]).toEqual({
+    email: emailValue, code: '000987', new_password: 'fresh-synthetic-password',
+  })
+  expect(code.value).toBe('')
+  expect(password.value).toBe('')
+  expect(onSignIn).not.toHaveBeenCalled()
+  expect(onRecover).not.toHaveBeenCalled()
 })
 
 test('reset refuses an empty new password', () => {

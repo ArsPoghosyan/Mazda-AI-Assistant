@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from secrets import token_urlsafe
+from secrets import token_hex, token_urlsafe
 from uuid import UUID, uuid4
 
 import httpx2
@@ -13,6 +13,7 @@ import jwt
 import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import ec
+from fastapi import Request
 from jwt.algorithms import ECAlgorithm
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
@@ -48,9 +49,10 @@ from app.account_sessions import CreatedAccountSession
 from app.account_sign_in_service import sign_in_account
 from app.account_token_encryption import AccountTokenCipher
 from app.account_tokens import InvalidAccountToken
+from app.auth_rate_limit_keys import get_password_reset_ip_key
 from app.config import Settings
 from app.main import create_app
-from app.models import AccountSession, GuestSession, UserProfile
+from app.models import AccountSession, AuthRateLimit, GuestSession, UserProfile
 
 pytestmark = pytest.mark.integration
 
@@ -162,8 +164,15 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
             "supabase_auth_publishable_key": PUBLISHABLE_KEY,
             "account_session_encryption_key": encryption_key,
             "account_password_reset_api_enabled": True,
+            "auth_rate_limit_hmac_secret": token_hex(32),
             "csrf_trusted_origins": ("https://app.example.test",),
         }
+    )
+    limiter_key = get_password_reset_ip_key(
+        Request({"type": "http", "headers": [], "client": ("192.0.2.12", 12345)}), settings
+    )
+    limiter_statement = select(AuthRateLimit.request_times).where(
+        AuthRateLimit.purpose == "password_reset", AuthRateLimit.key_hash == limiter_key
     )
     owners = [user_id, other_user_id]
     sessions_statement = (
@@ -191,6 +200,10 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
     def provider(request: httpx2.Request) -> httpx2.Response:
         nonlocal password_changed, recovery_session_absent
         url = str(request.url)
+        if boundary == "http":
+            # The separate attempt must be visible before any provider request.
+            with integration_engine.connect() as observer:
+                assert len(observer.execute(limiter_statement).scalar_one()) == 1
 
         if request.method == "GET" and url == ISSUER + "/user":
             assert password_changed
@@ -436,6 +449,8 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
                     refresh_events.append("begin")
                 elif scenario == "approved-sign-in" and asyncio.current_task() is pending_sign_in:
                     sign_in_events.append("begin")
+                elif boundary == "http" and not events:
+                    connection.info["reset_test_limiter"] = True
                 else:
                     events.append("begin")
                 connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
@@ -454,6 +469,11 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
             @event.listens_for(engine.sync_engine, "commit")
             def inspect_commit(connection: Connection) -> None:
                 nonlocal refresh_written_rows
+                if connection.info.pop("reset_test_limiter", False):
+                    assert not password_changed and events == []
+                    assert len(connection.execute(limiter_statement).scalar_one()) == 1
+                    assert connection.execute(sessions_statement).all() == before_sessions
+                    return
                 if checking_deleted_session:
                     assert connection.execute(owner_statement).all() == []
                     return
@@ -593,7 +613,9 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
                         application.state.account_key_cache = cache
 
                         async with httpx2.AsyncClient(
-                            transport=httpx2.ASGITransport(app=application),
+                            transport=httpx2.ASGITransport(
+                                app=application, client=("192.0.2.12", 12345)
+                            ),
                             base_url="https://app.example.test",
                             trust_env=False,
                         ) as browser:
@@ -874,6 +896,12 @@ def test_reset_preserves_ownership_and_provider_database_boundaries(
     finally:
         # The guarded fixture restricts this to local askm6_test; remove only test-owned rows.
         with integration_engine.begin() as connection:
+            connection.execute(
+                delete(AuthRateLimit).where(
+                    AuthRateLimit.purpose == "password_reset",
+                    AuthRateLimit.key_hash == limiter_key,
+                )
+            )
             connection.execute(delete(AccountSession).where(AccountSession.user_id.in_(owners)))
             connection.execute(delete(GuestSession).where(GuestSession.id == guest_id))
             connection.execute(delete(UserProfile).where(UserProfile.id.in_(owners)))

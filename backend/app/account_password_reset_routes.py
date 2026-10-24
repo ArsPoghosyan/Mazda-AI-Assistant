@@ -26,6 +26,9 @@ from app.account_recovery_verification import (
     AccountRecoveryVerificationRejected,
     AccountRecoveryVerificationUnavailable,
 )
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_password_reset_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable, commit_password_reset_attempt
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 
@@ -73,6 +76,7 @@ async def reset_password(request: Request, response: Response) -> AccountPasswor
 
     if (
         engine is None
+        or settings.auth_rate_limit_hmac_secret is None
         or client is None
         or key_cache is None
         or settings.supabase_auth_issuer is None
@@ -82,6 +86,23 @@ async def reset_password(request: Request, response: Response) -> AccountPasswor
 
     try:
         async with asyncio.timeout(settings.account_password_reset_timeout_seconds):
+            key_hash = get_password_reset_ip_key(request, settings)
+            decision = await commit_password_reset_attempt(
+                engine,
+                key_hash,
+                max_requests=settings.account_password_reset_ip_max_requests,
+                window_seconds=settings.account_password_reset_ip_window_seconds,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Password reset is temporarily rate limited.",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Retry-After": str(decision.retry_after_seconds),
+                    },
+                )
+
             credentials = await read_password_reset_credentials(request)
             await reset_account_password(
                 engine,
@@ -109,6 +130,9 @@ async def reset_password(request: Request, response: Response) -> AccountPasswor
         AccountRecoveryVerificationUnavailable,
         AccountPasswordUpdateUnavailable,
         AccountRecoverySessionCleanupUnavailable,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
         SQLAlchemyError,
         TimeoutError,
     ):

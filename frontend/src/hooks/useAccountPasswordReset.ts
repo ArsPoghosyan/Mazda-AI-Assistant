@@ -82,7 +82,10 @@ export function useAccountPasswordReset() {
       } else if (error instanceof AccountPasswordResetRejectedError) {
         message = 'Password reset was rejected. Check your email, code and new password, then try again.'
       } else if (error instanceof AccountPasswordResetRateLimitedError) {
-        message = 'Too many password-reset attempts. Please try again later.'
+        const seconds = error.retryAfterSeconds
+        message = seconds === null
+          ? error.message
+          : `Too many password-reset attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`
       }
 
       setState({ status: 'error', message })

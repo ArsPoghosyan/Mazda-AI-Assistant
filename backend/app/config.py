@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     )
     auth_rate_limit_hmac_secret: SecretStr | None = None
     account_password_reset_api_enabled: bool = False
+    account_password_reset_ip_max_requests: int = Field(default=10, ge=1, le=1000)
+    account_password_reset_ip_window_seconds: int = Field(default=600, ge=60, le=86400)
     account_password_reset_timeout_seconds: int = Field(
         default=15,
         ge=1,

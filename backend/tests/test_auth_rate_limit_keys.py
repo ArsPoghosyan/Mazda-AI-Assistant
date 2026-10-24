@@ -14,6 +14,7 @@ from app.auth_rate_limit_keys import (
     AuthRateLimitKeyUnavailable,
     get_email_confirmation_ip_key,
     get_password_recovery_ip_key,
+    get_password_reset_ip_key,
     get_sign_in_ip_key,
     get_sign_up_ip_key,
 )
@@ -34,8 +35,9 @@ type IPKeyFunction = Callable[[Request, Settings], bytes]
         get_sign_in_ip_key,
         get_sign_up_ip_key,
         get_email_confirmation_ip_key,
+        get_password_reset_ip_key,
     ],
-    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation"],
+    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation", "password-reset"],
 )
 def key_function(request: pytest.FixtureRequest) -> IPKeyFunction:
     return cast(IPKeyFunction, request.param)
@@ -82,8 +84,12 @@ def make_request(
             get_email_confirmation_ip_key,
             "72b9edefd6197d30e7718c372e72c74cba639422b62b9cecc52d37a361c1c7d2",
         ),
+        (
+            get_password_reset_ip_key,
+            "2da4b382ad0b950ff6b56764c722a2f2f8a430f65cb3cc3ee55cb0e83554787e",
+        ),
     ],
-    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation"],
+    ids=["password-recovery", "sign-in", "sign-up", "email-confirmation", "password-reset"],
 )
 def test_versioned_fingerprint_matches_fixed_hmac_reference(
     function: IPKeyFunction, expected: str
@@ -254,6 +260,7 @@ def test_all_auth_operations_have_independent_fingerprints(settings: Settings) -
             get_sign_in_ip_key,
             get_sign_up_ip_key,
             get_email_confirmation_ip_key,
+            get_password_reset_ip_key,
         )
     }
-    assert len(keys) == 4
+    assert len(keys) == 5

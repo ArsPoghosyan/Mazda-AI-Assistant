@@ -11,6 +11,7 @@ _PASSWORD_RECOVERY_IP_CONTEXT = b"askm6:auth-rate-limit:v1:password_recovery:ip:
 _SIGN_IN_IP_CONTEXT = b"askm6:auth-rate-limit:v1:sign_in:ip:"
 _SIGN_UP_IP_CONTEXT = b"askm6:auth-rate-limit:v1:sign_up:ip:"
 _EMAIL_CONFIRMATION_IP_CONTEXT = b"askm6:auth-rate-limit:v1:email_confirmation:ip:"
+_PASSWORD_RESET_IP_CONTEXT = b"askm6:auth-rate-limit:v1:password_reset:ip:"
 
 
 class AuthRateLimitKeyUnavailable(RuntimeError):
@@ -66,3 +67,8 @@ def get_sign_up_ip_key(request: Request, settings: Settings) -> bytes:
 def get_email_confirmation_ip_key(request: Request, settings: Settings) -> bytes:
     """Return a confirmation fingerprint independent of other auth operations."""
     return _get_ip_key(request, settings, context=_EMAIL_CONFIRMATION_IP_CONTEXT)
+
+
+def get_password_reset_ip_key(request: Request, settings: Settings) -> bytes:
+    """Return a password-reset fingerprint independent of email recovery requests."""
+    return _get_ip_key(request, settings, context=_PASSWORD_RESET_IP_CONTEXT)
