@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=2, ge=1, le=5)
     db_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
     db_readiness_timeout_seconds: int = Field(default=8, ge=1, le=30)
+    auth_rate_limit_cleanup_enabled: bool = False
+    auth_rate_limit_cleanup_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    auth_rate_limit_cleanup_batch_size: int = Field(default=100, ge=1, le=1000)
+    auth_rate_limit_cleanup_timeout_seconds: int = Field(default=5, ge=1, le=30)
     guest_session_inactivity_days: int = Field(default=30, ge=1)
     guest_cookie_secure: bool = True
     csrf_trusted_origins: tuple[str, ...] = ()

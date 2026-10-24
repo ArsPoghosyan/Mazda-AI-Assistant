@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from secrets import token_bytes
@@ -20,6 +20,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app import auth_rate_limit_cleanup as cleanup
 from app import auth_rate_limit_maintenance as maintenance
+from app import auth_rate_limit_scheduler as scheduler
 from app import auth_rate_limits as limiter
 from app.config import Settings
 from app.models import AuthRateLimit
@@ -38,6 +39,16 @@ class CleanupCase:
 
 
 type CaseFactory = Callable[[], AbstractAsyncContextManager[CleanupCase]]
+
+
+@pytest.fixture(autouse=True)
+def isolate_session_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This module protects limiter records only; combined scheduling has its own
+    # guarded fixtures in test_session_cleanup_db.
+    for mode in ("guest", "account"):
+        monkeypatch.setattr(
+            scheduler, f"commit_expired_{mode}_session_cleanup", AsyncMock(return_value=0)
+        )
 
 
 @pytest.fixture(
@@ -924,3 +935,118 @@ def test_maintenance_deletes_guest_with_other_expired_purposes(
             assert await all_state(case) == active
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_scheduled_cleanup_commits_one_batch_per_tick_and_skips_locked_rows(
+    case_factory: CaseFactory, monkeypatch: pytest.MonkeyPatch, locked: bool
+) -> None:
+    # This module isolates limiter records; OAuth scheduling is covered with
+    # both real tables in test_account_oauth_cleanup_db instead.
+    monkeypatch.setattr(
+        scheduler, "commit_expired_oauth_login_attempt_cleanup", AsyncMock(return_value=0)
+    )
+
+    async def check() -> None:
+        async with case_factory() as case:
+            now = datetime.now(UTC)
+            first_key, second_key, active_key = await seed(
+                case, [now - timedelta(hours=2), now - timedelta(hours=1), now + timedelta(hours=1)]
+            )
+            before = await state(case)
+            waiting: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+
+            async def wait(interval: int) -> None:
+                assert interval == 60
+                gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                waiting.put_nowait(gate)
+                await gate
+
+            monkeypatch.setattr(scheduler, "sleep", wait)
+            settings = Settings.model_construct(
+                auth_rate_limit_cleanup_enabled=True,
+                auth_rate_limit_cleanup_interval_seconds=60,
+                auth_rate_limit_cleanup_batch_size=1,
+                auth_rate_limit_cleanup_timeout_seconds=3,
+            )
+            async with AsyncExitStack() as locks:
+                if locked:
+                    holder = await locks.enter_async_context(case.engine.begin())
+                    await holder.execute(
+                        select(AuthRateLimit)
+                        .where(
+                            AuthRateLimit.purpose == case.purpose,
+                            AuthRateLimit.key_hash == first_key,
+                        )
+                        .with_for_update()
+                    )
+                async with scheduler.auth_rate_limit_cleanup_lifespan(case.engine, settings):
+                    first = await asyncio.wait_for(waiting.get(), 3)
+                    assert await state(case) == before  # No startup deletion.
+                    first.set_result(None)
+                    second = await asyncio.wait_for(waiting.get(), 3)
+                    removed = second_key if locked else first_key
+                    assert await state(case) == {
+                        key: value for key, value in before.items() if key != removed
+                    }
+                    await locks.aclose()
+                    second.set_result(None)
+                    third = await asyncio.wait_for(waiting.get(), 3)
+                    assert await state(case) == {active_key: before[active_key]}
+                assert third.cancelled()
+            assert await state(case) == {active_key: before[active_key]}
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_scheduled_failed_commit_rolls_back_and_waits_before_retrying(
+    case_factory: CaseFactory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        scheduler, "commit_expired_oauth_login_attempt_cleanup", AsyncMock(return_value=0)
+    )
+
+    async def check() -> None:
+        async with case_factory() as case:
+            await seed(case, [datetime.now(UTC) - timedelta(hours=1)])
+            before = await state(case)
+            waiting: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+            commits = 0
+
+            async def wait(interval: int) -> None:
+                gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                waiting.put_nowait(gate)
+                await gate
+
+            def fail_first_commit(connection: Connection) -> None:
+                nonlocal commits
+                commits += 1
+                if commits == 1:
+                    connection.exec_driver_sql("SELECT 1 / 0")
+
+            monkeypatch.setattr(scheduler, "sleep", wait)
+            settings = Settings.model_construct(
+                auth_rate_limit_cleanup_enabled=True,
+                auth_rate_limit_cleanup_interval_seconds=60,
+                auth_rate_limit_cleanup_batch_size=1,
+                auth_rate_limit_cleanup_timeout_seconds=3,
+            )
+            event.listen(case.engine.sync_engine, "commit", fail_first_commit)
+            try:
+                async with scheduler.auth_rate_limit_cleanup_lifespan(case.engine, settings):
+                    (await asyncio.wait_for(waiting.get(), 3)).set_result(None)
+                    second = await asyncio.wait_for(waiting.get(), 3)
+                    assert await state(case) == before
+                    assert commits == 1
+                    second.set_result(None)
+                    await asyncio.wait_for(waiting.get(), 3)
+                    assert await state(case) == {}
+                    assert commits == 2
+            finally:
+                event.remove(case.engine.sync_engine, "commit", fail_first_commit)
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+    assert [record.getMessage() for record in caplog.records] == [
+        "Authentication limiter cleanup failed; waiting for the next interval."
+    ]
+    assert all(record.exc_info is None for record in caplog.records)

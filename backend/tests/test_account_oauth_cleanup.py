@@ -1,0 +1,223 @@
+"""Pending-attempt cleanup validation, completion and cancellation boundaries."""
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+from app import account_oauth_cleanup as cleanup
+
+
+@pytest.mark.parametrize("batch", [0, -1, 1001, True, False, 1.5, "100", None])
+def test_invalid_batch_is_rejected_before_connection_access(batch: object) -> None:
+    connection = MagicMock(spec=AsyncConnection)
+    with pytest.raises(ValueError, match="OAuth cleanup batch size"):
+        asyncio.run(
+            cleanup.delete_expired_oauth_login_attempts(connection, batch_size=cast(int, batch))
+        )
+    connection.in_transaction.assert_not_called()
+    connection.execute.assert_not_called()
+
+    engine = MagicMock(spec=AsyncEngine)
+    with pytest.raises(ValueError, match="OAuth cleanup batch size"):
+        asyncio.run(
+            cleanup.commit_expired_oauth_login_attempt_cleanup(
+                engine, batch_size=cast(int, batch), timeout_seconds=5
+            )
+        )
+    engine.begin.assert_not_called()
+
+
+def test_caller_transaction_is_required() -> None:
+    connection = MagicMock(spec=AsyncConnection)
+    connection.in_transaction.return_value = False
+    with pytest.raises(RuntimeError, match="requires an active transaction"):
+        asyncio.run(cleanup.delete_expired_oauth_login_attempts(connection))
+    connection.execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        0,
+        -1,
+        30.001,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,
+        False,
+        "5",
+        None,
+        10**400,
+    ],
+)
+def test_invalid_timeout_is_rejected_before_acquisition(timeout: object) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    with pytest.raises(ValueError, match="OAuth cleanup timeout"):
+        asyncio.run(
+            cleanup.commit_expired_oauth_login_attempt_cleanup(
+                engine, timeout_seconds=cast(float, timeout)
+            )
+        )
+    engine.begin.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["none", "acquire", "delete", "commit", "cancel"])
+def test_only_committed_counts_escape_and_failures_never_retry(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    events: list[str] = []
+    connection = MagicMock(spec=AsyncConnection)
+    engine = MagicMock(spec=AsyncEngine)
+
+    @asynccontextmanager
+    async def transaction() -> AsyncIterator[AsyncConnection]:
+        events.append("acquire")
+        if failure == "acquire":
+            raise SQLAlchemyError("synthetic-private")
+        try:
+            try:
+                yield connection
+            except BaseException:
+                events.append("rollback")
+                raise
+            else:
+                events.append("commit")
+                if failure == "commit":
+                    raise SQLAlchemyError("synthetic-private")
+        finally:
+            events.append("release")
+
+    async def delete(*args: object, **kwargs: object) -> int:
+        events.append("delete")
+        if failure == "delete":
+            raise SQLAlchemyError("synthetic-private")
+        if failure == "cancel":
+            raise asyncio.CancelledError
+        return 7
+
+    deleter = AsyncMock(side_effect=delete)
+    monkeypatch.setattr(cleanup, "delete_expired_oauth_login_attempts", deleter)
+    engine.begin.return_value = transaction()
+
+    async def run() -> int:
+        count = await cleanup.commit_expired_oauth_login_attempt_cleanup(
+            engine, timeout_seconds=30, batch_size=1000
+        )
+        events.append("return")
+        return count
+
+    if failure == "none":
+        assert asyncio.run(run()) == 7
+        assert events == ["acquire", "delete", "commit", "release", "return"]
+    else:
+        error = asyncio.CancelledError if failure == "cancel" else SQLAlchemyError
+        with pytest.raises(error):
+            asyncio.run(run())
+        assert "return" not in events
+        if failure == "acquire":
+            assert events == ["acquire"]
+        elif failure == "commit":
+            assert events == ["acquire", "delete", "commit", "release"]
+        else:
+            assert events == ["acquire", "delete", "rollback", "release"]
+    engine.begin.assert_called_once()
+    if failure == "acquire":
+        deleter.assert_not_awaited()
+    else:
+        deleter.assert_awaited_once_with(connection, batch_size=1000)
+
+
+@pytest.mark.parametrize("phase", ["acquire", "delete", "commit", "release"])
+def test_deadline_includes_every_awaited_phase(monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
+    async def check() -> None:
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        engine, connection = MagicMock(spec=AsyncEngine), MagicMock(spec=AsyncConnection)
+
+        async def block() -> None:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        @asynccontextmanager
+        async def transaction() -> AsyncIterator[AsyncConnection]:
+            if phase == "acquire":
+                await block()
+            try:
+                yield connection
+                if phase == "commit":
+                    await block()
+            finally:
+                if phase == "release":
+                    await block()
+
+        async def delete(*args: object, **kwargs: object) -> int:
+            if phase == "delete":
+                await block()
+            return 1
+
+        engine.begin.return_value = transaction()
+        deleter = AsyncMock(side_effect=delete)
+        monkeypatch.setattr(cleanup, "delete_expired_oauth_login_attempts", deleter)
+        async with asyncio.timeout(2):
+            with pytest.raises(TimeoutError):
+                await cleanup.commit_expired_oauth_login_attempt_cleanup(
+                    engine, timeout_seconds=0.03
+                )
+        assert entered.is_set() and cancelled.is_set()
+        assert deleter.await_count == (0 if phase == "acquire" else 1)
+
+    asyncio.run(check())
+
+
+def test_external_cancellation_propagates_and_releases_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        engine, connection = MagicMock(spec=AsyncEngine), MagicMock(spec=AsyncConnection)
+        entered = asyncio.Event()
+        events: list[str] = []
+
+        @asynccontextmanager
+        async def transaction() -> AsyncIterator[AsyncConnection]:
+            try:
+                yield connection
+            except asyncio.CancelledError:
+                events.append("rollback")
+                raise
+            finally:
+                events.append("release")
+
+        async def delete(*args: object, **kwargs: object) -> int:
+            entered.set()
+            await asyncio.Event().wait()
+            return 1
+
+        engine.begin.return_value = transaction()
+        monkeypatch.setattr(
+            cleanup, "delete_expired_oauth_login_attempts", AsyncMock(side_effect=delete)
+        )
+        task = asyncio.create_task(
+            cleanup.commit_expired_oauth_login_attempt_cleanup(engine, timeout_seconds=30)
+        )
+        try:
+            async with asyncio.timeout(2):
+                await entered.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert events == ["rollback", "release"]
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(check())

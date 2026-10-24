@@ -24,11 +24,11 @@ development; public guest/account access remains gated.
 | Google | Browser-bound PKCE flow for new and returning accounts, IP limits with manual retry guidance, verified callback, encrypted session storage |
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
-| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling and shared cleanup; automatic cleanup and public deployment pending |
+| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup; public deployment pending |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
-AI calls, message quotas, automated guest-history/session/attempt cleanup and public
+AI calls, message quotas, automated guest-history cleanup and public
 authentication deployment. Expired guest sessions are rejected before refresh.
 Planned embeddings use OpenAI `text-embedding-3-small` (1536 dimensions); answer
 generation is planned with Groq.
@@ -311,8 +311,17 @@ sign-in/sign-up require fresh human verification, and confirmation/reset clear t
 submitted secrets. Provider limits without a known wait stay generic.
 An internal cleanup helper deletes expired rows for all seven operations in one shared
 bounded batch and skips locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
-returning the count only after commit. Automatic invocation and production proxy
-verification remain pending. A local maintenance command now provides explicit
+returning the count only after commit. Optional FastAPI-owned scheduling is
+disabled by default. With `AUTH_RATE_LIMIT_CLEANUP_ENABLED=true` and a configured
+runtime engine, it waits 300 seconds before each pass: one batch each for limiters,
+[Google attempts](reference/IMPLEMENTATION.md#expired-pending-attempt-cleanup),
+then [guest and account sessions](reference/IMPLEMENTATION.md#expired-local-session-cleanup).
+Each operation has its own 100-row cap, five-second deadline and transaction;
+failure does not block later operations. Passes never overlap within a process;
+shutdown stops cleanup before closing the engine. Active records and account
+profiles remain intact. Guest-history retention integration and production proxy
+verification remain pending. See the [scheduling settings](reference/IMPLEMENTATION.md#automatic-authentication-cleanup).
+A local maintenance command also provides explicit
 one-batch execution with target/role checks; see the
 [command instructions](reference/IMPLEMENTATION.md#backend-password-recovery-requests).
 Ignoring headers in a helper is insufficient if
@@ -380,16 +389,17 @@ synthetic credentials, bootstraps restricted roles, applies all migrations, chec
 schema drift, runs integration tests, and type-checks migrations. Local PostgreSQL
 tests still require explicit configuration.
 
-Disposable Linux database validation passed **376 integration tests**, with no
+Earlier disposable Linux database validation passed **376 integration tests**, with no
 schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-Latest complete backend run: **4,127 passed including PostgreSQL**. Backend lint,
-formatting (213 files), typing (203 app/test files) and migration typing (ten files)
-passed, including reset throttling and six rollback-only migration probes.
-Latest frontend validation passed lint, **608 tests** (285 API + 323 UI/hook),
-strict TypeScript and production build, including sign-in/sign-up/confirmation/reset retry messages.
+Latest complete backend run: **4,732 passed including PostgreSQL**. Backend lint,
+formatting (229 files), typing (217 app/test files) and migration typing (12 files)
+passed. Cleanup coverage includes expiry, concurrency, deadlines, rollback and
+shutdown. Earlier reset-throttling validation included six rollback-only migration probes.
+Previously recorded frontend validation passed lint, **685 tests** (331 API + 354 UI/hook),
+strict TypeScript and production build, including Google and email-flow retry messages.
 Automated limiter coverage includes concurrency, expiry,
 transaction failures, cancellation, restricted maintenance targets and disposal.
 Local manual checks confirmed guest verification, registration/email confirmation,
@@ -401,8 +411,8 @@ failure, concurrency, every identity-linking case or public-deployment behavior.
 
 ## Remaining work and detailed reference
 
-Public authentication still needs route-integrated abuse controls, cleanup,
-provider/linking/method-assurance and partial-session failure review, production
+Public authentication still needs deployment validation of abuse controls and
+cleanup, provider/linking/method-assurance and partial-session failure review, production
 proxy/cookie/redirect integration, and security/privacy/provider data-flow review.
 Conversation ownership, vehicle context, persistence, message quotas, retrieval
 and AI functionality remain separate unfinished work. Turnstile does not prove

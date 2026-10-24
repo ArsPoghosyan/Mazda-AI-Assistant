@@ -324,8 +324,8 @@ Migration `aefd9866f033` follows `0ffc842c5360`, broadening only the supported-p
 CHECK. It preserves records, indexes and restricted grants; downgrade refuses
 while guest-creation rows exist. Both guarded local databases are upgraded with
 no schema drift or private environment changes. Shared expired-row cleanup now
-includes guest creation under one total batch cap; automatic invocation remains
-pending. The development frontend shows dedicated guest retry guidance for 429.
+includes guest creation under one total batch cap; optional application-owned
+scheduling is described below. The development frontend shows dedicated guest retry guidance for 429.
 
 This checkpoint passed all 4,316 backend tests, including guarded PostgreSQL
 integration tests; Ruff, formatting and application/migration type checks passed.
@@ -695,8 +695,9 @@ time. Access-token and absolute-boundary cases cover the exact deadline and one
 second afterward; at the absolute boundary, inactivity expiry coincides with the
 absolute deadline as required by the schema.
 
-Provider-session revocation, automated session cleanup, and encryption-key rotation
-are not implemented. HTTP sign-in/session creation, application-session sign-out,
+Provider-session revocation and encryption-key rotation are not implemented.
+Local expiry cleanup is available through the optional housekeeping task below.
+HTTP sign-in/session creation, application-session sign-out,
 and cookie-authenticated session checking are available through the separate
 default-disabled endpoints described below.
 Provider identity and expiry require JWT verification in addition to ciphertext
@@ -894,7 +895,7 @@ Downgrade validates the earlier three-purpose constraint first and refuses while
 confirmation records exist. Both guarded local databases were upgraded with no
 schema drift; private configuration files were unchanged. Shared cleanup now
 includes every supported purpose under one total batch bound, retaining recovery-only APIs.
-Automatic cleanup scheduling and public proxy trust remain pending.
+Optional limiter cleanup scheduling is implemented; public proxy trust remains pending.
 The development confirmation UI displays validated retry seconds on local 429 responses,
 with safe fallback text when the header is unavailable or invalid. Codes clear on
 submission and retries remain manual; rate limiting never advances to sign-in.
@@ -1197,8 +1198,8 @@ Recovery IP-limit settings configure the application-side limiter:
 `ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS` defaults to 600 (range 60–86,400).
 These are configurable starting values for an exact rolling window. Settings
 validation alone does not enforce limits. The recovery route now uses the limiter;
-production proxy trust and automatic cleanup invocation remain pending. A bounded
-expired-row cleanup helper is implemented and tested, as described below.
+production proxy trust remains pending. Optional scheduling invokes the bounded,
+tested expired-row cleanup helper described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
 for the IP-fingerprint helpers; enabled recovery, sign-in, sign-up, confirmation,
@@ -1323,7 +1324,7 @@ successful transaction exit. Database errors, timeouts and external cancellation
 propagate without automatic retries. Cancellation is cooperative: unwinding may
 take longer than the nominal deadline, and an interruption during commit cannot
 establish that no changes committed. The local command below is an explicit caller;
-no automatic schedule has been connected.
+the optional application scheduler is described next.
 
 The `delete_expired_auth_rate_limits` and
 `commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
@@ -1346,9 +1347,127 @@ cleanup, maintenance, counter and recovery-route regression run passed 367 tests
 passed. Existing database rows are protected by locks, and tests delete only
 their own synthetic keys. No schema or private configuration change was needed.
 
+### Expired local-session cleanup
+
+`app.session_cleanup` provides separate guest/account batch helpers:
+
+| Operation | Caller-owned transaction | Own transaction and required deadline |
+| --- | --- | --- |
+| Guest sessions | `delete_expired_guest_sessions` | `commit_expired_guest_session_cleanup` |
+| Account sessions | `delete_expired_account_sessions` | `commit_expired_account_session_cleanup` |
+
+Each operation accepts an integer batch size of 1–1,000, default 100. Guests are
+eligible when `expires_at <= statement_timestamp()`; accounts when either idle
+or absolute expiry reaches that inclusive boundary. Access-token expiry alone
+does not qualify an otherwise active account session, which can still refresh.
+The stored guest expiry already reflects the configured inactivity period;
+cleanup introduces no new retention duration.
+
+Selection orders by expiry/ID (idle expiry for accounts, capped by absolute expiry
+in the schema), locks at most the batch size with `FOR UPDATE SKIP LOCKED`, and
+rechecks eligibility during deletion. Existing activity locks are skipped; a
+committed activity extension survives subsequent passes. A lookup waiting behind
+committed deletion finds no session and cannot revive it. Concurrent cleaners can
+take disjoint batches. Existing runtime grants permit locking; no new privileges,
+migrations or provider calls are required.
+
+Low-level helpers require an active transaction and a caller-owned deadline;
+their counts are provisional. Commit wrappers require a deadline greater than
+zero through 30 seconds covering acquisition, deletion, commit and release, and
+return only after successful completion. Errors/cancellation propagate without
+retries or draining. Connection cleanup may outlast the nominal deadline; a
+timeout during commit does not prove rollback.
+
+Deletion affects local session credentials only: account profiles and the other
+session table are preserved. No ciphertext is decrypted, provider session revoked,
+browser cookie changed or user history deleted. Neither session table currently
+has dependent tables; a database regression check requires retention/ownership
+review when such tables are introduced. Guest-history deletion/transfer must be
+defined before applying this mechanism to future guest-owned chats or vehicles.
+
+The optional [housekeeping task](#automatic-authentication-cleanup) invokes these
+committed helpers after limiter and Google-attempt cleanup. There is no public
+cleanup endpoint; enablement remains off by default. Website data/private
+configuration and existing expiry settings are unchanged.
+
+Validation passed 193 cleanup-related cases, including 60 new offline boundary
+cases and 26 new PostgreSQL cases for both modes. Coverage includes strict limits,
+acquisition/commit/release deadlines, cancellation/rollback, exact expiry and fresh
+statement time, default batch caps/order, disjoint concurrent batches, active-row
+and cross-mode preservation, profile retention, and cleanup/activity lock races.
+Tests use only tracked synthetic records on the guarded local database; existing
+sessions are protected with locks, and no live provider operations are required.
+An additional 47 existing guest refresh/concurrency and account loading/activity/
+authentication regressions passed. Lint, formatting, 217 application/test sources
+and 12 migration sources passed checks; no schema or grant changes were made.
+
+### Automatic authentication cleanup
+
+FastAPI owns an optional asynchronous task through its existing lifespan. It uses
+the runtime database engine to run one batch each for expired limiter records,
+Google/sign-in pending attempts, guest sessions and account sessions, in that
+order, serially. The existing setting names are retained; enablement covers all
+four operations. No new service, dependency, schema or public endpoint is introduced.
+
+| Setting | Default / bounds |
+| --- | --- |
+| `AUTH_RATE_LIMIT_CLEANUP_ENABLED` | `false`; explicitly opt in |
+| `AUTH_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS` | `300`; 60–86,400 |
+| `AUTH_RATE_LIMIT_CLEANUP_BATCH_SIZE` | `100`; 1–1,000 per table; limiter batch spans all seven purposes |
+| `AUTH_RATE_LIMIT_CLEANUP_TIMEOUT_SECONDS` | `5`; 1–30 per operation, including transaction completion |
+
+No task starts without both enablement and a configured engine. The first pass
+waits one interval; each completed or failed pass waits another interval before
+the next four batches. Each operation owns a separate transaction and deadline;
+failure leaves later operations and the next pass available. The default total
+is at most 400 selected/deleted rows per pass and four five-second deadlines;
+connection cleanup may outlast any deadline.
+A full batch never triggers immediate draining, and passes do not
+overlap within the same task. Each application process owns its own task;
+limiter and local-session cleanup use `SKIP LOCKED`, while attempt cleanup uses
+ordinary DELETE locks with its own deadline to preserve immutable runtime grants. A contended
+attempt batch may time out and wait until the next interval. Only expired rows
+are eligible; active windows/attempts/sessions and user profiles
+are outside this scheduler's scope.
+
+Failures leave authentication available and emit a fixed warning without
+exception text or tracebacks. Success logs only the aggregate nonzero deleted
+count. Cancellation propagates so shutdown can stop and await the task before
+disposing the database engine; driver cleanup may outlast the nominal deadline.
+No connection is held while waiting for the next interval.
+
+This is best-effort housekeeping while FastAPI is running, not a guaranteed
+retention deadline or a server keep-alive. Stopped/sleeping processes do no work,
+and restart begins a new initial wait. Private runtime configuration was not
+changed or enabled by this implementation. Guest history is not implemented;
+review retention, transfer and foreign keys before adding guest-owned records.
+
+The initial limiter-only scheduling slice passed 63 focused configuration/lifecycle cases, all 3,564 offline
+backend tests, and 24 scheduled-cleanup PostgreSQL cases across all supported
+purposes. The database cases protect pre-existing rows, verify committed batch
+caps and skipped locks, and inject failed commits to confirm rollback and
+interval-delayed recovery. Ruff, formatting and application/migration typing
+passed. No migrations, private configuration changes or live provider calls were
+needed; the scheduler remains opt-in.
+
+The four-operation scheduling slice passed 297 focused cleanup regressions plus
+22 health/readiness/client-lifecycle checks. Eight new real PostgreSQL scenarios
+verify one-row caps for all four tables, preserved active rows/profiles, skipped
+session locks, and independent guest/account commit-failure or timeout recovery
+on the next interval. Application tests cover shutdown during all four operations
+and continued health after a failure; failed operations log only fixed warnings.
+Lint, formatting, application/migration typing, private-file/secret checks and
+documentation links passed. No private configuration or website data was changed.
+
+Final accumulated-checkpoint validation passed all 4,732 backend tests, including
+guarded PostgreSQL integration tests, with no skips. Ruff, all 229 Python files'
+formatting, 217 application/test sources and 12 migration sources passed checks.
+The 16-file diff and staged privacy boundaries were reviewed; no blocking
+implementation findings, schema changes or expanded grants were required.
+
 The `app.auth_rate_limit_maintenance` command loads runtime `Settings` and runs
-one shared batch across recovery, sign-in, sign-up, email confirmation and password
-reset. It accepts `--batch-size`
+one shared batch across recovery, sign-in, sign-up, email confirmation, password
+reset, guest creation and Google initiation. It accepts `--batch-size`
 (default 100 total rows, range 1–1,000) and
 `--timeout-seconds` (default 5, greater than zero through 30). Invalid arguments
 are rejected before loading private settings; `--help` does not connect. Direct
@@ -1463,8 +1582,8 @@ evaluating the shape constraint. Integration tests roll back their fixture data;
 they do not establish concurrent limiter behavior. Backend lint, changed-file
 formatting, typing (185 source files) and migration typing (six files) passed.
 Enabled recovery needs the migration in its own runtime database plus a configured
-HMAC secret. Both are prepared for the local website. Automatic cleanup scheduling
-remains absent; cleanup executes only through an explicit helper/command call.
+HMAC secret. Both are prepared for the local website. Expired limiter cleanup can
+run through the optional application scheduler or an explicit helper/command call.
 Configuration tests cover defaults, inclusive bounds, invalid values, environment
 overrides and precedence, empty values, and unchanged endpoint feature flags.
 
@@ -1804,8 +1923,8 @@ Migration `0ffc842c5360` follows `6ef221a79f00` and broadens only the purpose CH
 It changes no records, indexes or grants; downgrade validates the four-purpose
 constraint first and refuses while password-reset records exist. Both guarded local
 databases were upgraded without drift or private configuration changes. Shared
-cleanup covers all five purposes under one total batch cap. Automatic scheduling
-and production proxy verification remain pending. The frontend displays validated
+cleanup now covers all seven purposes under one total batch cap, with optional
+application scheduling. Production proxy verification remains pending. The frontend displays validated
 retry seconds for local caps, preserving generic text for provider limits without
 a known wait. Retries remain manual and never advance to successful completion.
 
@@ -2048,7 +2167,7 @@ CHECK value; existing records, indexes and restricted grants are preserved.
 Downgrade refuses while Google-start rows exist instead of deleting them. Both
 guarded local databases are upgraded without drift or private configuration
 changes. Shared bounded cleanup includes all seven purposes under one total cap;
-automatic invocation remains pending. The development frontend displays validated
+optional application scheduling now handles these expired limiter rows. The development frontend displays validated
 retry guidance for Google-start 429 responses, with explicit manual retries.
 
 The short-lived binding cookie is HttpOnly, SameSite=Lax, host-only and root-path;
@@ -2085,6 +2204,59 @@ requests, redirects or retained proof/credential submissions after a denial.
 Switching to email still requires a fresh password and verification proof. The
 existing timeout, cancellation, duplicate-start and production gates are retained.
 
+### Expired pending-attempt cleanup
+
+`app.account_oauth_cleanup.delete_expired_oauth_login_attempts` deletes one batch
+of expired pending Google/sign-in attempts in a caller-owned transaction. It
+requires an active transaction and an integer batch size of 1–1,000 (default 100).
+Selection uses database statement time, inclusive expiry and stable ordering by
+expiry/ID. The delete rechecks eligibility, returns IDs only internally and
+reports a provisional count. Active attempts and all session/profile/limiter
+tables are outside its scope. No cookie, token decryption or provider call is involved.
+
+`commit_expired_oauth_login_attempt_cleanup` owns a transaction and a required
+deadline greater than zero through 30 seconds, including acquisition, deletion,
+commit and release. It returns the count only after successful completion;
+errors and cancellation propagate without retries. An interrupted commit may
+already have taken effect, so a timeout does not prove rollback.
+
+The runtime role keeps its existing SELECT/INSERT/DELETE grants and no column
+UPDATE privilege. PostgreSQL also requires UPDATE privilege for
+[SELECT row-locking clauses](https://www.postgresql.org/docs/17/sql-select.html).
+This helper therefore uses DELETE's ordinary locking with a caller-owned deadline.
+It may wait for a contended row; timeout cancels and rolls back that batch so a
+caller can leave cleanup for another pass. Concurrent cleaners can select the
+same candidates; a waiter can return zero after the first cleaner commits.
+There is no automatic draining or retry, and no extra grants or migration.
+
+PostgreSQL regression tests cover active-attempt consumption, batch/default
+bounds, exact expiry, fresh statement time, overlapping cleaners, lock deadlines,
+commit failure, cancellation, and replacement/consumption races. They use the
+guarded test database and restricted runtime role with synthetic records. Tests
+decline to run if pre-existing attempts would prevent isolated cleanup, and
+teardown deletes only their own tracked IDs.
+
+Validation passed 43 focused cleanup cases (30 offline and 13 PostgreSQL), followed
+by 732 Google/OAuth/scheduler regressions with no skips. Ruff, all 226 Python files'
+formatting, 214 application/test sources and 12 migration sources passed checks.
+No schema, grant, private configuration or frontend changes were needed.
+
+The optional [housekeeping task](#automatic-authentication-cleanup) now invokes this
+committed helper after each limiter batch, with a separate deadline and failure
+boundary. Cancellation stops the task even during a database operation and is
+awaited before engine disposal. Enablement remains off by default; private
+website configuration is unchanged.
+
+The scheduling integration passed 397 cleanup regressions, including restricted
+PostgreSQL tests, plus 22 health/readiness/client-lifecycle checks. Coverage verifies
+serial operation, independent failures/deadlines, no immediate draining/retries,
+shutdown during either operation, and real committed one-row batches in both
+tables. A locked attempt times out without undoing limiter cleanup; releasing
+the lock allows cleanup on the next scheduled pass while active rows survive.
+Existing limiter rows are protected with locks; OAuth tests require an unused
+test table and remove only their own tracked records. Lint, formatting and
+application/migration typing passed. No migrations or new grants were needed.
+
 ### Validation and remaining release work
 
 The Google-initiation limiter checkpoint passed all 4,499 backend tests, including
@@ -2117,8 +2289,8 @@ rejected callback subpaths. Hosting, reverse-proxy, custom access/error logging
 need separate review. The current Cloudflare Pages function proxies only health;
 production auth proxy/cookie/redirect handling is not implemented.
 
-Before public Google enablement, complete expired-attempt
-cleanup, broader provider/linking checks, upstream provider-method assurance,
+Before public Google enablement, verify cleanup scheduling in the target
+environment, complete broader provider/linking checks, upstream provider-method assurance,
 partial-provider-session failure/cleanup review, and deployment/security/privacy
 review. Cancellation cannot guarantee delivery of a cookie-clearing response to
 a disconnected browser. Local success does not establish production readiness.

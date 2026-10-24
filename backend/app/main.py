@@ -21,6 +21,7 @@ from app.account_session_routes import router as account_session_router
 from app.account_sign_in_routes import router as account_sign_in_router
 from app.account_sign_out_routes import router as account_sign_out_router
 from app.account_sign_up_routes import router as account_sign_up_router
+from app.auth_rate_limit_scheduler import auth_rate_limit_cleanup_lifespan
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
 from app.guest_routes import router as guest_router
@@ -98,6 +99,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
 
                     application.state.turnstile_client = turnstile_client
+
+                await resources.enter_async_context(
+                    auth_rate_limit_cleanup_lifespan(engine, configuration)
+                )
 
                 yield
         finally:
