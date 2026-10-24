@@ -13,6 +13,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -209,6 +210,52 @@ class OAuthLoginAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+
+class AuthRateLimit(Base):
+    """Recent authentication attempts keyed by a protected client fingerprint."""
+
+    __tablename__ = "auth_rate_limits"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose = 'password_recovery'",
+            name="purpose_password_recovery_only",
+        ),
+        CheckConstraint(
+            "octet_length(key_hash) = 32",
+            name="key_hash_length",
+        ),
+        CheckConstraint(
+            "cardinality(request_times) <= 1000",
+            name="request_times_size",
+        ),
+        CheckConstraint(
+            "cardinality(request_times) = 0 OR "
+            "(array_ndims(request_times) = 1 AND "
+            "array_lower(request_times, 1) = 1)",
+            name="request_times_shape",
+        ),
+        CheckConstraint(
+            "array_position(request_times, NULL) IS NULL",
+            name="request_times_no_nulls",
+        ),
+    )
+
+    purpose: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+    )
+    key_hash: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        primary_key=True,
+    )
+    request_times: Mapped[list[datetime]] = mapped_column(
+        ARRAY(DateTime(timezone=True), dimensions=1),
     )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -78,6 +78,17 @@ class Settings(BaseSettings):
         ge=1,
         le=30,
     )
+    account_password_recovery_ip_max_requests: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+    )
+    account_password_recovery_ip_window_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=86400,
+    )
+    auth_rate_limit_hmac_secret: SecretStr | None = None
     account_password_reset_api_enabled: bool = False
     account_password_reset_timeout_seconds: int = Field(
         default=15,
@@ -202,6 +213,25 @@ class Settings(BaseSettings):
             Fernet(raw_key.encode("ascii"))
         except ValueError:
             raise ValueError(error_message) from None
+
+        return value
+
+    @field_validator("auth_rate_limit_hmac_secret")
+    @classmethod
+    def validate_auth_rate_limit_hmac_secret(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+
+        raw_secret = value.get_secret_value()
+        if len(raw_secret) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in raw_secret
+        ):
+            raise ValueError(
+                "Authentication rate-limit secret must contain exactly 64 hexadecimal characters."
+            )
 
         return value
 

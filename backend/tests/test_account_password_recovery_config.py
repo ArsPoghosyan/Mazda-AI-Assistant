@@ -16,6 +16,9 @@ def clear_password_recovery_environment(monkeypatch: pytest.MonkeyPatch) -> None
     for name in (
         "ACCOUNT_PASSWORD_RECOVERY_API_ENABLED",
         "ACCOUNT_PASSWORD_RECOVERY_TIMEOUT_SECONDS",
+        "ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS",
+        "ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS",
+        "ACCOUNT_PASSWORD_RESET_API_ENABLED",
         "ACCOUNT_SIGN_IN_API_ENABLED",
         "ACCOUNT_SIGN_OUT_API_ENABLED",
         "ACCOUNT_SESSION_API_ENABLED",
@@ -30,6 +33,8 @@ def test_password_recovery_defaults_are_disabled_and_bounded() -> None:
 
     assert settings.account_password_recovery_api_enabled is False
     assert settings.account_password_recovery_timeout_seconds == 15
+    assert settings.account_password_recovery_ip_max_requests == 10
+    assert settings.account_password_recovery_ip_window_seconds == 600
 
 
 @pytest.mark.parametrize("timeout", [1, 15, 30])
@@ -59,11 +64,15 @@ def test_password_recovery_settings_load_from_environment(
 ) -> None:
     monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_API_ENABLED", "true")
     monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "25")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "900")
 
     settings = IsolatedPasswordRecoverySettings()
 
     assert settings.account_password_recovery_api_enabled is True
     assert settings.account_password_recovery_timeout_seconds == 20
+    assert settings.account_password_recovery_ip_max_requests == 25
+    assert settings.account_password_recovery_ip_window_seconds == 900
 
 
 def test_enabling_recovery_does_not_enable_other_account_endpoints() -> None:
@@ -84,8 +93,98 @@ def test_empty_environment_values_keep_safe_recovery_defaults(
 ) -> None:
     monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_API_ENABLED", "")
     monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_TIMEOUT_SECONDS", "")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "")
 
     settings = IsolatedPasswordRecoverySettings()
 
     assert settings.account_password_recovery_api_enabled is False
     assert settings.account_password_recovery_timeout_seconds == 15
+    assert settings.account_password_recovery_ip_max_requests == 10
+    assert settings.account_password_recovery_ip_window_seconds == 600
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_password_recovery_ip_max_requests", 1),
+        ("account_password_recovery_ip_max_requests", 10),
+        ("account_password_recovery_ip_max_requests", 1000),
+        ("account_password_recovery_ip_window_seconds", 60),
+        ("account_password_recovery_ip_window_seconds", 600),
+        ("account_password_recovery_ip_window_seconds", 86400),
+    ],
+)
+def test_valid_recovery_ip_limits_are_accepted(field: str, value: int) -> None:
+    settings = IsolatedPasswordRecoverySettings.model_validate({field: value})
+
+    assert getattr(settings, field) == value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_password_recovery_ip_max_requests", 0),
+        ("account_password_recovery_ip_max_requests", -1),
+        ("account_password_recovery_ip_max_requests", 1001),
+        ("account_password_recovery_ip_max_requests", 1.5),
+        ("account_password_recovery_ip_max_requests", "invalid"),
+        ("account_password_recovery_ip_window_seconds", 59),
+        ("account_password_recovery_ip_window_seconds", -1),
+        ("account_password_recovery_ip_window_seconds", 86401),
+        ("account_password_recovery_ip_window_seconds", 60.5),
+        ("account_password_recovery_ip_window_seconds", "invalid"),
+    ],
+)
+def test_invalid_recovery_ip_limits_are_rejected(field: str, value: object) -> None:
+    with pytest.raises(ValidationError) as caught:
+        IsolatedPasswordRecoverySettings.model_validate({field: value})
+
+    assert any(error["loc"] == (field,) for error in caught.value.errors())
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "0"),
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "1001"),
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "1.5"),
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "59"),
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "86401"),
+        ("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "invalid"),
+    ],
+)
+def test_invalid_environment_ip_limits_fail_settings_validation(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError) as caught:
+        IsolatedPasswordRecoverySettings()
+
+    assert any(error["loc"] == (name.lower(),) for error in caught.value.errors())
+
+
+def test_explicit_ip_limits_override_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "25")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "900")
+
+    settings = IsolatedPasswordRecoverySettings(
+        account_password_recovery_ip_max_requests=5,
+        account_password_recovery_ip_window_seconds=300,
+    )
+
+    assert settings.account_password_recovery_ip_max_requests == 5
+    assert settings.account_password_recovery_ip_window_seconds == 300
+
+
+def test_configuring_ip_limits_does_not_enable_recovery_or_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_MAX_REQUESTS", "25")
+    monkeypatch.setenv("ACCOUNT_PASSWORD_RECOVERY_IP_WINDOW_SECONDS", "900")
+
+    settings = IsolatedPasswordRecoverySettings()
+
+    assert settings.account_password_recovery_api_enabled is False
+    assert settings.account_password_reset_api_enabled is False
