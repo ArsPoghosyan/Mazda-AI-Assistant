@@ -22,6 +22,21 @@ export class AccountSignUpVerificationRequiredError extends Error {
   }
 }
 
+export class AccountSignUpRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null
+
+  constructor(retryAfter: string | null = null) {
+    super('Too many sign-up attempts. Please try again later.')
+    this.name = 'AccountSignUpRateLimitedError'
+
+    // Accept only the backend's bounded delta-seconds, never raw header text.
+    const seconds = retryAfter !== null && /^[0-9]{1,5}$/.test(retryAfter)
+      ? Number(retryAfter)
+      : NaN
+    this.retryAfterSeconds = seconds >= 1 && seconds <= 86_400 ? seconds : null
+  }
+}
+
 export async function signUpAccount(
   credentials: AccountSignUpCredentials,
   signal?: AbortSignal,
@@ -55,6 +70,10 @@ export async function signUpAccount(
   }
 
   if (response.status !== 202) {
+    if (response.status === 429) {
+      throw new AccountSignUpRateLimitedError(response.headers.get('Retry-After'))
+    }
+
     if (response.status === 400) {
       throw new AccountSignUpRejectedError()
     }

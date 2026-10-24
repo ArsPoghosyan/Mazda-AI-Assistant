@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
   AccountEmailConfirmationRejectedError,
+  AccountSignUpRateLimitedError,
   AccountSignUpVerificationRequiredError,
   confirmAccountEmail,
   signUpAccount,
@@ -99,6 +100,83 @@ test('recognizes explicit registration CAPTCHA rejection', async (t) => {
   await assert.rejects(signUpAccount(credentials), (error) => {
     assert.ok(error instanceof AccountSignUpVerificationRequiredError)
     assert.equal(error.message, 'Please complete human verification.')
+    return true
+  })
+})
+
+for (const seconds of [1, 61, 600, 86_400]) {
+  test(`registration reads a ${seconds}-second limit without reading the body or retrying`, async (t) => {
+    const response = new Response('private non-JSON provider response', {
+      status: 429,
+      headers: {
+        'Retry-After': String(seconds),
+        'X-Account-Verification': 'required',
+      },
+    })
+    const read = t.mock.method(response, 'json', async () => {
+      throw new Error('Error response body must not be read')
+    })
+    const request = t.mock.method(globalThis, 'fetch', async () => response)
+
+    await assert.rejects(signUpAccount(credentials), (error) => {
+      assert.ok(error instanceof AccountSignUpRateLimitedError)
+      assert.equal(error.name, 'AccountSignUpRateLimitedError')
+      assert.equal(error.retryAfterSeconds, seconds)
+      assert.equal(error.message, 'Too many sign-up attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+    assert.equal(request.mock.callCount(), 1)
+    assert.equal(read.mock.callCount(), 0)
+  })
+}
+
+for (const [label, header] of [
+  ['missing', null], ['empty', ''], ['zero', '0'], ['negative', '-1'],
+  ['fraction', '1.5'], ['exponent', '1e3'], ['too large', '86401'],
+  ['oversized', '9'.repeat(1000)], ['date', 'Wed, 21 Oct 2030 07:28:00 GMT'],
+  ['private details', 'private-retry-detail'], ['nonfinite', 'Infinity'],
+  ['not a number', 'NaN'], ['multiple values', '10, 20'],
+]) {
+  test(`registration uses safe fallback for ${label} retry information`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response('private-body', {
+      status: 429,
+      headers: header === null ? {} : { 'Retry-After': header },
+    }))
+    await assert.rejects(signUpAccount(credentials), (error) => {
+      assert.ok(error instanceof AccountSignUpRateLimitedError)
+      assert.equal(error.retryAfterSeconds, null)
+      assert.equal(error.message, 'Too many sign-up attempts. Please try again later.')
+      assert.equal(error.cause, undefined)
+      return true
+    })
+  })
+}
+
+for (const status of [400, 403, 503, 500]) {
+  test(`registration ignores Retry-After on HTTP ${status}`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => new Response('private-body', {
+      status,
+      headers: { 'Retry-After': '61' },
+    }))
+    await assert.rejects(signUpAccount(credentials), (error) => {
+      assert.equal(error instanceof AccountSignUpRateLimitedError, false)
+      assert.equal(error.retryAfterSeconds, undefined)
+      assert.equal(error.message.includes('private-body'), false)
+      return true
+    })
+  })
+}
+
+test('confirmation keeps its own error contract for a 429 with Retry-After', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('private-body', {
+    status: 429,
+    headers: { 'Retry-After': '61' },
+  }))
+  await assert.rejects(confirmAccountEmail({ email: credentials.email, code: '123456' }), (error) => {
+    assert.equal(error instanceof AccountSignUpRateLimitedError, false)
+    assert.equal(error.retryAfterSeconds, undefined)
+    assert.equal(error.message, 'Email confirmation could not be completed. Please try again.')
     return true
   })
 })

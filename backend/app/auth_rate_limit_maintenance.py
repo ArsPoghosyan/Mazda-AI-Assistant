@@ -86,7 +86,7 @@ async def cleanup_local(
 
 def main() -> int:
     parser = _MaintenanceArgumentParser(
-        description="Delete one shared batch of expired local recovery/sign-in limiter rows."
+        description="Delete one batch of expired local recovery/sign-in/sign-up limiter rows."
     )
     parser.add_argument(
         "--batch-size", type=int, default=100, help="Rows per batch: 1–1000 (default 100)."

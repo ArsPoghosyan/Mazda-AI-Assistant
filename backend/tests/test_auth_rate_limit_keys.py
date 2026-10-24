@@ -14,6 +14,7 @@ from app.auth_rate_limit_keys import (
     AuthRateLimitKeyUnavailable,
     get_password_recovery_ip_key,
     get_sign_in_ip_key,
+    get_sign_up_ip_key,
 )
 from app.client_ip import ClientIPUnavailable
 from app.config import Settings
@@ -27,8 +28,8 @@ type IPKeyFunction = Callable[[Request, Settings], bytes]
 
 
 @pytest.fixture(
-    params=[get_password_recovery_ip_key, get_sign_in_ip_key],
-    ids=["password-recovery", "sign-in"],
+    params=[get_password_recovery_ip_key, get_sign_in_ip_key, get_sign_up_ip_key],
+    ids=["password-recovery", "sign-in", "sign-up"],
 )
 def key_function(request: pytest.FixtureRequest) -> IPKeyFunction:
     return cast(IPKeyFunction, request.param)
@@ -70,8 +71,9 @@ def make_request(
             get_sign_in_ip_key,
             "7fbbd354fc2c094906e306f401d871671063854622d7350d1b95bcfd2859aef4",
         ),
+        (get_sign_up_ip_key, "4463cd425efc8e868de301d289792479886b7a88ec8c00e49044ded7875e89ff"),
     ],
-    ids=["password-recovery", "sign-in"],
+    ids=["password-recovery", "sign-in", "sign-up"],
 )
 def test_versioned_fingerprint_matches_fixed_hmac_reference(
     function: IPKeyFunction, expected: str
@@ -231,3 +233,12 @@ def test_request_path_cannot_choose_fingerprint_namespace(
     sign_in_request.scope["path"] = "/api/v1/account/sign-in"
 
     assert key_function(recovery_request, settings) == key_function(sign_in_request, settings)
+
+
+def test_all_auth_operations_have_independent_fingerprints(settings: Settings) -> None:
+    request = make_request()
+    keys = {
+        function(request, settings)
+        for function in (get_password_recovery_ip_key, get_sign_in_ip_key, get_sign_up_ip_key)
+    }
+    assert len(keys) == 3

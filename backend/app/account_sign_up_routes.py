@@ -6,6 +6,8 @@ from typing import Literal, cast
 import httpx2
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_sign_up import (
     AccountSignUpCaptchaRejected,
@@ -14,6 +16,9 @@ from app.account_sign_up import (
     sign_up_with_password,
 )
 from app.account_sign_up_requests import read_sign_up_credentials
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_up_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable, commit_sign_up_attempt
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 
@@ -45,6 +50,7 @@ def account_sign_up_unavailable() -> HTTPException:
         403: {"description": "Request origin or human verification was rejected."},
         413: {"description": "Registration request is too large."},
         415: {"description": "Registration requires a JSON request."},
+        429: {"description": "Registration requests are temporarily rate limited."},
         503: {"description": "Account registration is temporarily unavailable."},
     },
 )
@@ -62,9 +68,12 @@ async def sign_up(
         httpx2.AsyncClient | None,
         request.app.state.account_auth_client,
     )
+    engine = cast(AsyncEngine | None, request.app.state.database_engine)
 
     if (
         client is None
+        or engine is None
+        or settings.auth_rate_limit_hmac_secret is None
         or settings.supabase_auth_issuer is None
         or settings.supabase_auth_publishable_key is None
     ):
@@ -72,6 +81,23 @@ async def sign_up(
 
     try:
         async with asyncio.timeout(settings.account_sign_up_timeout_seconds):
+            key_hash = get_sign_up_ip_key(request, settings)
+            decision = await commit_sign_up_attempt(
+                engine,
+                key_hash,
+                max_requests=settings.account_sign_up_ip_max_requests,
+                window_seconds=settings.account_sign_up_ip_window_seconds,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Account registration is temporarily rate limited.",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Retry-After": str(decision.retry_after_seconds),
+                    },
+                )
+
             credentials = await read_sign_up_credentials(request)
 
             await sign_up_with_password(
@@ -96,7 +122,14 @@ async def sign_up(
             detail="Registration was rejected.",
             headers={"Cache-Control": "no-store"},
         ) from None
-    except (AccountSignUpUnavailable, TimeoutError):
+    except (
+        AccountSignUpUnavailable,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
+        SQLAlchemyError,
+        TimeoutError,
+    ):
         raise account_sign_up_unavailable() from None
 
     response.headers["Cache-Control"] = "no-store"

@@ -4,6 +4,8 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from secrets import token_hex
 from unittest.mock import AsyncMock, Mock
 
 import httpx2
@@ -11,8 +13,13 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic_settings import SettingsConfigDict
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_sign_up_requests import read_sign_up_credentials
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_up_ip_key
+from app.auth_rate_limits import AuthRateLimitDecision, AuthRateLimitUnavailable
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.main import create_app
 
@@ -59,6 +66,7 @@ class RouteMaterial:
     provider: AsyncMock
     requests: list[httpx2.Request]
     parse: AsyncMock
+    counter: AsyncMock
 
 
 @pytest.fixture
@@ -71,6 +79,7 @@ def route_material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
             "supabase_auth_publishable_key": "sb_publishable_synthetic_test_key",
             "account_session_encryption_key": None,
             "account_sign_up_api_enabled": True,
+            "auth_rate_limit_hmac_secret": token_hex(32),
             "account_sign_in_api_enabled": False,
             "account_sign_out_api_enabled": False,
             "account_session_api_enabled": False,
@@ -81,9 +90,12 @@ def route_material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
         }
     )
     requests: list[httpx2.Request] = []
+    counter = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    monkeypatch.setattr("app.account_sign_up_routes.commit_sign_up_attempt", counter)
     provider = AsyncMock(return_value=provider_response({"id": USER_ID, "email": EMAIL}))
 
     async def handler(request: httpx2.Request) -> httpx2.Response:
+        counter.assert_awaited_once()
         assert str(request.url) == f"{ISSUER}/signup"
         requests.append(request)
         response: httpx2.Response = await provider(request)
@@ -101,12 +113,15 @@ def route_material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
 
     with monkeypatch.context() as startup_patch:
         startup_patch.setattr("app.main.httpx2.AsyncClient", Mock(return_value=http_client))
-        with TestClient(application, base_url="https://api.example.test") as client:
+        with TestClient(
+            application, base_url="https://api.example.test", client=("192.0.2.12", 12345)
+        ) as client:
             # Restore the class after startup so runtime type casts keep working.
             startup_patch.undo()
             assert application.state.database_engine is None
+            application.state.database_engine = Mock(spec=AsyncEngine)
             assert application.state.turnstile_client is None
-            yield RouteMaterial(client, application, settings, provider, requests, parse)
+            yield RouteMaterial(client, application, settings, provider, requests, parse, counter)
 
     fetch_keys.assert_not_awaited()
     assert http_client.is_closed
@@ -157,6 +172,16 @@ def test_accepted_registration_forwards_once_without_creating_a_session(
     assert "cookie" not in request.headers
     assert "authorization" not in request.headers
     assert route_material.provider.return_value.is_closed
+    key = get_sign_up_ip_key(
+        Request({"type": "http", "headers": [], "client": ("192.0.2.12", 12345)}),
+        route_material.settings,
+    )
+    route_material.counter.assert_awaited_once_with(
+        route_material.application.state.database_engine,
+        key,
+        max_requests=10,
+        window_seconds=600,
+    )
 
 
 @pytest.mark.parametrize("code", ["user_already_exists", "email_exists"])
@@ -225,13 +250,17 @@ def test_origin_is_checked_even_when_registration_is_disabled(
     assert route_material.requests == []
 
 
-@pytest.mark.parametrize("missing", ["client", "issuer", "publishable-key"])
+@pytest.mark.parametrize("missing", ["client", "engine", "hmac", "issuer", "publishable-key"])
 def test_incomplete_configuration_stops_before_body_parsing(
     route_material: RouteMaterial,
     missing: str,
 ) -> None:
     if missing == "client":
         route_material.application.state.account_auth_client = None
+    elif missing == "engine":
+        route_material.application.state.database_engine = None
+    elif missing == "hmac":
+        route_material.settings.auth_rate_limit_hmac_secret = None
     elif missing == "issuer":
         route_material.settings.supabase_auth_issuer = None
     else:
@@ -242,6 +271,7 @@ def test_incomplete_configuration_stops_before_body_parsing(
     assert_failure(response, 503, UNAVAILABLE)
     route_material.parse.assert_not_awaited()
     assert route_material.requests == []
+    route_material.counter.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -343,7 +373,7 @@ def test_unsupported_methods_do_not_parse_or_contact_provider(
     assert route_material.requests == []
 
 
-@pytest.mark.parametrize("stalled_stage", ["body", "provider"])
+@pytest.mark.parametrize("stalled_stage", ["accounting", "body", "provider"])
 def test_total_deadline_cancels_stalled_work(
     route_material: RouteMaterial,
     monkeypatch: pytest.MonkeyPatch,
@@ -361,7 +391,14 @@ def test_total_deadline_cancels_stalled_work(
             raise
         raise AssertionError("Stalled work unexpectedly completed.")
 
-    if stalled_stage == "body":
+    if stalled_stage == "accounting":
+
+        async def stalled_counter(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+            await stall()
+            raise AssertionError("Stalled counter unexpectedly completed.")
+
+        route_material.counter.side_effect = stalled_counter
+    elif stalled_stage == "body":
 
         async def stalled_stream(request: Request) -> AsyncIterator[bytes]:
             yield b" "
@@ -381,3 +418,51 @@ def test_total_deadline_cancels_stalled_work(
     assert_failure(response, 503, UNAVAILABLE)
     assert cancelled
     assert len(route_material.requests) == (1 if stalled_stage == "provider" else 0)
+
+
+def test_local_cap_blocks_parsing_and_provider(route_material: RouteMaterial) -> None:
+    now = datetime.now(UTC)
+    route_material.counter.return_value = AuthRateLimitDecision(
+        False, now, 61, now + timedelta(seconds=61)
+    )
+    response = route_material.client.post(
+        PATH, content=b"not-json", headers={"Origin": ORIGIN, "Content-Type": "application/json"}
+    )
+    assert_failure(response, 429, "Account registration is temporarily rate limited.")
+    assert response.headers["Retry-After"] == "61"
+    assert "X-Account-Verification" not in response.headers
+    route_material.parse.assert_not_awaited()
+    assert route_material.requests == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SQLAlchemyError(PRIVATE_DETAIL),
+        AuthRateLimitUnavailable(PRIVATE_DETAIL),
+        TimeoutError(PRIVATE_DETAIL),
+    ],
+)
+def test_accounting_failure_has_no_provider_work(
+    route_material: RouteMaterial, failure: Exception
+) -> None:
+    route_material.counter.side_effect = failure
+    response = post_credentials(route_material)
+    assert_failure(response, 503, UNAVAILABLE)
+    assert "Retry-After" not in response.headers
+    route_material.parse.assert_not_awaited()
+    assert not route_material.requests
+
+
+@pytest.mark.parametrize(
+    "failure", [AuthRateLimitKeyUnavailable(PRIVATE_DETAIL), ClientIPUnavailable(PRIVATE_DETAIL)]
+)
+def test_fingerprint_failure_never_counts(
+    route_material: RouteMaterial, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    monkeypatch.setattr("app.account_sign_up_routes.get_sign_up_ip_key", Mock(side_effect=failure))
+    response = post_credentials(route_material)
+    assert_failure(response, 503, UNAVAILABLE)
+    route_material.counter.assert_not_awaited()
+    route_material.parse.assert_not_awaited()
+    assert not route_material.requests

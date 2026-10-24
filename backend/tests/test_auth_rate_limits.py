@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app import auth_rate_limits as limiter
 
 
-@pytest.fixture(params=["password_recovery", "sign_in"])
+@pytest.fixture(params=["password_recovery", "sign_in", "sign_up"])
 def purpose(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
@@ -35,11 +35,11 @@ def test_invalid_parameters_fail_before_database_access(
     purpose: str, key: bytes, maximum: int, window: int
 ) -> None:
     connection = MagicMock(spec=AsyncConnection)
-    counter = (
-        limiter.count_sign_in_attempt
-        if purpose == "sign_in"
-        else limiter.count_password_recovery_attempt
-    )
+    counter = {
+        "password_recovery": limiter.count_password_recovery_attempt,
+        "sign_in": limiter.count_sign_in_attempt,
+        "sign_up": limiter.count_sign_up_attempt,
+    }[purpose]
     with pytest.raises(ValueError, match="^Invalid authentication rate-limit parameters\\.$"):
         asyncio.run(counter(connection, key, max_requests=maximum, window_seconds=window))
     connection.in_transaction.assert_not_called()
@@ -49,11 +49,11 @@ def test_invalid_parameters_fail_before_database_access(
 def test_connection_must_already_have_a_transaction(purpose: str) -> None:
     connection = MagicMock(spec=AsyncConnection)
     connection.in_transaction.return_value = False
-    counter = (
-        limiter.count_sign_in_attempt
-        if purpose == "sign_in"
-        else limiter.count_password_recovery_attempt
-    )
+    counter = {
+        "password_recovery": limiter.count_password_recovery_attempt,
+        "sign_in": limiter.count_sign_in_attempt,
+        "sign_up": limiter.count_sign_up_attempt,
+    }[purpose]
     with pytest.raises(RuntimeError, match="requires an active transaction"):
         asyncio.run(counter(connection, b"k" * 32, max_requests=10, window_seconds=600))
     connection.execute.assert_not_called()
@@ -74,11 +74,11 @@ def test_row_removed_before_lock_fails_closed_without_a_time_read_or_update(purp
     missing = MagicMock()
     missing.one_or_none.return_value = None
     connection.execute = AsyncMock(side_effect=[MagicMock(), missing])
-    counter = (
-        limiter.count_sign_in_attempt
-        if purpose == "sign_in"
-        else limiter.count_password_recovery_attempt
-    )
+    counter = {
+        "password_recovery": limiter.count_password_recovery_attempt,
+        "sign_in": limiter.count_sign_in_attempt,
+        "sign_up": limiter.count_sign_up_attempt,
+    }[purpose]
     with pytest.raises(limiter.AuthRateLimitUnavailable):
         asyncio.run(counter(connection, b"k" * 32, max_requests=10, window_seconds=600))
     assert connection.execute.await_count == 2
@@ -121,11 +121,11 @@ def test_wrapper_commits_before_return_and_never_retries_on_failure(
     monkeypatch.setattr(limiter, f"count_{purpose}_attempt", counter)
 
     async def run() -> limiter.AuthRateLimitDecision:
-        commit = (
-            limiter.commit_sign_in_attempt
-            if purpose == "sign_in"
-            else limiter.commit_password_recovery_attempt
-        )
+        commit = {
+            "password_recovery": limiter.commit_password_recovery_attempt,
+            "sign_in": limiter.commit_sign_in_attempt,
+            "sign_up": limiter.commit_sign_up_attempt,
+        }[purpose]
         return await commit(engine, b"k" * 32, max_requests=10, window_seconds=600)
 
     if failure == "none":

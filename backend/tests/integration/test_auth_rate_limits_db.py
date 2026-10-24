@@ -32,7 +32,7 @@ class LimitCase:
 type CaseFactory = Callable[[], AbstractAsyncContextManager[LimitCase]]
 
 
-@pytest.fixture(params=["password_recovery", "sign_in"])
+@pytest.fixture(params=["password_recovery", "sign_in", "sign_up"])
 def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> CaseFactory:
     purpose = str(request.param)
 
@@ -83,7 +83,7 @@ def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> 
                 async with engine.begin() as connection:
                     await connection.execute(
                         delete(AuthRateLimit).where(
-                            AuthRateLimit.purpose.in_(["password_recovery", "sign_in"]),
+                            AuthRateLimit.purpose.in_(["password_recovery", "sign_in", "sign_up"]),
                             AuthRateLimit.key_hash.in_([key, other_key]),
                         )
                     )
@@ -137,11 +137,11 @@ async def count(
     purpose: str | None = None,
 ) -> limiter.AuthRateLimitDecision:
     selected = purpose if purpose is not None else case.purpose
-    commit = (
-        limiter.commit_sign_in_attempt
-        if selected == "sign_in"
-        else limiter.commit_password_recovery_attempt
-    )
+    commit = {
+        "password_recovery": limiter.commit_password_recovery_attempt,
+        "sign_in": limiter.commit_sign_in_attempt,
+        "sign_up": limiter.commit_sign_up_attempt,
+    }[selected]
     return await commit(
         case.engine,
         key if key is not None else case.key,
@@ -308,11 +308,11 @@ def test_rollback_restores_previous_window(case_factory: CaseFactory, existing: 
             before = await read_state(case)
             async with case.engine.connect() as connection:
                 transaction = await connection.begin()
-                counter = (
-                    limiter.count_sign_in_attempt
-                    if case.purpose == "sign_in"
-                    else limiter.count_password_recovery_attempt
-                )
+                counter = {
+                    "password_recovery": limiter.count_password_recovery_attempt,
+                    "sign_in": limiter.count_sign_in_attempt,
+                    "sign_up": limiter.count_sign_up_attempt,
+                }[case.purpose]
                 decision = await counter(connection, case.key, max_requests=3, window_seconds=600)
                 assert decision.allowed
                 await transaction.rollback()

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AccountSignUpRateLimitedError,
   AccountSignUpRejectedError,
   AccountSignUpVerificationRequiredError,
   signUpAccount,
@@ -84,6 +85,11 @@ export function useAccountSignUp() {
 
       if (timedOut) {
         message = 'Registration took too long. Please try again.'
+      } else if (error instanceof AccountSignUpRateLimitedError) {
+        const seconds = error.retryAfterSeconds
+        message = seconds === null
+          ? error.message
+          : `Too many sign-up attempts. Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before trying again.`
       } else if (
         error instanceof AccountSignUpVerificationRequiredError
       ) {

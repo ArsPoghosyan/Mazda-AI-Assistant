@@ -678,6 +678,46 @@ live provider, including email delivery and separate application sign-in.
 `ACCOUNT_SIGN_UP_TIMEOUT_SECONDS`, defaults to 15 and accepts one to 30 seconds;
 it does not change the adapter's independent five-second provider deadline.
 
+Registration also uses the shared PostgreSQL abuse limiter. Configurable starting
+defaults are 10 attempts per rolling 600 seconds, using
+`ACCOUNT_SIGN_UP_IP_MAX_REQUESTS` (1–1,000) and
+`ACCOUNT_SIGN_UP_IP_WINDOW_SECONDS` (60–86,400). The route requires a runtime
+database migrated through `bcae4df0f56a` and the independent
+`AUTH_RATE_LIMIT_HMAC_SECRET`, along with its provider resources. It checks Origin,
+the feature flag and readiness before counting. A fixed sign-up HMAC namespace
+(`askm6:auth-rate-limit:v1:sign_up:ip:`) and database purpose isolate its budget
+from sign-in and recovery; emails and forwarding headers cannot select a budget.
+
+Accounting commits before credential parsing or provider work under the existing
+total deadline. A local cap returns no-store 429 with `Retry-After` and no provider
+request or cookie. Limiter/key/database/deadline failures return generic 503.
+Allowed attempts remain counted after invalid input, CAPTCHA rejection or provider
+failure. Upstream provider rate limits retain the existing generic 503 mapping;
+only local caps supply a retry time. Existing-account and new-account responses
+retain the same generic 202 acknowledgement; registration creates no application
+session. The development frontend displays validated retry seconds after a local
+429, with a generic wait message when the header is unavailable or invalid.
+
+Migration `bcae4df0f56a` broadens the purpose constraint to recovery/sign-in/sign-up,
+without changing rows, indexes, ownership or grants. Downgrade validates the older
+constraint first and refuses while sign-up records exist. Both guarded local
+databases are upgraded with no drift or private configuration changes. Shared
+cleanup and the local maintenance command include all three purposes within one
+total batch cap; recovery-only helper APIs retain their original scope. Automatic
+cleanup scheduling and production proxy trust remain pending. Google OAuth and
+email confirmation are unaffected by this password-registration limiter.
+
+Validation passed 954 selected backend cases, including 21 new PostgreSQL sign-up
+HTTP cases, with provider HTTP mocked. Two further transactional migration probes
+passed: downgrade refusal preserves sign-up data, and a safe round trip preserves
+older rows, indexes and grants. All probe DDL/data is rolled back. Repository lint,
+formatting (209 Python files), typing (201 app/test sources) and all eight migration
+sources passed. Final checkpoint validation then passed all 3,763 backend tests,
+including PostgreSQL integration tests, with lint, formatting and typing clean.
+The combined backend/frontend diff and private-file exclusions were reviewed with
+no blocking findings; configured secrets were absent from all 28 checkpoint files
+and the existing frontend build.
+
 The parser requires JSON containing only `email`, `password`, and `captcha_token`.
 It limits actual streamed input to 16 KiB, masks all three fields with `SecretStr`,
 and preserves password whitespace and Unicode. Email and password have resource
@@ -703,15 +743,16 @@ messages. The adapter does not create an application session, write application
 database rows, or issue browser cookies.
 
 The HTTP route requires an exact trusted Origin before reading credentials.
-Its total deadline covers body parsing and the provider exchange. Accepted
+Its total deadline covers committed rate accounting, body parsing and the provider exchange. Accepted
 outcomes return HTTP 202 with `status: "accepted"` and a generic message that
 does not confirm account existence or email delivery. Invalid/rejected input
 returns 400, oversized bodies 413, and unsupported media types 415. Provider
 CAPTCHA rejection returns 403 with `X-Account-Verification: required`; an Origin
 rejection has no verification marker. Disabled or incomplete configuration,
-provider unavailability, and timeouts return 503. These responses use no-store
-headers and do not set or clear account or guest cookies. Registration does not
-require an application database connection, session-encryption key, or JWT lookup.
+provider/limiter unavailability, and timeouts return 503. Local rate caps return
+429 with `Retry-After`. These responses use no-store headers and do not set or
+clear account or guest cookies. Registration requires the limiter's database
+connection and HMAC key, but no session-encryption key or JWT lookup.
 
 Supabase email confirmation and CAPTCHA protection must be configured before
 registration is enabled. The development interface uses one password field, an emailed
@@ -1071,7 +1112,7 @@ production proxy trust and automatic cleanup invocation remain pending. A bounde
 expired-row cleanup helper is implemented and tested, as described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
-for the IP-fingerprint helpers; enabled recovery and sign-in require it. It must contain exactly
+for the IP-fingerprint helpers; enabled recovery, sign-in and sign-up require it. It must contain exactly
 64 ASCII hexadecimal characters encoding a separate 32-byte key; validation
 checks format, not randomness. The example value is empty, and no real secret
 is published. Local development uses a generated key in ignored configuration,
@@ -1111,7 +1152,7 @@ helpers before counting.
 Production proxy trust is still required because Uvicorn can rewrite the ASGI
 client first.
 
-The shared recovery/sign-in counting service uses a PostgreSQL
+The shared authentication counting service uses a PostgreSQL
 transaction and row lock per operation/fingerprint. It creates missing rows
 without overwriting existing state, reads fresh database time after locking,
 discards attempts at or before the rolling cutoff, and records an allowed
@@ -1134,9 +1175,9 @@ counting implementation. Insertion, locking and update always include both
 purpose and fingerprint, so the same binary key can have separate caps, windows
 and locks. No public helper accepts a client-selected operation.
 
-Both routes call their respective commit wrappers before parsing credentials or
-contacting providers, within their existing request deadlines. Shared cleanup supports both purposes.
-Automatic inactive-row cleanup invocation remains outstanding for both purposes.
+All three routes call their respective commit wrappers before parsing credentials or
+contacting providers, within their existing request deadlines. Shared cleanup supports all three purposes.
+Automatic inactive-row cleanup invocation remains outstanding for all three purposes.
 
 Sign-in checks Origin, its feature flag and required runtime configuration before
 accounting. A capped request returns no-store HTTP 429 with `Retry-After`, without
@@ -1196,10 +1237,10 @@ no automatic schedule has been connected.
 
 The `delete_expired_auth_rate_limits` and
 `commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
-transaction, deadline and failure behavior for a shared recovery/sign-in batch.
+transaction, deadline and failure behavior for a shared recovery/sign-in/sign-up batch.
 The existing recovery-only APIs retain their signatures and scope. Shared
 selection is ordered by expiry, fingerprint and purpose, with one total batch
-limit across both purposes. Deletion matches both key columns and rechecks expiry,
+limit across all supported purposes. Deletion matches both key columns and rechecks expiry,
 so an expired record cannot delete an active record under another purpose with
 the same fingerprint. Duplicate fingerprints under different purposes count as
 separate deleted records.
@@ -1215,7 +1256,7 @@ passed. Existing database rows are protected by locks, and tests delete only
 their own synthetic keys. No schema or private configuration change was needed.
 
 The `app.auth_rate_limit_maintenance` command loads runtime `Settings` and runs
-one shared batch across recovery and sign-in. It accepts `--batch-size`
+one shared batch across recovery, sign-in and sign-up. It accepts `--batch-size`
 (default 100 total rows, range 1–1,000) and
 `--timeout-seconds` (default 5, greater than zero through 30). Invalid arguments
 are rejected before loading private settings; `--help` does not connect. Direct
@@ -1283,7 +1324,7 @@ checkpoint passed 242 tests, plus lint, changed-file formatting and typing
 The SQLAlchemy `AuthRateLimit` model defines `app.auth_rate_limits`, with a
 composite operation/fingerprint key, a required timezone-aware timestamp array
 bounded to 1,000 entries, and an indexed cleanup deadline. Constraints restrict
-the operation to password recovery or sign-in, require a 32-byte fingerprint, and reject
+the operation to password recovery, sign-in or sign-up, require a 32-byte fingerprint, and reject
 NULL array entries and nonstandard array shapes. Raw IP addresses and email
 addresses are not fields in this table. The model imports and compiles to
 PostgreSQL DDL; lint, formatting, typing and 112 existing regression tests passed.
@@ -1312,7 +1353,7 @@ populated migration check confirmed recovery rows, grants, indexes and other
 constraints survive upgrade, refused downgrade and a safe downgrade/re-upgrade.
 The 181 focused offline cases, application/test typing and all seven migration
 sources passed too. The local website `mazda6` and test `askm6_test` databases
-have now been guarded and upgraded to `0f42bd53f47a`. Each live target's database,
+were guarded and upgraded to `0f42bd53f47a` before the sign-up extension. Each live target's database,
 migration role and previous revision were verified before upgrading; both report
 the new head with no schema drift and unchanged restricted application grants.
 The website connects as `askm6_app` and can read limiter storage. Private runtime,
@@ -1908,6 +1949,23 @@ Both helpers support caller-provided cancellation, disable redirects and caching
 and return only allowlisted status metadata. They do not persist credentials or
 automatically retry. Mocked tests cover request fields, controlled errors,
 malformed responses, unexpected statuses, and cancellation.
+
+Sign-up 429 responses become a dedicated rate-limit error. Only integer
+`Retry-After` seconds from 1 through 86,400 are accepted; missing, malformed,
+oversized, unsupported date and out-of-range values use a safe fallback. Error
+bodies are not parsed, and other statuses ignore the header. The existing status
+region announces the quoted wait, using singular/plural seconds. It is a snapshot
+from the failed attempt, with no live countdown, client lock or automatic retry;
+the backend remains responsible for enforcement. Password clearing and fresh-proof
+requirements apply, and rate limiting never advances to confirmation. Confirmation,
+Google access and sign-in keep their existing contracts.
+
+Retry-feedback validation passed 65 registration/confirmation API cases and 33
+focused sign-up hook/form/Google cases. The full frontend suite then passed all
+543 cases (240 API and 303 UI/hook), plus lint, TypeScript and production build.
+Tests cover header bounds/fallbacks, status isolation, safe messages, manual retry,
+password clearing, proof renewal and no confirmation advance on failure. These
+checks mock requests and send no registration emails.
 
 The development account dialog switches between sign-in, registration, and
 email confirmation without replacing its native modal shell. Registration has

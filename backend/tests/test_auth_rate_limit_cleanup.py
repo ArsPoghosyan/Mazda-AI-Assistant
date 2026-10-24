@@ -16,20 +16,20 @@ from app import auth_rate_limit_cleanup as cleanup
 
 @dataclass(frozen=True)
 class CleanupAPI:
-    include_sign_in: bool
+    shared: bool
 
     @property
     def delete_name(self) -> str:
         return (
             "delete_expired_auth_rate_limits"
-            if self.include_sign_in
+            if self.shared
             else "delete_expired_password_recovery_limits"
         )
 
     async def delete(self, connection: AsyncConnection, *, batch_size: int = 100) -> int:
         function = (
             cleanup.delete_expired_auth_rate_limits
-            if self.include_sign_in
+            if self.shared
             else cleanup.delete_expired_password_recovery_limits
         )
         return await function(connection, batch_size=batch_size)
@@ -39,7 +39,7 @@ class CleanupAPI:
     ) -> int:
         function = (
             cleanup.commit_expired_auth_rate_limit_cleanup
-            if self.include_sign_in
+            if self.shared
             else cleanup.commit_expired_password_recovery_cleanup
         )
         return await function(engine, timeout_seconds=timeout_seconds, batch_size=batch_size)

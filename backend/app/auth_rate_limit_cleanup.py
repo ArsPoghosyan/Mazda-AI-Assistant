@@ -13,7 +13,7 @@ async def _delete_expired_limits(
     connection: AsyncConnection,
     *,
     batch_size: int,
-    purposes: tuple[Literal["password_recovery", "sign_in"], ...],
+    purposes: tuple[Literal["password_recovery", "sign_in", "sign_up"], ...],
 ) -> int:
     """Delete one batch; the caller owns commit, rollback and its deadline.
 
@@ -69,9 +69,9 @@ async def delete_expired_auth_rate_limits(
     *,
     batch_size: int = 100,
 ) -> int:
-    """Delete one shared batch of expired recovery and sign-in records."""
+    """Delete one shared batch of expired recovery, sign-in and sign-up records."""
     return await _delete_expired_limits(
-        connection, batch_size=batch_size, purposes=("password_recovery", "sign_in")
+        connection, batch_size=batch_size, purposes=("password_recovery", "sign_in", "sign_up")
     )
 
 
@@ -80,7 +80,7 @@ async def _commit_cleanup(
     *,
     timeout_seconds: float,
     batch_size: int,
-    include_sign_in: bool,
+    shared: bool,
 ) -> int:
     """Run one batch and return its count only after successful commit.
 
@@ -97,7 +97,7 @@ async def _commit_cleanup(
         async with engine.begin() as connection:
             delete_batch = (
                 delete_expired_auth_rate_limits
-                if include_sign_in
+                if shared
                 else delete_expired_password_recovery_limits
             )
             deleted = await delete_batch(
@@ -116,7 +116,7 @@ async def commit_expired_password_recovery_cleanup(
 ) -> int:
     """Commit one recovery-only batch under the caller-supplied deadline."""
     return await _commit_cleanup(
-        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, include_sign_in=False
+        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, shared=False
     )
 
 
@@ -126,7 +126,7 @@ async def commit_expired_auth_rate_limit_cleanup(
     timeout_seconds: float,
     batch_size: int = 100,
 ) -> int:
-    """Commit one shared recovery/sign-in batch under the supplied deadline."""
+    """Commit one shared recovery/sign-in/sign-up batch under the supplied deadline."""
     return await _commit_cleanup(
-        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, include_sign_in=True
+        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, shared=True
     )

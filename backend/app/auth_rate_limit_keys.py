@@ -9,6 +9,7 @@ from app.config import Settings
 
 _PASSWORD_RECOVERY_IP_CONTEXT = b"askm6:auth-rate-limit:v1:password_recovery:ip:"
 _SIGN_IN_IP_CONTEXT = b"askm6:auth-rate-limit:v1:sign_in:ip:"
+_SIGN_UP_IP_CONTEXT = b"askm6:auth-rate-limit:v1:sign_up:ip:"
 
 
 class AuthRateLimitKeyUnavailable(RuntimeError):
@@ -54,3 +55,8 @@ def get_sign_in_ip_key(
 ) -> bytes:
     """Return a sign-in fingerprint distinct from the recovery namespace."""
     return _get_ip_key(request, settings, context=_SIGN_IN_IP_CONTEXT)
+
+
+def get_sign_up_ip_key(request: Request, settings: Settings) -> bytes:
+    """Return a registration fingerprint distinct from sign-in and recovery."""
+    return _get_ip_key(request, settings, context=_SIGN_UP_IP_CONTEXT)

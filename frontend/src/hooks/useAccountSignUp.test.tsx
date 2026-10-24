@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
+  AccountSignUpRateLimitedError,
   AccountSignUpRejectedError,
   AccountSignUpVerificationRequiredError,
   signUpAccount,
@@ -107,6 +108,26 @@ test('blocks duplicate submissions while pending and after acceptance', async ()
 
 test.each([
   {
+    name: 'rate limit with a wait time',
+    error: new AccountSignUpRateLimitedError('61'),
+    message: 'Too many sign-up attempts. Please wait 61 seconds before trying again.',
+  },
+  {
+    name: 'one-second rate limit',
+    error: new AccountSignUpRateLimitedError('1'),
+    message: 'Too many sign-up attempts. Please wait 1 second before trying again.',
+  },
+  {
+    name: 'rate limit without a wait time',
+    error: new AccountSignUpRateLimitedError(),
+    message: 'Too many sign-up attempts. Please try again later.',
+  },
+  {
+    name: 'rate limit with private retry details',
+    error: new AccountSignUpRateLimitedError('private-provider-detail'),
+    message: 'Too many sign-up attempts. Please try again later.',
+  },
+  {
     name: 'rejected registration',
     error: new AccountSignUpRejectedError(),
     message: 'Registration was rejected. Check your details and try again.',
@@ -200,6 +221,26 @@ test('aborts a stalled submission after 15 seconds', async () => {
   )
   expect(signUpAccount).toHaveBeenCalledTimes(1)
   expect(vi.getTimerCount()).toBe(0)
+})
+
+test('a rate-limit response never schedules another registration', async () => {
+  vi.useFakeTimers()
+  vi.mocked(signUpAccount).mockRejectedValueOnce(new AccountSignUpRateLimitedError('61'))
+  const { result } = renderHook(useAccountSignUp, { wrapper: StrictMode })
+
+  await act(async () => {
+    expect(await result.current.start(credentials)).toBe(false)
+  })
+  expect(vi.getTimerCount()).toBe(0)
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000)
+  })
+  expect(result.current.status).toBe('error')
+  expect(result.current.message).toBe(
+    'Too many sign-up attempts. Please wait 61 seconds before trying again.',
+  )
+  expect(signUpAccount).toHaveBeenCalledTimes(1)
 })
 
 test('unmount aborts the request and ignores its late result', async () => {
