@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
+from secrets import token_hex
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import httpx2
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -31,12 +33,17 @@ from app.account_sign_in import (
     AccountSignInRejected,
     AccountSignInUnavailable,
 )
+from app.account_sign_in_requests import SignInCredentials, read_sign_in_credentials
 from app.account_tokens import InvalidAccountToken
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_in_ip_key
+from app.auth_rate_limits import AuthRateLimitDecision, AuthRateLimitUnavailable
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.main import create_app
 
 PATH = "/api/v1/account/sign-in"
 ORIGIN = "https://app.example.test"
+PEER = "192.0.2.12"
 
 
 class IsolatedSettings(Settings):
@@ -48,9 +55,10 @@ def make_settings(enabled: bool = True) -> Settings:
         {
             "database_url": None,
             "migration_database_url": None,
-            "supabase_auth_issuer": None,
-            "supabase_auth_publishable_key": None,
-            "account_session_encryption_key": None,
+            "supabase_auth_issuer": "https://auth.example.test/auth/v1",
+            "supabase_auth_publishable_key": "sb_publishable_synthetic_test_key",
+            "account_session_encryption_key": Fernet.generate_key().decode("ascii"),
+            "auth_rate_limit_hmac_secret": token_hex(32),
             "account_cookie_secure": True,
             "account_sign_in_api_enabled": enabled,
             "csrf_trusted_origins": (ORIGIN,),
@@ -62,12 +70,14 @@ def make_settings(enabled: bool = True) -> Settings:
 class GuardMocks:
     parse: AsyncMock
     sign_in: AsyncMock
+    counter: AsyncMock
 
 
 @pytest.fixture
 def guards(monkeypatch: pytest.MonkeyPatch) -> GuardMocks:
     parse = AsyncMock()
     sign_in = AsyncMock()
+    counter = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
 
     monkeypatch.setattr(
         "app.account_sign_in_routes.read_sign_in_credentials",
@@ -78,7 +88,8 @@ def guards(monkeypatch: pytest.MonkeyPatch) -> GuardMocks:
         sign_in,
     )
 
-    return GuardMocks(parse=parse, sign_in=sign_in)
+    monkeypatch.setattr("app.account_sign_in_routes.commit_sign_in_attempt", counter)
+    return GuardMocks(parse=parse, sign_in=sign_in, counter=counter)
 
 
 def install_resources(application: FastAPI) -> None:
@@ -101,6 +112,7 @@ def assert_blocked(
     guards.parse.assert_not_awaited()
     guards.sign_in.assert_not_awaited()
     assert response.headers.get("X-Account-Verification") is None
+    guards.counter.assert_not_awaited()
 
 
 def test_disabled_route_stops_before_reading_credentials(
@@ -228,6 +240,8 @@ class RouteMaterial:
     key_cache: AccountKeyCache
     created: CreatedAccountSession
     sign_in: AsyncMock
+    counter: AsyncMock
+    parse: AsyncMock
 
 
 @pytest.fixture
@@ -246,12 +260,18 @@ def route_material(
         absolute_expires_at=now + timedelta(days=30),
     )
     sign_in = AsyncMock(return_value=created)
+    counter = AsyncMock(return_value=AuthRateLimitDecision(True, datetime.now(UTC), 0, None))
+    parse = AsyncMock(wraps=read_sign_in_credentials)
+    monkeypatch.setattr("app.account_sign_in_routes.commit_sign_in_attempt", counter)
+    monkeypatch.setattr("app.account_sign_in_routes.read_sign_in_credentials", parse)
     monkeypatch.setattr(
         "app.account_sign_in_routes.sign_in_account",
         sign_in,
     )
 
-    with TestClient(application, base_url="https://api.example.test") as client:
+    with TestClient(
+        application, base_url="https://api.example.test", client=(PEER, 12345)
+    ) as client:
         install_resources(application)
 
         yield RouteMaterial(
@@ -268,6 +288,8 @@ def route_material(
             ),
             created=created,
             sign_in=sign_in,
+            counter=counter,
+            parse=parse,
         )
 
 
@@ -287,6 +309,15 @@ def post_credentials(material: RouteMaterial) -> httpx2.Response:
 
 
 def assert_service_called_once(material: RouteMaterial) -> None:
+    key = get_sign_in_ip_key(
+        Request({"type": "http", "headers": [], "client": (PEER, 12345)}), material.settings
+    )
+    material.counter.assert_awaited_once_with(
+        material.engine,
+        key,
+        max_requests=material.settings.account_sign_in_ip_max_requests,
+        window_seconds=material.settings.account_sign_in_ip_window_seconds,
+    )
     material.sign_in.assert_awaited_once_with(
         material.engine,
         SecretStr(EMAIL),
@@ -561,4 +592,141 @@ def test_provider_captcha_rejection_requests_fresh_verification(
     )
     assert response.headers["X-Account-Verification"] == "required"
     assert CAPTCHA_TOKEN not in response.text
+    assert_service_called_once(route_material)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "supabase_auth_issuer",
+        "supabase_auth_publishable_key",
+        "account_session_encryption_key",
+        "auth_rate_limit_hmac_secret",
+    ],
+)
+def test_missing_configuration_never_counts_or_parses(
+    guards: GuardMocks,
+    missing: str,
+) -> None:
+    settings = make_settings()
+    setattr(settings, missing, None)
+    application = create_app(settings)
+    with TestClient(application, base_url="https://api.example.test") as client:
+        install_resources(application)
+        response = client.post(PATH, json={}, headers={"Origin": ORIGIN})
+    assert_blocked(response, guards, 503, "Account sign-in is temporarily unavailable.")
+
+
+@pytest.mark.parametrize("body", [b"not-json", b"{}"])
+def test_local_cap_returns_retry_without_parsing_or_provider_work(
+    route_material: RouteMaterial,
+    body: bytes,
+) -> None:
+    now = datetime.now(UTC)
+    route_material.counter.return_value = AuthRateLimitDecision(
+        False, now, 61, now + timedelta(seconds=61)
+    )
+    response = route_material.client.post(
+        PATH, content=body, headers={"Origin": ORIGIN, "Content-Type": "application/json"}
+    )
+    assert_sign_in_failure(response, 429, "Sign-in is temporarily rate limited.")
+    assert response.headers["Retry-After"] == "61"
+    assert "X-Account-Verification" not in response.headers
+    route_material.counter.assert_awaited_once()
+    route_material.parse.assert_not_awaited()
+    route_material.sign_in.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AuthRateLimitUnavailable(PRIVATE_DETAIL),
+        SQLAlchemyError(PRIVATE_DETAIL),
+        TimeoutError(PRIVATE_DETAIL),
+    ],
+)
+def test_accounting_failure_returns_503_without_parsing_or_retry(
+    route_material: RouteMaterial,
+    failure: Exception,
+) -> None:
+    route_material.counter.side_effect = failure
+    response = post_credentials(route_material)
+    assert_sign_in_failure(response, 503, "Account sign-in is temporarily unavailable.")
+    assert (
+        "Retry-After" not in response.headers and "X-Account-Verification" not in response.headers
+    )
+    route_material.counter.assert_awaited_once()
+    route_material.parse.assert_not_awaited()
+    route_material.sign_in.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure", [AuthRateLimitKeyUnavailable(PRIVATE_DETAIL), ClientIPUnavailable(PRIVATE_DETAIL)]
+)
+def test_fingerprint_failure_has_no_database_or_provider_work(
+    route_material: RouteMaterial,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    key = Mock(side_effect=failure)
+    monkeypatch.setattr("app.account_sign_in_routes.get_sign_in_ip_key", key)
+    response = post_credentials(route_material)
+    assert_sign_in_failure(response, 503, "Account sign-in is temporarily unavailable.")
+    assert (
+        "Retry-After" not in response.headers and "X-Account-Verification" not in response.headers
+    )
+    key.assert_called_once()
+    route_material.counter.assert_not_awaited()
+    route_material.parse.assert_not_awaited()
+    route_material.sign_in.assert_not_awaited()
+
+
+def test_sign_in_deadline_includes_accounting(
+    route_material: RouteMaterial,
+) -> None:
+    route_material.settings.account_sign_in_timeout_seconds = 1
+    cancelled = False
+
+    async def stalled(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        raise AssertionError("Accounting unexpectedly completed.")
+
+    route_material.counter.side_effect = stalled
+    response = post_credentials(route_material)
+    assert_sign_in_failure(response, 503, "Account sign-in is temporarily unavailable.")
+    assert cancelled
+    route_material.counter.assert_awaited_once()
+    route_material.parse.assert_not_awaited()
+    route_material.sign_in.assert_not_awaited()
+
+
+def test_accounting_finishes_before_credentials_and_sign_in_service(
+    route_material: RouteMaterial,
+) -> None:
+    events: list[str] = []
+
+    async def account(*args: object, **kwargs: object) -> AuthRateLimitDecision:
+        events.append("accounting")
+        return AuthRateLimitDecision(True, datetime.now(UTC), 0, None)
+
+    async def parse(request: Request) -> SignInCredentials:
+        assert events == ["accounting"]
+        events.append("parse")
+        return await read_sign_in_credentials(request)
+
+    async def sign_in(*args: object, **kwargs: object) -> CreatedAccountSession:
+        assert events == ["accounting", "parse"]
+        events.append("service")
+        return route_material.created
+
+    route_material.counter.side_effect = account
+    route_material.parse.side_effect = parse
+    route_material.sign_in.side_effect = sign_in
+    assert post_credentials(route_material).status_code == 200
+    assert events == ["accounting", "parse", "service"]
     assert_service_called_once(route_material)

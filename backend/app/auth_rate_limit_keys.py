@@ -8,17 +8,20 @@ from app.client_ip import get_client_ip
 from app.config import Settings
 
 _PASSWORD_RECOVERY_IP_CONTEXT = b"askm6:auth-rate-limit:v1:password_recovery:ip:"
+_SIGN_IN_IP_CONTEXT = b"askm6:auth-rate-limit:v1:sign_in:ip:"
 
 
 class AuthRateLimitKeyUnavailable(RuntimeError):
     """The backend cannot safely produce a rate-limit key."""
 
 
-def get_password_recovery_ip_key(
+def _get_ip_key(
     request: Request,
     settings: Settings,
+    *,
+    context: bytes,
 ) -> bytes:
-    """Return a 32-byte fingerprint without storing the client address."""
+    """Validate the secret and hash a canonical peer address in a fixed namespace."""
     secret = settings.auth_rate_limit_hmac_secret
 
     if secret is None:
@@ -32,6 +35,22 @@ def get_password_recovery_ip_key(
 
     key = bytes.fromhex(raw_secret)
     client_ip = get_client_ip(request)
-    message = _PASSWORD_RECOVERY_IP_CONTEXT + client_ip.encode("ascii")
+    message = context + client_ip.encode("ascii")
 
     return digest(key, message, "sha256")
+
+
+def get_password_recovery_ip_key(
+    request: Request,
+    settings: Settings,
+) -> bytes:
+    """Return the recovery fingerprint without storing the client address."""
+    return _get_ip_key(request, settings, context=_PASSWORD_RECOVERY_IP_CONTEXT)
+
+
+def get_sign_in_ip_key(
+    request: Request,
+    settings: Settings,
+) -> bytes:
+    """Return a sign-in fingerprint distinct from the recovery namespace."""
+    return _get_ip_key(request, settings, context=_SIGN_IN_IP_CONTEXT)

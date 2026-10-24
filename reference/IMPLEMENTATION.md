@@ -1055,7 +1055,7 @@ production proxy trust and automatic cleanup invocation remain pending. A bounde
 expired-row cleanup helper is implemented and tested, as described below.
 
 `AUTH_RATE_LIMIT_HMAC_SECRET` is an optional backend-only `SecretStr` setting
-for the IP-fingerprint helper; enabled recovery requires it. It must contain exactly
+for the IP-fingerprint helpers; enabled recovery and sign-in require it. It must contain exactly
 64 ASCII hexadecimal characters encoding a separate 32-byte key; validation
 checks format, not randomness. The example value is empty, and no real secret
 is published. Local development uses a generated key in ignored configuration,
@@ -1075,20 +1075,33 @@ or malformed secret configuration fails with a generic error; unusable client
 addresses retain the IP helper's controlled error. Changing the secret changes
 the keys and therefore requires deliberate handling before active enforcement.
 
-All 35 focused helper tests passed, including a fixed synthetic HMAC reference,
-normalization, identity/secret separation, spoofed headers, invalid configuration,
-and unchanged inputs/no output. Together with the key configuration and IP/proxy
-suites, 127 tests passed; lint and typing (188 source files) passed. The recovery
-route now uses this helper before counting; the helper itself stores no data. Production
-proxy trust is still required because Uvicorn can rewrite the ASGI client first.
+The standalone `get_sign_in_ip_key` helper shares the validated key/address
+handling and uses the separate fixed context `askm6:auth-rate-limit:v1:sign_in:ip:`.
+The same peer and secret therefore produce distinct sign-in and recovery
+fingerprints. Recovery's context and existing fingerprints are preserved; request
+paths and headers cannot select the context. Sign-in policy configuration defaults
+to 30 requests per rolling 600 seconds, with count bounds 1–1,000 and window bounds
+60–86,400 seconds, independently of recovery settings. The schema and counter are
+implemented and locally verified, with route enforcement and bounded cleanup for
+both purposes.
+Setting the policy does not enable any endpoint.
 
-The standalone password-recovery counting service now uses a PostgreSQL
+Both helpers pass 73 focused cases covering fixed synthetic HMAC references,
+normalization, operation/identity/secret separation, spoofed headers, invalid
+configuration, and unchanged inputs/no output. Together with secret/sign-in
+configuration, IP/proxy and recovery-route regressions, 241 tests passed; lint,
+formatting and typing (198 source files) passed. Both routes use their respective
+helpers before counting.
+Production proxy trust is still required because Uvicorn can rewrite the ASGI
+client first.
+
+The shared recovery/sign-in counting service uses a PostgreSQL
 transaction and row lock per operation/fingerprint. It creates missing rows
 without overwriting existing state, reads fresh database time after locking,
 discards attempts at or before the rolling cutoff, and records an allowed
 attempt. Denials leave stored state unchanged and return a retry deadline with
 seconds rounded up; a lowered configured cap waits for enough entries to expire.
-The commit wrapper returns its decision only after successful commit and releases
+Each operation's commit wrapper returns its decision only after successful commit and releases
 the connection before any future provider work. Database errors and cancellation
 propagate without automatic retries; the caller must enforce a request deadline
 and handle failures without allowing the request through.
@@ -1097,8 +1110,49 @@ An allowed limiter decision counts an authentication attempt even if the later
 provider operation fails. This abuse budget is separate from future AI-message
 quotas. All processes must use a consistent policy; increasing a window cannot
 reconstruct already-pruned history, and secret rotation changes limiter keys.
-Policy/key changes therefore need deliberate rollout handling. The recovery route
-now calls the commit wrapper; automatic inactive-row cleanup remains outstanding.
+Policy/key changes therefore need deliberate rollout handling. Existing
+`count_password_recovery_attempt` and `commit_password_recovery_attempt` retain
+their signatures and recovery-only purpose. The new `count_sign_in_attempt` and
+`commit_sign_in_attempt` use a fixed sign-in purpose through the same private
+counting implementation. Insertion, locking and update always include both
+purpose and fingerprint, so the same binary key can have separate caps, windows
+and locks. No public helper accepts a client-selected operation.
+
+Both routes call their respective commit wrappers before parsing credentials or
+contacting providers, within their existing request deadlines. Shared cleanup supports both purposes.
+Automatic inactive-row cleanup invocation remains outstanding for both purposes.
+
+Sign-in checks Origin, its feature flag and required runtime configuration before
+accounting. A capped request returns no-store HTTP 429 with `Retry-After`, without
+reading credentials, invoking providers or setting a session cookie. Fingerprint,
+database and deadline failures return the existing generic 503. Malformed bodies,
+CAPTCHA rejection and provider/session failures after accounting retain the attempt.
+Upstream provider 429 responses retain the existing generic 503 mapping; only a
+local limiter decision supplies a retry interval. Google OAuth uses separate entry
+points and is unaffected by this email/password sign-in policy.
+
+The route checkpoint passed 323 focused tests: configuration, fingerprints,
+counters, recovery regressions, 41 offline sign-in route cases and 22 PostgreSQL
+sign-in HTTP cases. These cover committed accounting before provider work,
+concurrent caps, expiry, purpose separation, commit rollback, real lock deadlines
+and successful session issuance. Provider HTTP is mocked. Repository lint,
+changed-file formatting and typing of 199 source files passed; this was a focused
+run, not a complete backend-suite run. Final checkpoint validation subsequently
+passed all 3,581 backend tests, including PostgreSQL integration tests, repository
+lint, formatting of all 206 Python files, typing of 199 app/test sources and all
+seven migration sources. The final diff, documentation links and private-file
+exclusions were reviewed; configured secrets were absent from the 23 checkpoint
+files and existing frontend build. Frontend sources were unchanged.
+
+The shared counter checkpoint passed 31 offline failure-boundary cases and 34
+guarded PostgreSQL cases across both purposes. Tests cover exact expiry, retry
+rounding, lowered caps, existing/new-row concurrency, transaction rollback,
+cancellation and fresh time after a real lock wait. Additional same-fingerprint
+cases verify different per-purpose caps/windows, independent row locks and
+simultaneous enforcement of both caps. The combined configuration, fingerprint,
+schema, counter, cleanup and recovery HTTP regression run passed 397 cases, with
+3,046 tests deselected; lint, changed-file formatting and typing of 198 app/test
+files passed. Only test-owned synthetic keys are removed after committed tests.
 
 The standalone `delete_expired_password_recovery_limits` helper requires an active
 caller transaction and returns a provisional deleted-row count. It selects only
@@ -1124,8 +1178,29 @@ take longer than the nominal deadline, and an interruption during commit cannot
 establish that no changes committed. The local command below is an explicit caller;
 no automatic schedule has been connected.
 
+The `delete_expired_auth_rate_limits` and
+`commit_expired_auth_rate_limit_cleanup` helpers use the same validation,
+transaction, deadline and failure behavior for a shared recovery/sign-in batch.
+The existing recovery-only APIs retain their signatures and scope. Shared
+selection is ordered by expiry, fingerprint and purpose, with one total batch
+limit across both purposes. Deletion matches both key columns and rechecks expiry,
+so an expired record cannot delete an active record under another purpose with
+the same fingerprint. Duplicate fingerprints under different purposes count as
+separate deleted records.
+
+The shared cleanup/maintenance checkpoint passed 80 offline cleanup contract
+cases and 90 PostgreSQL cleanup/maintenance cases across recovery-only,
+shared-recovery and shared-sign-in fixtures. It covers mixed-purpose batch caps,
+deterministic ties, independent records, skipped locks, disjoint cleaners,
+counter overlap, rollback, cancellation and deadline failures. The combined
+cleanup, maintenance, counter and recovery-route regression run passed 367 tests
+(3,181 deselected); lint, changed-file formatting and typing of 198 app/test files
+passed. Existing database rows are protected by locks, and tests delete only
+their own synthetic keys. No schema or private configuration change was needed.
+
 The `app.auth_rate_limit_maintenance` command loads runtime `Settings` and runs
-one batch. It accepts `--batch-size` (default 100, range 1–1,000) and
+one shared batch across recovery and sign-in. It accepts `--batch-size`
+(default 100 total rows, range 1–1,000) and
 `--timeout-seconds` (default 5, greater than zero through 30). Invalid arguments
 are rejected before loading private settings; `--help` does not connect. Direct
 calls also validate policy values before engine creation. `DATABASE_URL` must use
@@ -1152,8 +1227,8 @@ and exit 1; keyboard interruption exits 130. No URL, password, fingerprint or ro
 content is printed. Argument errors exit 2 with a fixed message, without echoing
 unknown arguments or invalid values that could contain credentials. The command
 does not migrate, loop, schedule future work, enable features or contact providers.
-Manual local execution against the migrated website database completed successfully.
-Seventy-five new cases passed: 72 offline command/guard/lifecycle cases and three
+Earlier recovery-only manual execution against the migrated website database completed successfully.
+That command checkpoint passed 75 cases: 72 offline command/guard/lifecycle cases and three
 PostgreSQL cases. They cover rejected URLs, pinned engine parameters, malformed
 policy values, real deadline/external cancellation, disposal/failures, generic
 output/exit codes, help without settings and fresh module startup. Database cases
@@ -1162,7 +1237,7 @@ committed batch, and reject a mismatched database or administrator without clean
 Automated cases do not test a real command login using the website's private
 credentials; the separate manual command check covers the local runtime setup.
 
-All 62 cleanup cases passed: 40 validation/failure-boundary cases and 22 real
+The original recovery-only checkpoint passed 62 cleanup cases: 40 validation/failure-boundary cases and 22 real
 PostgreSQL cases. Database tests cover exact expiry, minimum/maximum/default
 batches, oldest-first order, committed visibility, rollback and cancellation,
 skipped locks, disjoint overlapping cleanup transactions, a counter renewing an
@@ -1192,7 +1267,7 @@ checkpoint passed 242 tests, plus lint, changed-file formatting and typing
 The SQLAlchemy `AuthRateLimit` model defines `app.auth_rate_limits`, with a
 composite operation/fingerprint key, a required timezone-aware timestamp array
 bounded to 1,000 entries, and an indexed cleanup deadline. Constraints restrict
-the operation to password recovery, require a 32-byte fingerprint, and reject
+the operation to password recovery or sign-in, require a 32-byte fingerprint, and reject
 NULL array entries and nonstandard array shapes. Raw IP addresses and email
 addresses are not fields in this table. The model imports and compiles to
 PostgreSQL DDL; lint, formatting, typing and 112 existing regression tests passed.
@@ -1205,9 +1280,29 @@ formatting of the new test file and typing (184 files) passed.
 Migration `0826d9fbcef3` has been generated against the guarded local test
 database, following `b731b533d299`. Autogeneration was restricted to creating
 `app.auth_rate_limits` and its expiry index. Both local `askm6_test` and website
-`mazda6` databases are now at that revision, with no new upgrade operations
-reported after migration. The application role has SELECT, INSERT and DELETE, with UPDATE
+`mazda6` databases were verified at that revision before the sign-in extension.
+The application role has SELECT, INSERT and DELETE, with UPDATE
 restricted to `request_times` and `expires_at`; PUBLIC has no table grants.
+
+Migration `0f42bd53f47a` follows `0826d9fbcef3` and replaces the recovery-only
+purpose constraint with `purpose IN ('password_recovery', 'sign_in')`. It changes
+no rows, keys, indexes, ownership or grants. The composite key permits independent
+state for the same fingerprint under each purpose. Downgrade first validates the
+old recovery-only constraint and refuses if any sign-in rows remain, preserving
+data rather than deleting it. Disposable Linux validation passed all 376
+integration cases, including 52 limiter schema cases covering both purposes,
+unchanged permissions and independent state under the same fingerprint. A
+populated migration check confirmed recovery rows, grants, indexes and other
+constraints survive upgrade, refused downgrade and a safe downgrade/re-upgrade.
+The 181 focused offline cases, application/test typing and all seven migration
+sources passed too. The local website `mazda6` and test `askm6_test` databases
+have now been guarded and upgraded to `0f42bd53f47a`. Each live target's database,
+migration role and previous revision were verified before upgrading; both report
+the new head with no schema drift and unchanged restricted application grants.
+The website connects as `askm6_app` and can read limiter storage. Private runtime,
+migration and integration environment files were unchanged.
+The focused local schema, limiter, cleanup and recovery HTTP regression run
+passed 106 tests (270 integration cases deselected).
 
 All 28 PostgreSQL constraint/permission cases and 20 offline schema cases passed.
 Coverage includes round-trip state changes and row locking, duplicate keys,

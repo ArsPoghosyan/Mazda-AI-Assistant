@@ -1,6 +1,7 @@
 """Bounded cleanup of expired authentication rate-limit records."""
 
 import asyncio
+from typing import Literal
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -8,10 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.models import AuthRateLimit
 
 
-async def delete_expired_password_recovery_limits(
+async def _delete_expired_limits(
     connection: AsyncConnection,
     *,
-    batch_size: int = 100,
+    batch_size: int,
+    purposes: tuple[Literal["password_recovery", "sign_in"], ...],
 ) -> int:
     """Delete one batch; the caller owns commit, rollback and its deadline.
 
@@ -30,13 +32,13 @@ async def delete_expired_password_recovery_limits(
     expired = (
         select(AuthRateLimit.purpose, AuthRateLimit.key_hash)
         .where(
-            AuthRateLimit.purpose == "password_recovery",
+            AuthRateLimit.purpose.in_(purposes),
             AuthRateLimit.expires_at <= cutoff,
         )
-        .order_by(AuthRateLimit.expires_at, AuthRateLimit.key_hash)
+        .order_by(AuthRateLimit.expires_at, AuthRateLimit.key_hash, AuthRateLimit.purpose)
         .limit(batch_size)
         .with_for_update(skip_locked=True)
-        .cte("expired_password_recovery_limits")
+        .cte("expired_auth_rate_limits")
     )
 
     result = await connection.execute(
@@ -51,11 +53,34 @@ async def delete_expired_password_recovery_limits(
     return len(result.all())
 
 
-async def commit_expired_password_recovery_cleanup(
+async def delete_expired_password_recovery_limits(
+    connection: AsyncConnection,
+    *,
+    batch_size: int = 100,
+) -> int:
+    """Delete only expired recovery rows; the caller owns commit and deadline."""
+    return await _delete_expired_limits(
+        connection, batch_size=batch_size, purposes=("password_recovery",)
+    )
+
+
+async def delete_expired_auth_rate_limits(
+    connection: AsyncConnection,
+    *,
+    batch_size: int = 100,
+) -> int:
+    """Delete one shared batch of expired recovery and sign-in records."""
+    return await _delete_expired_limits(
+        connection, batch_size=batch_size, purposes=("password_recovery", "sign_in")
+    )
+
+
+async def _commit_cleanup(
     engine: AsyncEngine,
     *,
     timeout_seconds: float,
-    batch_size: int = 100,
+    batch_size: int,
+    include_sign_in: bool,
 ) -> int:
     """Run one batch and return its count only after successful commit.
 
@@ -70,9 +95,38 @@ async def commit_expired_password_recovery_cleanup(
 
     async with asyncio.timeout(timeout_seconds):
         async with engine.begin() as connection:
-            deleted = await delete_expired_password_recovery_limits(
+            delete_batch = (
+                delete_expired_auth_rate_limits
+                if include_sign_in
+                else delete_expired_password_recovery_limits
+            )
+            deleted = await delete_batch(
                 connection,
                 batch_size=batch_size,
             )
 
     return deleted
+
+
+async def commit_expired_password_recovery_cleanup(
+    engine: AsyncEngine,
+    *,
+    timeout_seconds: float,
+    batch_size: int = 100,
+) -> int:
+    """Commit one recovery-only batch under the caller-supplied deadline."""
+    return await _commit_cleanup(
+        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, include_sign_in=False
+    )
+
+
+async def commit_expired_auth_rate_limit_cleanup(
+    engine: AsyncEngine,
+    *,
+    timeout_seconds: float,
+    batch_size: int = 100,
+) -> int:
+    """Commit one shared recovery/sign-in batch under the supplied deadline."""
+    return await _commit_cleanup(
+        engine, timeout_seconds=timeout_seconds, batch_size=batch_size, include_sign_in=True
+    )

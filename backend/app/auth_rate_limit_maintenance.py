@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.auth_rate_limit_cleanup import commit_expired_password_recovery_cleanup
+from app.auth_rate_limit_cleanup import commit_expired_auth_rate_limit_cleanup
 from app.config import Settings
 
 
@@ -75,7 +75,7 @@ async def cleanup_local(
                 if tuple(identity) != (url.database, "askm6_app", True):
                     raise ValueError("Unexpected database identity.")
 
-            return await commit_expired_password_recovery_cleanup(
+            return await commit_expired_auth_rate_limit_cleanup(
                 engine,
                 batch_size=batch_size,
                 timeout_seconds=timeout_seconds,
@@ -86,7 +86,7 @@ async def cleanup_local(
 
 def main() -> int:
     parser = _MaintenanceArgumentParser(
-        description="Delete one batch of expired local recovery-limiter rows."
+        description="Delete one shared batch of expired local recovery/sign-in limiter rows."
     )
     parser.add_argument(
         "--batch-size", type=int, default=100, help="Rows per batch: 1–1000 (default 100)."

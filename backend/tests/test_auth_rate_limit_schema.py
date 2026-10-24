@@ -66,7 +66,7 @@ def test_cleanup_deadline_preserves_timezone_information(ddl: str) -> None:
 @pytest.mark.parametrize(
     ("name", "expression"),
     [
-        ("purpose_password_recovery_only", "purpose = 'password_recovery'"),
+        ("purpose_supported", "purpose IN ('password_recovery', 'sign_in')"),
         ("key_hash_length", "octet_length(key_hash) = 32"),
         ("request_times_size", "cardinality(request_times) <= 1000"),
         (
@@ -76,7 +76,7 @@ def test_cleanup_deadline_preserves_timezone_information(ddl: str) -> None:
         ),
         ("request_times_no_nulls", "array_position(request_times, NULL) IS NULL"),
     ],
-    ids=["recovery-only", "fingerprint-size", "bounded-history", "array-shape", "no-nulls"],
+    ids=["supported-purposes", "fingerprint-size", "bounded-history", "array-shape", "no-nulls"],
 )
 def test_database_constraints_compile_with_stable_names(
     ddl: str, name: str, expression: str

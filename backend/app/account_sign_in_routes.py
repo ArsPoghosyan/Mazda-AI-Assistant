@@ -23,6 +23,9 @@ from app.account_sign_in import (
 from app.account_sign_in_requests import read_sign_in_credentials
 from app.account_sign_in_service import sign_in_account
 from app.account_tokens import InvalidAccountToken
+from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_in_ip_key
+from app.auth_rate_limits import AuthRateLimitUnavailable, commit_sign_in_attempt
+from app.client_ip import ClientIPUnavailable
 from app.config import Settings
 from app.csrf import require_trusted_origin
 
@@ -53,6 +56,7 @@ def account_sign_in_unavailable() -> HTTPException:
         403: {"description": "Request origin or human verification was rejected."},
         413: {"description": "Sign-in request is too large."},
         415: {"description": "Sign-in requires a JSON request."},
+        429: {"description": "Sign-in requests are temporarily rate limited."},
         503: {"description": "Account sign-in is temporarily unavailable."},
     },
 )
@@ -79,11 +83,36 @@ async def sign_in(
         request.app.state.account_key_cache,
     )
 
-    if engine is None or client is None or key_cache is None:
+    if (
+        engine is None
+        or client is None
+        or key_cache is None
+        or settings.supabase_auth_issuer is None
+        or settings.supabase_auth_publishable_key is None
+        or settings.account_session_encryption_key is None
+        or settings.auth_rate_limit_hmac_secret is None
+    ):
         raise account_sign_in_unavailable()
 
     try:
         async with asyncio.timeout(settings.account_sign_in_timeout_seconds):
+            key_hash = get_sign_in_ip_key(request, settings)
+            decision = await commit_sign_in_attempt(
+                engine,
+                key_hash,
+                max_requests=settings.account_sign_in_ip_max_requests,
+                window_seconds=settings.account_sign_in_ip_window_seconds,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Sign-in is temporarily rate limited.",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Retry-After": str(decision.retry_after_seconds),
+                    },
+                )
+
             credentials = await read_sign_in_credentials(request)
             if credentials.captcha_token is None:
                 raise AccountSignInCaptchaRejected("Human verification is required.")
@@ -118,6 +147,9 @@ async def sign_in(
         AccountSessionUnavailable,
         AccountSessionAlreadyExists,
         InvalidAccountToken,
+        AuthRateLimitKeyUnavailable,
+        AuthRateLimitUnavailable,
+        ClientIPUnavailable,
         SQLAlchemyError,
         TimeoutError,
     ):

@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,50 +12,81 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app import auth_rate_limit_cleanup as cleanup
-from app.auth_rate_limit_cleanup import delete_expired_password_recovery_limits
+
+
+@dataclass(frozen=True)
+class CleanupAPI:
+    include_sign_in: bool
+
+    @property
+    def delete_name(self) -> str:
+        return (
+            "delete_expired_auth_rate_limits"
+            if self.include_sign_in
+            else "delete_expired_password_recovery_limits"
+        )
+
+    async def delete(self, connection: AsyncConnection, *, batch_size: int = 100) -> int:
+        function = (
+            cleanup.delete_expired_auth_rate_limits
+            if self.include_sign_in
+            else cleanup.delete_expired_password_recovery_limits
+        )
+        return await function(connection, batch_size=batch_size)
+
+    async def commit(
+        self, engine: AsyncEngine, *, timeout_seconds: float, batch_size: int = 100
+    ) -> int:
+        function = (
+            cleanup.commit_expired_auth_rate_limit_cleanup
+            if self.include_sign_in
+            else cleanup.commit_expired_password_recovery_cleanup
+        )
+        return await function(engine, timeout_seconds=timeout_seconds, batch_size=batch_size)
+
+
+@pytest.fixture(params=[False, True], ids=["recovery-only", "recovery-and-sign-in"])
+def api(request: pytest.FixtureRequest) -> CleanupAPI:
+    return CleanupAPI(bool(request.param))
 
 
 @pytest.mark.parametrize("batch", [0, -1, 1001, True, False, 1.5, "100", None])
-def test_invalid_batch_fails_before_database_access(batch: object) -> None:
+def test_invalid_batch_fails_before_database_access(api: CleanupAPI, batch: object) -> None:
     connection = MagicMock(spec=AsyncConnection)
     with pytest.raises(ValueError, match="Cleanup batch size"):
-        asyncio.run(
-            delete_expired_password_recovery_limits(connection, batch_size=cast(int, batch))
-        )
+        asyncio.run(api.delete(connection, batch_size=cast(int, batch)))
     connection.in_transaction.assert_not_called()
     connection.execute.assert_not_called()
 
 
-def test_cleanup_requires_a_caller_transaction() -> None:
+def test_cleanup_requires_a_caller_transaction(api: CleanupAPI) -> None:
     connection = MagicMock(spec=AsyncConnection)
     connection.in_transaction.return_value = False
     with pytest.raises(RuntimeError, match="requires an active transaction"):
-        asyncio.run(delete_expired_password_recovery_limits(connection))
+        asyncio.run(api.delete(connection))
     connection.execute.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["database", "cancel"])
-def test_failure_propagates_without_commit_or_retry(failure: str) -> None:
+def test_failure_propagates_without_commit_or_retry(api: CleanupAPI, failure: str) -> None:
     connection = MagicMock(spec=AsyncConnection)
     connection.in_transaction.return_value = True
     error = SQLAlchemyError if failure == "database" else asyncio.CancelledError
     connection.execute = AsyncMock(side_effect=error)
     with pytest.raises(error):
-        asyncio.run(delete_expired_password_recovery_limits(connection))
+        asyncio.run(api.delete(connection))
     connection.execute.assert_awaited_once()
     connection.commit.assert_not_called()
     connection.rollback.assert_not_called()
 
 
 @pytest.mark.parametrize("batch", [0, -1, 1001, True, False, 1.5, "100", None])
-def test_wrapper_rejects_invalid_batch_before_acquiring_a_connection(batch: object) -> None:
+def test_wrapper_rejects_invalid_batch_before_acquiring_a_connection(
+    api: CleanupAPI, batch: object
+) -> None:
     engine = MagicMock(spec=AsyncEngine)
     with pytest.raises(ValueError, match="Cleanup batch size"):
-        asyncio.run(
-            cleanup.commit_expired_password_recovery_cleanup(
-                engine, timeout_seconds=1, batch_size=cast(int, batch)
-            )
-        )
+        asyncio.run(api.commit(engine, timeout_seconds=1, batch_size=cast(int, batch)))
     engine.begin.assert_not_called()
 
 
@@ -62,20 +94,18 @@ def test_wrapper_rejects_invalid_batch_before_acquiring_a_connection(batch: obje
     "timeout",
     [0, -1, 30.001, float("nan"), float("inf"), float("-inf"), True, False, "5", None, 10**400],
 )
-def test_wrapper_rejects_invalid_deadline_before_acquiring_a_connection(timeout: object) -> None:
+def test_wrapper_rejects_invalid_deadline_before_acquiring_a_connection(
+    api: CleanupAPI, timeout: object
+) -> None:
     engine = MagicMock(spec=AsyncEngine)
     with pytest.raises(ValueError, match="Cleanup timeout"):
-        asyncio.run(
-            cleanup.commit_expired_password_recovery_cleanup(
-                engine, timeout_seconds=cast(float, timeout)
-            )
-        )
+        asyncio.run(api.commit(engine, timeout_seconds=cast(float, timeout)))
     engine.begin.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["none", "acquire", "delete", "commit", "cancel"])
 def test_wrapper_returns_only_after_commit_and_release_without_retry(
-    monkeypatch: pytest.MonkeyPatch, failure: str
+    api: CleanupAPI, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     events: list[str] = []
     connection = MagicMock(spec=AsyncConnection)
@@ -109,12 +139,10 @@ def test_wrapper_returns_only_after_commit_and_release_without_retry(
 
     engine.begin.return_value = transaction()
     deleter = AsyncMock(side_effect=delete_batch)
-    monkeypatch.setattr(cleanup, "delete_expired_password_recovery_limits", deleter)
+    monkeypatch.setattr(cleanup, api.delete_name, deleter)
 
     async def run() -> int:
-        deleted = await cleanup.commit_expired_password_recovery_cleanup(
-            engine, timeout_seconds=30, batch_size=1000
-        )
+        deleted = await api.commit(engine, timeout_seconds=30, batch_size=1000)
         events.append("return")
         return deleted
 
@@ -140,7 +168,7 @@ def test_wrapper_returns_only_after_commit_and_release_without_retry(
 
 @pytest.mark.parametrize("phase", ["acquire", "delete", "commit", "release"])
 def test_wrapper_real_deadline_cancels_every_awaited_phase(
-    monkeypatch: pytest.MonkeyPatch, phase: str
+    api: CleanupAPI, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     async def check() -> None:
         engine = MagicMock(spec=AsyncEngine)
@@ -182,10 +210,10 @@ def test_wrapper_real_deadline_cancels_every_awaited_phase(
 
         engine.begin.return_value = transaction()
         deleter = AsyncMock(side_effect=delete_batch)
-        monkeypatch.setattr(cleanup, "delete_expired_password_recovery_limits", deleter)
+        monkeypatch.setattr(cleanup, api.delete_name, deleter)
         async with asyncio.timeout(2):
             with pytest.raises(TimeoutError):
-                await cleanup.commit_expired_password_recovery_cleanup(engine, timeout_seconds=0.03)
+                await api.commit(engine, timeout_seconds=0.03)
         assert entered.is_set() and cancelled.is_set()
         assert rolled_back is (phase == "delete")
         engine.begin.assert_called_once()
@@ -195,6 +223,7 @@ def test_wrapper_real_deadline_cancels_every_awaited_phase(
 
 
 def test_wrapper_preserves_external_cancellation_and_unwinds_transaction(
+    api: CleanupAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def check() -> None:
@@ -220,10 +249,8 @@ def test_wrapper_preserves_external_cancellation_and_unwinds_transaction(
 
         engine.begin.return_value = transaction()
         deleter = AsyncMock(side_effect=delete_batch)
-        monkeypatch.setattr(cleanup, "delete_expired_password_recovery_limits", deleter)
-        task = asyncio.create_task(
-            cleanup.commit_expired_password_recovery_cleanup(engine, timeout_seconds=30)
-        )
+        monkeypatch.setattr(cleanup, api.delete_name, deleter)
+        task = asyncio.create_task(api.commit(engine, timeout_seconds=30))
         try:
             async with asyncio.timeout(2):
                 await entered.wait()

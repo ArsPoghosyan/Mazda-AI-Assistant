@@ -24,7 +24,7 @@ development; public guest/account access remains gated.
 | Google | Browser-bound PKCE flow for new and returning accounts, verified callback, encrypted session storage |
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
-| Abuse controls | Recovery IP fingerprints and atomic rolling-window accounting; tested cleanup helper, with automatic invocation/public deployment pending |
+| Abuse controls | Recovery/sign-in throttling and shared cleanup tested; automatic cleanup and public deployment pending |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
@@ -130,9 +130,11 @@ The default pool has two connections per process and no overflow.
 Migrate the website's local `mazda6` and integration `askm6_test` databases
 independently after verifying each target. Updating one does not update the other.
 Sign-in requires account-session storage and provider-session uniqueness through
-`08cad124d60b`; Google requires `b731b533d299`. The latest rate-limit migration,
-`0826d9fbcef3`, is verified on both local website and test databases. Fresh setups
-must migrate each target explicitly; integration tests require the current head.
+`08cad124d60b`; Google requires `b731b533d299`. Recovery migration
+`0826d9fbcef3` is verified on both local website and test databases. The new
+`0f42bd53f47a` migration permits separate sign-in limiter records and is now
+verified on both local website and test databases. Migrate each target explicitly;
+integration tests and enabled sign-in throttling require the current head.
 
 Remote URLs require `sslmode=verify-full` and `sslrootcert` pointing to the CA
 certificate. Keep ordinary development on Docker. For an explicit Supabase
@@ -259,23 +261,27 @@ Defaults are 10 attempts per rolling 600 seconds, configurable through
 `AUTH_RATE_LIMIT_HMAC_SECRET` accepts 64 ASCII hexadecimal characters encoding
 an independent 32-byte key. The example placeholder stays empty; local development
 uses a separately generated key in ignored configuration. Format validation does
-not establish randomness.
+not establish randomness. Enabled recovery and sign-in require this secret.
+
+Sign-in enforces a separate counter, configured for 30 attempts per rolling 600
+seconds by default through `ACCOUNT_SIGN_IN_IP_MAX_REQUESTS` and
+`ACCOUNT_SIGN_IN_IP_WINDOW_SECONDS`, with the same bounds as recovery.
 
 Canonical peer IPs become versioned HMAC-SHA256 fingerprints; raw IP/email fields
-are absent from `app.auth_rate_limits`. PostgreSQL locks each fingerprint row,
+are absent from `app.auth_rate_limits`. PostgreSQL locks each operation/fingerprint row,
 reads time after lock acquisition, expires attempts individually and commits
 before returning a decision. Denials do not extend the block; retry seconds round
 up and account for a lowered cap. Allowed attempts remain counted after later
 provider failures; this differs from future AI-message quotas. Policy changes
 must be consistent across processes; a longer window cannot recover pruned data.
 
-The recovery route now counts before parsing or provider work, returns 429 with
-`Retry-After` when capped, and fails closed with 503 on limiter failure. It requires
-the new table in its runtime database and a configured HMAC secret; both have
-been validated locally. Invalid Origins/configuration do not
+Both routes count before parsing or provider work, return 429 with
+`Retry-After` when capped, and fail closed with 503 on limiter failure under their
+request deadlines. They require the migrated runtime database and a configured
+HMAC secret; both have been validated locally. Invalid Origins/configuration do not
 reach counting; invalid bodies/provider failures after counting retain the attempt.
-An internal cleanup helper deletes expired rows in bounded batches and skips
-locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
+An internal cleanup helper deletes expired recovery/sign-in rows in one shared
+bounded batch and skips locked rows. Its wrapper owns the transaction and a caller-supplied deadline,
 returning the count only after commit. Automatic invocation and production proxy
 verification remain pending. A local maintenance command now provides explicit
 one-batch execution with target/role checks; see the
@@ -345,14 +351,16 @@ synthetic credentials, bootstraps restricted roles, applies all migrations, chec
 schema drift, runs integration tests, and type-checks migrations. Local PostgreSQL
 tests still require explicit configuration.
 
-The PostgreSQL job's bootstrap and commands were validated locally in disposable
-Linux containers: **352 integration tests passed**, schema drift was absent, and
-all six migration files passed typing. GitHub-hosted execution is pending.
+Disposable Linux database validation passed **376 integration tests**, with no
+schema drift and all seven migration files typed. The sign-in constraint upgrade
+preserved recovery data and permissions; rollback refused while sign-in records
+existed and succeeded after removing only the synthetic sign-in test record.
 
-Latest complete backend run: **3,316 passed including PostgreSQL**. Backend lint,
-formatting (203 files), typing (197 app/test files) and migration typing (six files)
-passed. Frontend lint, **486 tests** (197 API + 289 UI/hook), strict TypeScript and
-production build passed. Automated limiter coverage includes concurrency, expiry,
+Latest complete backend run: **3,581 passed including PostgreSQL**. Backend lint,
+formatting (206 files), typing (199 app/test files) and migration typing (seven files)
+passed. The previous frontend checkpoint passed lint, **486 tests** (197 API +
+289 UI/hook), strict TypeScript and production build; frontend files are unchanged.
+Automated limiter coverage includes concurrency, expiry,
 transaction failures, cancellation, restricted maintenance targets and disposal.
 Local manual checks confirmed guest verification, registration/email confirmation,
 email/Google sign-in, restoration/sign-out, and recovery/reset with old-password

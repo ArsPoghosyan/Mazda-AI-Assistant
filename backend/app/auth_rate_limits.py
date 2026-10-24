@@ -1,16 +1,15 @@
-"""Atomic rolling-window accounting for password-recovery attempts."""
+"""Atomic rolling-window accounting for recovery and sign-in attempts."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil
+from typing import Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.models import AuthRateLimit
-
-_PURPOSE = "password_recovery"
 
 
 class AuthRateLimitUnavailable(RuntimeError):
@@ -34,10 +33,11 @@ async def _database_now(connection: AsyncConnection) -> datetime:
     return now
 
 
-async def count_password_recovery_attempt(
+async def _count_attempt(
     connection: AsyncConnection,
     key_hash: bytes,
     *,
+    purpose: Literal["password_recovery", "sign_in"],
     max_requests: int,
     window_seconds: int,
 ) -> AuthRateLimitDecision:
@@ -63,7 +63,7 @@ async def count_password_recovery_attempt(
     await connection.execute(
         insert(AuthRateLimit)
         .values(
-            purpose=_PURPOSE,
+            purpose=purpose,
             key_hash=key_hash,
             request_times=[],
             expires_at=func.clock_timestamp() + window,
@@ -71,7 +71,7 @@ async def count_password_recovery_attempt(
         .on_conflict_do_nothing(index_elements=[AuthRateLimit.purpose, AuthRateLimit.key_hash])
     )
     identity = (
-        AuthRateLimit.purpose == _PURPOSE,
+        AuthRateLimit.purpose == purpose,
         AuthRateLimit.key_hash == key_hash,
     )
     row = (
@@ -107,6 +107,40 @@ async def count_password_recovery_attempt(
     return AuthRateLimitDecision(allowed=True, checked_at=now, retry_after_seconds=0, retry_at=None)
 
 
+async def count_password_recovery_attempt(
+    connection: AsyncConnection,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Count recovery under its row lock; the caller owns commit and deadline."""
+    return await _count_attempt(
+        connection,
+        key_hash,
+        purpose="password_recovery",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
+
+
+async def count_sign_in_attempt(
+    connection: AsyncConnection,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Count sign-in under its row lock; the caller owns commit and deadline."""
+    return await _count_attempt(
+        connection,
+        key_hash,
+        purpose="sign_in",
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+    )
+
+
 async def commit_password_recovery_attempt(
     engine: AsyncEngine,
     key_hash: bytes,
@@ -121,6 +155,28 @@ async def commit_password_recovery_attempt(
     """
     async with engine.begin() as connection:
         decision = await count_password_recovery_attempt(
+            connection,
+            key_hash,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+        )
+    return decision
+
+
+async def commit_sign_in_attempt(
+    engine: AsyncEngine,
+    key_hash: bytes,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> AuthRateLimitDecision:
+    """Return the sign-in decision only after commit and connection release.
+
+    No provider calls or retries run here. Errors and cancellation propagate;
+    callers must supply a deadline and fail closed when accounting fails.
+    """
+    async with engine.begin() as connection:
+        decision = await count_sign_in_attempt(
             connection,
             key_hash,
             max_requests=max_requests,

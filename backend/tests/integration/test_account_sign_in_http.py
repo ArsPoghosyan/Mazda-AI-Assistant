@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from http.cookies import SimpleCookie
+from secrets import token_hex
 from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
@@ -16,6 +17,7 @@ import jwt
 import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import ec
+from fastapi import Request
 from fastapi.testclient import TestClient
 from jwt.algorithms import ECAlgorithm
 from pydantic import SecretStr
@@ -26,9 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.account_token_encryption import AccountTokenCipher
+from app.auth_rate_limit_keys import get_sign_in_ip_key
 from app.config import Settings
 from app.main import create_app
-from app.models import AccountSession, UserProfile
+from app.models import AccountSession, AuthRateLimit, UserProfile
 
 pytestmark = pytest.mark.integration
 
@@ -124,10 +127,17 @@ def test_http_sign_in_obeys_commit_boundary(
             "account_cookie_secure": True,
             "account_sign_in_api_enabled": True,
             "account_sign_in_timeout_seconds": 15,
+            "auth_rate_limit_hmac_secret": token_hex(32),
             "csrf_trusted_origins": (ORIGIN,),
         }
     )
 
+    rate_key = get_sign_in_ip_key(
+        Request({"type": "http", "headers": [], "client": ("192.0.2.12", 12345)}), settings
+    )
+    rate_statement = select(AuthRateLimit).where(
+        AuthRateLimit.purpose == "sign_in", AuthRateLimit.key_hash == rate_key
+    )
     events: list[str] = []
     key_requests: list[httpx2.Request] = []
     sign_in_requests: list[httpx2.Request] = []
@@ -139,7 +149,7 @@ def test_http_sign_in_obeys_commit_boundary(
 
     def provider(request: httpx2.Request) -> httpx2.Response:
         if request.method == "GET" and str(request.url) == ISSUER + "/user":
-            assert events == ["provider"]
+            assert events == ["limit-begin", "limit-commit", "provider"]
             assert request.headers["authorization"] == f"Bearer {access_token}"
             assert request.headers["apikey"] == "sb_publishable_synthetic_test_key"
             assert request.content == b""
@@ -153,7 +163,10 @@ def test_http_sign_in_obeys_commit_boundary(
 
         assert request.method == "POST"
         assert str(request.url) == ISSUER + "/token?grant_type=password"
-        assert events == []
+        assert events == ["limit-begin", "limit-commit"]
+        with integration_engine.connect() as observer:
+            assert len(observer.execute(rate_statement).one().request_times) == 1
+            assert observer.execute(session_statement).one_or_none() is None
         assert request.headers.get("authorization") is None
         assert json.loads(request.content) == {
             "email": EMAIL,
@@ -196,7 +209,7 @@ def test_http_sign_in_obeys_commit_boundary(
 
         @event.listens_for(engine.sync_engine, "begin")
         def restrict_transaction(connection: Connection) -> None:
-            events.append("begin")
+            events.append("begin" if "provider" in events else "limit-begin")
             connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
             connection.exec_driver_sql("SET LOCAL ROLE askm6_app")
             restricted = connection.scalar(
@@ -210,6 +223,10 @@ def test_http_sign_in_obeys_commit_boundary(
 
         @event.listens_for(engine.sync_engine, "commit")
         def inspect_before_commit(connection: Connection) -> None:
+            if "provider" not in events:
+                assert len(connection.execute(rate_statement).one().request_times) == 1
+                events.append("limit-commit")
+                return
             events.append("commit")
 
             # Both writes must have occurred before inducing the failure.
@@ -235,6 +252,7 @@ def test_http_sign_in_obeys_commit_boundary(
         with TestClient(
             create_app(settings),
             base_url="https://api.example.test",
+            client=("192.0.2.12", 12345),
             backend_options={"loop_factory": asyncio.SelectorEventLoop},
         ) as client:
             response = client.post(
@@ -251,13 +269,21 @@ def test_http_sign_in_obeys_commit_boundary(
             )
 
             assert response.headers["Cache-Control"] == "no-store"
-            assert events == ["provider", "verify", "begin", "commit"]
+            assert events == [
+                "limit-begin",
+                "limit-commit",
+                "provider",
+                "verify",
+                "begin",
+                "commit",
+            ]
             assert len(sign_in_requests) == 1
             assert len(key_requests) == 1
 
             with integration_engine.connect() as observer:
                 stored = observer.execute(session_statement).one_or_none()
                 profile = observer.scalar(profile_statement)
+                assert len(observer.execute(rate_statement).one().request_times) == 1
 
             for secret in (
                 EMAIL,
@@ -327,3 +353,8 @@ def test_http_sign_in_obeys_commit_boundary(
                 )
             )
             connection.execute(delete(UserProfile).where(UserProfile.id == user_id))
+            connection.execute(
+                delete(AuthRateLimit).where(
+                    AuthRateLimit.purpose == "sign_in", AuthRateLimit.key_hash == rate_key
+                )
+            )

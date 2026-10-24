@@ -85,7 +85,7 @@ def case(monkeypatch: pytest.MonkeyPatch) -> MaintenanceCase:
     factory = MagicMock(return_value=engine)
     deleter = AsyncMock(side_effect=delete_batch)
     monkeypatch.setattr(maintenance, "create_async_engine", factory)
-    monkeypatch.setattr(maintenance, "commit_expired_password_recovery_cleanup", deleter)
+    monkeypatch.setattr(maintenance, "commit_expired_auth_rate_limit_cleanup", deleter)
     return MaintenanceCase(settings_for(), engine, connection, result, factory, deleter, events)
 
 
@@ -418,3 +418,4 @@ def test_module_help_runs_in_a_fresh_process_without_private_configuration() -> 
     )
     assert result.returncode == 0 and result.stderr == ""
     assert "--batch-size" in result.stdout and CANARY not in result.stdout
+    assert "recovery/sign-in" in result.stdout

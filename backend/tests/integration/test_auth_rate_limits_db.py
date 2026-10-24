@@ -24,6 +24,7 @@ class LimitCase:
     engine: AsyncEngine
     observer: AsyncEngine
     application_name: str
+    purpose: str
     key: bytes = field(repr=False)
     other_key: bytes = field(repr=False)
 
@@ -31,8 +32,10 @@ class LimitCase:
 type CaseFactory = Callable[[], AbstractAsyncContextManager[LimitCase]]
 
 
-@pytest.fixture
-def case_factory(integration_engine: Engine) -> CaseFactory:
+@pytest.fixture(params=["password_recovery", "sign_in"])
+def case_factory(integration_engine: Engine, request: pytest.FixtureRequest) -> CaseFactory:
+    purpose = str(request.param)
+
     @asynccontextmanager
     async def connect() -> AsyncIterator[LimitCase]:
         key, other_key = token_bytes(32), token_bytes(32)
@@ -72,7 +75,7 @@ def case_factory(integration_engine: Engine) -> CaseFactory:
                     )
                     is True
                 )
-            yield LimitCase(engine, observer, name, key, other_key)
+            yield LimitCase(engine, observer, name, purpose, key, other_key)
         finally:
             # Real commits are needed to test visibility and concurrent callers.
             # Remove only this test's two synthetic keys, even after failures.
@@ -80,7 +83,7 @@ def case_factory(integration_engine: Engine) -> CaseFactory:
                 async with engine.begin() as connection:
                     await connection.execute(
                         delete(AuthRateLimit).where(
-                            AuthRateLimit.purpose == "password_recovery",
+                            AuthRateLimit.purpose.in_(["password_recovery", "sign_in"]),
                             AuthRateLimit.key_hash.in_([key, other_key]),
                         )
                     )
@@ -91,11 +94,11 @@ def case_factory(integration_engine: Engine) -> CaseFactory:
     return connect
 
 
-async def seed(case: LimitCase, times: list[datetime]) -> None:
+async def seed(case: LimitCase, times: list[datetime], *, purpose: str | None = None) -> None:
     async with case.engine.begin() as connection:
         await connection.execute(
             insert(AuthRateLimit).values(
-                purpose="password_recovery",
+                purpose=purpose if purpose is not None else case.purpose,
                 key_hash=case.key,
                 request_times=times,
                 expires_at=max(times) + timedelta(seconds=600),
@@ -103,12 +106,14 @@ async def seed(case: LimitCase, times: list[datetime]) -> None:
         )
 
 
-async def read_state(case: LimitCase) -> tuple[list[datetime], datetime] | None:
+async def read_state(
+    case: LimitCase, *, purpose: str | None = None
+) -> tuple[list[datetime], datetime] | None:
     async with case.engine.connect() as connection:
         row = (
             await connection.execute(
                 select(AuthRateLimit).where(
-                    AuthRateLimit.purpose == "password_recovery",
+                    AuthRateLimit.purpose == (purpose if purpose is not None else case.purpose),
                     AuthRateLimit.key_hash == case.key,
                 )
             )
@@ -124,10 +129,24 @@ def fix_time(monkeypatch: pytest.MonkeyPatch, now: datetime) -> None:
 
 
 async def count(
-    case: LimitCase, maximum: int = 3, window: int = 600
+    case: LimitCase,
+    maximum: int = 3,
+    window: int = 600,
+    *,
+    key: bytes | None = None,
+    purpose: str | None = None,
 ) -> limiter.AuthRateLimitDecision:
-    return await limiter.commit_password_recovery_attempt(
-        case.engine, case.key, max_requests=maximum, window_seconds=window
+    selected = purpose if purpose is not None else case.purpose
+    commit = (
+        limiter.commit_sign_in_attempt
+        if selected == "sign_in"
+        else limiter.commit_password_recovery_attempt
+    )
+    return await commit(
+        case.engine,
+        key if key is not None else case.key,
+        max_requests=maximum,
+        window_seconds=window,
     )
 
 
@@ -252,9 +271,7 @@ def test_distinct_fingerprints_have_independent_limits(case_factory: CaseFactory
         async with case_factory() as case:
             assert (await count(case, maximum=1)).allowed
             before = await read_state(case)
-            other = await limiter.commit_password_recovery_attempt(
-                case.engine, case.other_key, max_requests=1, window_seconds=600
-            )
+            other = await count(case, maximum=1, key=case.other_key)
             assert other.allowed
             assert not (await count(case, maximum=1)).allowed
             assert await read_state(case) == before
@@ -291,9 +308,12 @@ def test_rollback_restores_previous_window(case_factory: CaseFactory, existing: 
             before = await read_state(case)
             async with case.engine.connect() as connection:
                 transaction = await connection.begin()
-                decision = await limiter.count_password_recovery_attempt(
-                    connection, case.key, max_requests=3, window_seconds=600
+                counter = (
+                    limiter.count_sign_in_attempt
+                    if case.purpose == "sign_in"
+                    else limiter.count_password_recovery_attempt
                 )
+                decision = await counter(connection, case.key, max_requests=3, window_seconds=600)
                 assert decision.allowed
                 await transaction.rollback()
             assert await read_state(case) == before
@@ -309,7 +329,9 @@ def test_time_is_read_after_a_real_row_lock_wait(case_factory: CaseFactory) -> N
                 transaction = await locker.begin()
                 await locker.execute(
                     select(AuthRateLimit)
-                    .where(AuthRateLimit.key_hash == case.key)
+                    .where(
+                        AuthRateLimit.purpose == case.purpose, AuthRateLimit.key_hash == case.key
+                    )
                     .with_for_update()
                 )
                 task = asyncio.create_task(count(case, maximum=1, window=60))
@@ -320,7 +342,10 @@ def test_time_is_read_after_a_real_row_lock_wait(case_factory: CaseFactory) -> N
                     expiry = now + timedelta(seconds=0.15)
                     await locker.execute(
                         update(AuthRateLimit)
-                        .where(AuthRateLimit.key_hash == case.key)
+                        .where(
+                            AuthRateLimit.purpose == case.purpose,
+                            AuthRateLimit.key_hash == case.key,
+                        )
                         .values(request_times=[expiry - timedelta(seconds=60)], expires_at=expiry)
                     )
                     await locker.execute(select(func.pg_sleep(0.25)))
@@ -349,7 +374,9 @@ def test_cancelling_a_blocked_transaction_preserves_state(case_factory: CaseFact
                 transaction = await locker.begin()
                 await locker.execute(
                     select(AuthRateLimit)
-                    .where(AuthRateLimit.key_hash == case.key)
+                    .where(
+                        AuthRateLimit.purpose == case.purpose, AuthRateLimit.key_hash == case.key
+                    )
                     .with_for_update()
                 )
                 task = asyncio.create_task(count(case))
@@ -366,5 +393,90 @@ def test_cancelling_a_blocked_transaction_preserves_state(case_factory: CaseFact
                     await asyncio.gather(task, return_exceptions=True)
             assert await read_state(case) == before
             assert (await count(case)).allowed
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_same_fingerprint_has_independent_operation_caps_and_windows(
+    case_factory: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    fix_time(monkeypatch, now)
+
+    async def check() -> None:
+        async with case_factory() as case:
+            other = "sign_in" if case.purpose == "password_recovery" else "password_recovery"
+            assert (await count(case, maximum=1, window=60)).allowed
+            own_before = await read_state(case)
+            for _ in range(2):
+                assert (await count(case, maximum=2, window=600, purpose=other)).allowed
+            other_before = await read_state(case, purpose=other)
+            assert own_before == ([now], now + timedelta(seconds=60))
+            assert other_before == ([now, now], now + timedelta(seconds=600))
+            own_denied = await count(case, maximum=1, window=60)
+            other_denied = await count(case, maximum=2, window=600, purpose=other)
+            assert not own_denied.allowed and own_denied.retry_after_seconds == 60
+            assert not other_denied.allowed and other_denied.retry_after_seconds == 600
+            assert own_denied.retry_at == now + timedelta(seconds=60)
+            assert other_denied.retry_at == now + timedelta(seconds=600)
+            assert await read_state(case) == own_before
+            assert await read_state(case, purpose=other) == other_before
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_other_operation_does_not_wait_for_same_fingerprint_row_lock(
+    case_factory: CaseFactory,
+) -> None:
+    async def check() -> None:
+        async with case_factory() as case:
+            other = "sign_in" if case.purpose == "password_recovery" else "password_recovery"
+            now = datetime.now(UTC)
+            await seed(case, [now])
+            await seed(case, [now], purpose=other)
+            own_before = await read_state(case)
+            async with case.engine.connect() as locker:
+                transaction = await locker.begin()
+                try:
+                    await locker.execute(
+                        select(AuthRateLimit)
+                        .where(
+                            AuthRateLimit.purpose == case.purpose,
+                            AuthRateLimit.key_hash == case.key,
+                        )
+                        .with_for_update()
+                    )
+                    # This must finish while the other purpose's lock is held.
+                    result = await asyncio.wait_for(count(case, purpose=other), timeout=4)
+                    assert result.allowed
+                    assert await read_state(case) == own_before
+                    other_state = await read_state(case, purpose=other)
+                    assert other_state is not None and len(other_state[0]) == 2
+                finally:
+                    await transaction.rollback()
+
+    asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_concurrent_operations_enforce_separate_caps_for_same_fingerprint(
+    case_factory: CaseFactory,
+) -> None:
+    async def check() -> None:
+        async with case_factory() as case:
+            other = "sign_in" if case.purpose == "password_recovery" else "password_recovery"
+            async with asyncio.timeout(10):
+                decisions = await asyncio.gather(
+                    *(count(case, maximum=3) for _ in range(12)),
+                    *(count(case, maximum=2, purpose=other) for _ in range(12)),
+                )
+            assert sum(result.allowed for result in decisions[:12]) == 3
+            assert sum(result.allowed for result in decisions[12:]) == 2
+            assert all(
+                result.retry_after_seconds >= 1 for result in decisions if not result.allowed
+            )
+            own_state = await read_state(case)
+            other_state = await read_state(case, purpose=other)
+            assert own_state is not None and len(own_state[0]) == 3
+            assert other_state is not None and len(other_state[0]) == 2
 
     asyncio.run(check(), loop_factory=asyncio.SelectorEventLoop)
