@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
   AccountSignInRateLimitedError,
+  AccountSignOutRequiredError,
   AccountVerificationRequiredError,
   checkAccountSession,
   signInAccount,
@@ -53,6 +54,11 @@ test('submits only credentials and proof once, returning only metadata', async (
 
 for (const [status, name, message] of [
   [
+    409,
+    'AccountSignOutRequiredError',
+    'Sign out before starting another account login.',
+  ],
+  [
     401,
     'AccountSignInRejectedError',
     'Sign-in was rejected. Please try again.',
@@ -101,6 +107,26 @@ test('recognizes an explicit verification rejection', async (t) => {
     assert.equal(error.message, 'Please complete human verification.')
     return true
   })
+})
+
+test('requires sign-out on conflict without reading private content or retrying', async (t) => {
+  const response = new Response('private conflict details', {
+    status: 409,
+    headers: { 'Retry-After': '61', 'X-Account-Verification': 'required' },
+  })
+  const read = t.mock.method(response, 'json', async () => {
+    throw new Error('Error response body must not be read')
+  })
+  const request = t.mock.method(globalThis, 'fetch', async () => response)
+
+  await assert.rejects(signInAccount(credentials), (error) => {
+    assert.ok(error instanceof AccountSignOutRequiredError)
+    assert.equal(error.message, 'Sign out before starting another account login.')
+    assert.equal(error.cause, undefined)
+    return true
+  })
+  assert.equal(read.mock.callCount(), 0)
+  assert.equal(request.mock.callCount(), 1)
 })
 
 test('ignores the verification header on an unavailable response', async (t) => {

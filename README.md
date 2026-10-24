@@ -33,6 +33,13 @@ authentication deployment. Expired guest sessions are rejected before refresh.
 Planned embeddings use OpenAI `text-embedding-3-small` (1536 dimensions); answer
 generation is planned with Groq.
 
+Sign-in failures now have secret-free stage diagnostics and tested
+[commit-uncertainty/identity boundaries](reference/IMPLEMENTATION.md#provider-success-and-local-failure).
+Local rollback does not revoke a provider session; automatic provider logout
+remains unimplemented, and broader hosted linking/method behavior needs release validation.
+Both Google and password sign-in require explicit sign-out when an account cookie
+is present; a blocked attempt preserves the current session.
+
 ## Stack and layout
 
 | Layer | Technology / location |

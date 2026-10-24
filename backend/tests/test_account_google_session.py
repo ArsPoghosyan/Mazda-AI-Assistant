@@ -152,6 +152,50 @@ async def invoke(material: Material) -> CreatedAccountSession:
     )
 
 
+@pytest.mark.parametrize("phase", ["verify", "begin", "persist", "commit"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_incomplete_google_session_logs_only_stage_and_preserves_failure(
+    material: Material, caplog: pytest.LogCaptureFixture, phase: str, cancelled: bool
+) -> None:
+    failure = (
+        asyncio.CancelledError("private-provider-detail")
+        if cancelled
+        else SQLAlchemyError("private-provider-detail")
+    )
+    if phase == "verify":
+        material.verify.side_effect = failure
+    elif phase == "begin":
+        material.engine.begin.side_effect = failure
+    elif phase == "persist":
+        material.persist.side_effect = failure
+    else:
+        material.commit.side_effect = failure
+
+    with pytest.raises(type(failure)) as caught:
+        await invoke(material)
+    assert caught.value is failure
+    stages = {
+        "verify": "verify_provider_session",
+        "begin": "open_local_transaction",
+        "persist": "persist_local_session",
+        "commit": "commit_or_release",
+    }
+    records = [record for record in caplog.records if record.name == service.__name__]
+    assert [record.getMessage() for record in records] == [
+        f"Google sign-in incomplete after provider response: stage={stages[phase]}"
+    ]
+    assert all(record.exc_info is None for record in records)
+    for secret in (
+        "private-provider-detail",
+        material.tokens.access_token.get_secret_value(),
+        material.tokens.refresh_token.get_secret_value(),
+        material.created.token.get_secret_value(),
+    ):
+        assert secret not in caplog.text
+    assert material.verify.await_count == 1
+    assert material.persist.await_count == (1 if phase in ("persist", "commit") else 0)
+
+
 async def test_returns_only_application_session_after_verification_commit_and_release(
     material: Material,
 ) -> None:

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   AccountSignInRateLimitedError,
   AccountSignInRejectedError,
+  AccountSignOutRequiredError,
   AccountVerificationRequiredError,
   signInAccount,
   type AccountSignInCredentials,
@@ -87,6 +88,8 @@ export function useAccountSignIn() {
 
       if (timedOut) {
         message = 'Sign-in took too long. Please try again.'
+      } else if (error instanceof AccountSignOutRequiredError) {
+        message = 'Sign out before starting another account login.'
       } else if (error instanceof AccountSignInRateLimitedError) {
         const seconds = error.retryAfterSeconds
         message = seconds === null

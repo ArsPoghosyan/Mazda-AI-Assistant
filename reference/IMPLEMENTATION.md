@@ -1007,8 +1007,80 @@ failure. Two opt-in local PostgreSQL cases use generated ES256 credentials and
 mocked provider/JWKS responses to exercise the actual verification and storage
 flow. They confirm committed encrypted credentials and hashed browser tokens, or
 rollback of both newly inserted profile and session rows after a deliberate SQL
-error before commit completes. These tests do not simulate an uncertain network
-failure during commit and make no live Supabase requests.
+error before commit completes. Additional uncertainty coverage is described below;
+all provider requests are mocked.
+
+### Provider success and local failure
+
+Email and Google session services emit a fixed warning when completion fails after
+receiving provider credentials. The only variable is one of four internal stages:
+`verify_provider_session`, `open_local_transaction`, `persist_local_session`, or
+`commit_or_release`. Exception text/tracebacks, email addresses, tokens and user/session
+identifiers are excluded. The original exception or cancellation still propagates;
+logging never converts an incomplete operation into a login success.
+
+The existing fail-closed contract is retained: no browser credential returns until
+commit and release finish, and HTTP handlers issue no replacement account cookie
+after an unavailable result. A commit acknowledgement can be lost after the data
+has committed. Retrying the same provider-session ID cannot overwrite its stored
+browser-token hash; a new provider login can establish a separate local session.
+The bounded local expiry cleanup can remove an unreachable local session later.
+
+A local rollback does not revoke a Supabase session. This slice deliberately
+preserves the current no-automatic-compensation behavior: an uncertain commit or
+duplicate binding is insufficient evidence that a provider session is unused.
+Blind logout could invalidate an existing binding. Provider-side orphan sessions
+may remain; cleanup of local rows does not revoke them. Any future compensating
+logout needs verified credential/session ownership, concurrency coordination and
+a bounded failure policy. Supabase's [local logout scope](https://supabase.com/docs/guides/auth/signout)
+targets one provider session, while access JWTs can remain valid until expiry.
+No automatic provider revocation or guaranteed cross-system atomicity is claimed.
+
+Application identity remains the cryptographically verified Supabase `sub`, never
+an email address or `user_metadata.user_id`. Supabase manages
+[identity linking](https://supabase.com/docs/guides/auth/auth-identity-linking);
+when it returns the same subject for email/Google, one application profile is reused.
+Different subjects remain separate even with identical email metadata. The app
+adds no manual linking or automatic guest-data transfer. Supabase's
+[JWT claims reference](https://supabase.com/docs/guides/auth/jwt-fields)
+defines `aal1` for both password and OAuth and `amr.method=oauth` for OAuth generally;
+these values do not independently prove a specific upstream Google method.
+An additional read-only hosted-provider check confirmed an active verified subject
+with both email and Google identities linked. This is evidence for that account,
+not every provider/linking scenario or proof of a specific upstream method.
+Broader hosted linking and method assurance still need release validation.
+
+Password sign-in now matches the Google start/callback rule: presence of the
+configured account cookie, including an empty or malformed value, blocks a new
+login. Password sign-in returns `409` with `Cache-Control: no-store` before body
+parsing, IP accounting or provider requests, and does not issue/clear cookies.
+The frontend maps this status to a fixed sign-out instruction without reading the
+error body or automatically retrying. An explicit successful application sign-out
+allows another login; a failed sign-out preserves the old cookie and keeps the
+guard in force. The normal session check can clear an invalid/expired cookie.
+Guest cookies and identities remain independent. This guard protects requests
+that carry an account cookie; it does not serialize separate tabs or simultaneous
+requests that were sent before either browser received a cookie.
+
+This is an application-session switching rule, not manual provider identity
+linking or proof of Google's upstream authentication method.
+
+Six new PostgreSQL cases use generated ES256 credentials, actual commit/release
+and mocked provider replies. They inject an error or cancellation after a real
+commit, confirm the row exists despite no returned credential, preserve it across
+a duplicate retry through the other login service, and allow a fresh session.
+They also verify same-subject reuse and distinct-subject isolation across both
+flows. This simulates post-commit failure; it does not reproduce a physical
+network partition. Sixteen new offline cases cover stage-only diagnostics and
+unchanged exceptions/cancellation at verification, acquisition, persistence and commit.
+
+Validation passed 981 selected backend authentication tests, including guarded
+PostgreSQL coverage, plus all 333 frontend API and 356 UI/hook tests. Ruff, all
+230 Python files' formatting, 218 application/test sources and 12 migration
+sources passed checks, as did frontend lint, TypeScript and the production build.
+Private-file/secret checks and all 68 local documentation links passed. Automated
+provider requests were mocked; the separate read-only hosted-provider check is
+described above. No provider settings, schema or revocation behavior changed.
 
 ## Account sign-in endpoint
 
@@ -1069,6 +1141,7 @@ idle deadline. Responses use `Cache-Control: no-store`.
 | Recognized provider credential rejection | 401 |
 | Missing, duplicate, null, or untrusted Origin | 403 |
 | Omitted/null CAPTCHA proof, or explicit provider CAPTCHA rejection | 403 with `X-Account-Verification: required` |
+| Account cookie present; explicit sign-out required | 409 |
 | Body over 16 KiB | 413 |
 | Missing or unsupported content type | 415 |
 | Application sign-in limit reached | 429 with `Retry-After` |
@@ -1080,7 +1153,7 @@ messages or send a Bearer authentication challenge. Controlled failures do not
 set or clear an existing account cookie, and sign-in is not automatically retried.
 Only missing/rejected CAPTCHA verification sets `X-Account-Verification: required`;
 Origin failures, ordinary credential rejection, and unavailable services do not.
-The route does not revoke an earlier session when a new sign-in succeeds.
+Sessions in other browsers/devices are not revoked when a new sign-in succeeds.
 Database rollback cannot undo provider-side sign-in, and uncertain commit outcomes
 remain unresolved as described above.
 

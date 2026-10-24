@@ -264,7 +264,6 @@ def test_http_sign_in_obeys_commit_boundary(
                 },
                 headers={
                     "Origin": ORIGIN,
-                    "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
                 },
             )
 
@@ -345,6 +344,30 @@ def test_http_sign_in_obeys_commit_boundary(
             assert stored.created_at == stored.last_seen_at
             assert stored.idle_expires_at == stored.created_at + timedelta(days=7)
             assert stored.absolute_expires_at == stored.created_at + timedelta(days=30)
+
+            # The browser now owns this session. A second login must not touch
+            # the provider, rate-limit row, profile, or committed credentials.
+            events_before = list(events)
+            blocked = client.post(
+                "/api/v1/account/sign-in",
+                json={
+                    "email": "another@example.test",
+                    "password": PASSWORD,
+                    "captcha_token": CAPTCHA_TOKEN,
+                },
+                headers={"Origin": ORIGIN},
+            )
+            assert blocked.status_code == 409
+            assert blocked.json() == {"detail": "Sign out before starting another account login."}
+            assert blocked.headers["Cache-Control"] == "no-store"
+            assert "set-cookie" not in blocked.headers
+            assert client.cookies.get(COOKIE_NAME) == browser_token
+            assert events == events_before
+            assert len(sign_in_requests) == 1
+            with integration_engine.connect() as observer:
+                assert observer.execute(session_statement).one() == stored
+                assert observer.scalar(profile_statement) == user_id
+                assert len(observer.execute(rate_statement).one().request_times) == 1
     finally:
         with integration_engine.begin() as connection:
             connection.execute(

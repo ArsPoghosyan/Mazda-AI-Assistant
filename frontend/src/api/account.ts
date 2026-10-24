@@ -24,6 +24,13 @@ export class AccountSignInRejectedError extends Error {
   }
 }
 
+export class AccountSignOutRequiredError extends Error {
+  constructor() {
+    super('Sign out before starting another account login.')
+    this.name = 'AccountSignOutRequiredError'
+  }
+}
+
 export class AccountSignInRateLimitedError extends Error {
   readonly retryAfterSeconds: number | null
 
@@ -75,6 +82,10 @@ export async function signInAccount(
   }
 
   if (!response.ok) {
+    if (response.status === 409) {
+      throw new AccountSignOutRequiredError()
+    }
+
     if (response.status === 429) {
       throw new AccountSignInRateLimitedError(response.headers.get('Retry-After'))
     }

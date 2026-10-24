@@ -182,6 +182,52 @@ async def invoke(
     )
 
 
+@pytest.mark.parametrize("phase", ["verify", "begin", "persist", "commit"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_incomplete_sign_in_logs_only_stage_and_preserves_failure(
+    material: SignInMaterial, caplog: pytest.LogCaptureFixture, phase: str, cancelled: bool
+) -> None:
+    failure = (
+        asyncio.CancelledError("private-provider-detail")
+        if cancelled
+        else SQLAlchemyError("private-provider-detail")
+    )
+    if phase == "verify":
+        material.authenticate.side_effect = failure
+    elif phase == "begin":
+        material.engine.begin.side_effect = failure
+    elif phase == "persist":
+        material.create_session.side_effect = failure
+    else:
+        material.commit.side_effect = failure
+
+    with pytest.raises(type(failure)) as caught:
+        await invoke(material)
+    assert caught.value is failure
+    stages = {
+        "verify": "verify_provider_session",
+        "begin": "open_local_transaction",
+        "persist": "persist_local_session",
+        "commit": "commit_or_release",
+    }
+    records = [record for record in caplog.records if record.name == service.__name__]
+    assert [record.getMessage() for record in records] == [
+        f"Account sign-in incomplete after provider response: stage={stages[phase]}"
+    ]
+    assert all(record.exc_info is None for record in records)
+    for secret in (
+        "private-provider-detail",
+        EMAIL.get_secret_value(),
+        PASSWORD.get_secret_value(),
+        material.tokens.access_token.get_secret_value(),
+        material.tokens.refresh_token.get_secret_value(),
+        material.created.token.get_secret_value(),
+    ):
+        assert secret not in caplog.text
+    material.sign_in.assert_awaited_once()
+    assert material.create_session.await_count == (1 if phase in ("persist", "commit") else 0)
+
+
 async def test_returns_session_after_commit_and_connection_release(
     material: SignInMaterial,
 ) -> None:

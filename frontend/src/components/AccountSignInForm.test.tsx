@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
   AccountSignInRateLimitedError,
   AccountSignInRejectedError,
+  AccountSignOutRequiredError,
   AccountVerificationRequiredError,
   signInAccount,
   type AccountSessionResponse,
@@ -226,6 +227,11 @@ test.each([
     name: 'credential rejection',
     error: new AccountSignInRejectedError(),
     message: 'Sign-in was rejected. Check your details and try again.',
+  },
+  {
+    name: 'account conflict',
+    error: new AccountSignOutRequiredError(),
+    message: 'Sign out before starting another account login.',
   },
   {
     name: 'verification rejection',

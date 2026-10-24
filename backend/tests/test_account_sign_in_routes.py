@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
@@ -22,6 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_auth import AccountAuthenticationUnavailable
+from app.account_cookies import account_cookie_name
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import (
     AccountSessionAlreadyExists,
@@ -223,6 +224,71 @@ def test_missing_resource_stops_before_reading_credentials(
     )
 
 
+@pytest.mark.parametrize("secure", [False, True], ids=["local", "secure"])
+@pytest.mark.parametrize("value", ["", "stale", "B" * 43], ids=["empty", "malformed", "shaped"])
+def test_account_cookie_requires_sign_out_before_any_login_work(
+    guards: GuardMocks, secure: bool, value: str
+) -> None:
+    settings = make_settings()
+    settings.account_cookie_secure = secure
+    application = create_app(settings)
+    cookie = account_cookie_name(settings)
+    with TestClient(application, base_url="https://api.example.test") as client:
+        install_resources(application)
+        response = client.post(
+            PATH,
+            content=b"not-json",
+            headers={"Origin": ORIGIN, "Cookie": f"{cookie}={value}"},
+        )
+    assert_blocked(response, guards, 409, "Sign out before starting another account login.")
+
+
+@pytest.mark.parametrize("sign_out_fails", [False, True], ids=["signed-out", "sign-out-failed"])
+def test_switch_requires_successful_explicit_sign_out(
+    route_material: "RouteMaterial", monkeypatch: pytest.MonkeyPatch, sign_out_fails: bool
+) -> None:
+    material = route_material
+    material.settings.account_sign_out_api_enabled = True
+    delete_session = AsyncMock(
+        side_effect=SQLAlchemyError("synthetic-private") if sign_out_fails else None
+    )
+    monkeypatch.setattr(
+        "app.account_sign_out_routes.delete_account_session_transaction", delete_session
+    )
+    material.client.cookies.set(
+        "__Host-askm6_guest", "preserved-guest", domain="api.example.test", path="/"
+    )
+    assert post_credentials(material).status_code == 200
+    first_token = material.created.token.get_secret_value()
+    assert material.client.cookies.get(COOKIE_NAME) == first_token
+    assert post_credentials(material).status_code == 409
+    material.sign_in.assert_awaited_once()
+    material.counter.assert_awaited_once()
+
+    signed_out = material.client.post("/api/v1/account/sign-out", headers={"Origin": ORIGIN})
+    delete_session.assert_awaited_once_with(material.engine, SecretStr(first_token))
+    material.sign_in.return_value = replace(
+        material.created, user_id=uuid4(), token=SecretStr("C" * 43)
+    )
+    if sign_out_fails:
+        assert signed_out.status_code == 503
+        assert "set-cookie" not in signed_out.headers
+        assert material.client.cookies.get(COOKIE_NAME) == first_token
+        assert post_credentials(material).status_code == 409
+        material.sign_in.assert_awaited_once()
+        material.counter.assert_awaited_once()
+    else:
+        assert signed_out.status_code == 204
+        assert material.client.cookies.get(COOKIE_NAME) is None
+        switched = post_credentials(material)
+        assert switched.status_code == 200
+        assert switched.json()["user_id"] == str(material.sign_in.return_value.user_id)
+        assert material.client.cookies.get(COOKIE_NAME) == "C" * 43
+        assert material.sign_in.await_count == 2
+        assert material.counter.await_count == 2
+    assert material.client.cookies.get("__Host-askm6_guest") == "preserved-guest"
+
+
 EMAIL = "owner@example.test"
 PASSWORD = "  synthetic-password-é  "
 COOKIE_NAME = "__Host-askm6_account"
@@ -303,7 +369,6 @@ def post_credentials(material: RouteMaterial) -> httpx2.Response:
         },
         headers={
             "Origin": ORIGIN,
-            "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
         },
     )
 
@@ -469,7 +534,6 @@ def test_invalid_request_stops_before_sign_in_service(
         headers={
             "Origin": ORIGIN,
             "Content-Type": content_type,
-            "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
         },
     )
 
@@ -565,7 +629,6 @@ def test_missing_captcha_stops_before_sign_in_service(
         json=payload,
         headers={
             "Origin": ORIGIN,
-            "Cookie": f"{COOKIE_NAME}={OLD_BROWSER_TOKEN}",
         },
     )
 

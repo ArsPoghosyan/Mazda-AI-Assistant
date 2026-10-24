@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_auth import AccountAuthenticationUnavailable
-from app.account_cookies import set_account_cookie
+from app.account_cookies import account_cookie_name, set_account_cookie
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import AccountSessionAlreadyExists, AccountSessionUnavailable
 from app.account_sign_in import (
@@ -54,6 +54,7 @@ def account_sign_in_unavailable() -> HTTPException:
         400: {"description": "Invalid sign-in request."},
         401: {"description": "Sign-in was rejected."},
         403: {"description": "Request origin or human verification was rejected."},
+        409: {"description": "Sign out before starting another account login."},
         413: {"description": "Sign-in request is too large."},
         415: {"description": "Sign-in requires a JSON request."},
         429: {"description": "Sign-in requests are temporarily rate limited."},
@@ -93,6 +94,15 @@ async def sign_in(
         or settings.auth_rate_limit_hmac_secret is None
     ):
         raise account_sign_in_unavailable()
+
+    # Match the Google entry point: cookie presence requires explicit sign-out,
+    # including stale/malformed cookies. Never silently replace an account.
+    if account_cookie_name(settings) in request.cookies:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Sign out before starting another account login.",
+            headers={"Cache-Control": "no-store"},
+        )
 
     try:
         async with asyncio.timeout(settings.account_sign_in_timeout_seconds):
