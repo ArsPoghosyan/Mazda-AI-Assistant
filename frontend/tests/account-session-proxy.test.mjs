@@ -106,6 +106,69 @@ test('request policy rejection happens before cookie handling or network access'
   assert.equal(fetch.mock.callCount(), 0)
 })
 
+const proxySecret = 'ab'.repeat(32) // Public synthetic fixture.
+const proxyEnv = { ...env, AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: proxySecret }
+
+for (const address of ['198.51.100.20', '2001:0DB8::1', '::ffff:198.51.100.20']) {
+  test(`authenticates the edge-supplied visitor address (${address}) without returning the assertion`, async (t) => {
+    const fetch = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      assert.equal(options.headers.get('X-AskM6-Proxy-Secret'), proxySecret)
+      assert.equal(options.headers.get('X-AskM6-Client-IP'), address)
+      for (const header of ['X-Forwarded-For', 'CF-Connecting-IP', 'Forwarded', 'Authorization']) {
+        assert.equal(options.headers.get(header), null)
+      }
+      return upstream(metadata, renewal, { headers: {
+        'Content-Type': 'application/json', 'Set-Cookie': renewal,
+        'X-AskM6-Proxy-Secret': proxySecret, 'X-AskM6-Client-IP': address,
+      } })
+    })
+    const response = await forwardAccountSession(incoming({ headers: {
+      Origin: site, Cookie: `${ACCOUNT_COOKIE}=${token}`, 'CF-Connecting-IP': address,
+      'X-AskM6-Proxy-Secret': 'browser-forged', 'X-AskM6-Client-IP': '203.0.113.99',
+      'X-Forwarded-For': '203.0.113.99', Forwarded: 'for=203.0.113.99',
+    } }), proxyEnv)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+    assert.equal(response.headers.get('X-AskM6-Client-IP'), null)
+    assert.equal((await response.text()).includes(proxySecret), false)
+    assert.equal(fetch.mock.callCount(), 1)
+  })
+}
+
+for (const [label, overrides, address] of [
+  ['missing secret', { AUTH_PROXY_SHARED_SECRET: undefined }, '198.51.100.20'],
+  ['invalid secret', { AUTH_PROXY_SHARED_SECRET: 'private-secret' }, '198.51.100.20'],
+  ['oversized secret', { AUTH_PROXY_SHARED_SECRET: 'a'.repeat(65) }, '198.51.100.20'],
+  ['invalid flag', { AUTH_PROXY_TRUST_ENABLED: 'tru' }, '198.51.100.20'],
+  ...[undefined, 'unknown', '198.51.100.20, 203.0.113.30', '999.1.1.1', '019.1.1.1',
+    '198.51.100.20:1234', '[2001:db8::1]', 'fe80::1%eth0', '2001:db8::g', 'x'.repeat(46),
+  ].map((value, index) => [`invalid source ${index}`, {}, value]),
+]) {
+  test(`trusted-IP mode rejects ${label} without network or cookie changes`, async (t) => {
+    const fetch = t.mock.method(globalThis, 'fetch', async () => upstream())
+    const headers = new Headers({ Origin: site, 'X-AskM6-Client-IP': '203.0.113.99', 'X-Forwarded-For': '203.0.113.99' })
+    if (address !== undefined) headers.set('CF-Connecting-IP', address)
+    const response = await forwardAccountSession(incoming({ headers }), { ...proxyEnv, ...overrides })
+    await failure(response, 503)
+    assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+    assert.equal(fetch.mock.callCount(), 0)
+  })
+}
+
+test('default-off IP forwarding strips browser assertions even with a configured secret', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    assert.equal(options.headers.get('X-AskM6-Proxy-Secret'), null)
+    assert.equal(options.headers.get('X-AskM6-Client-IP'), null)
+    return upstream()
+  })
+  const response = await forwardAccountSession(incoming({ headers: {
+    Origin: site, Cookie: `${ACCOUNT_COOKIE}=${token}`, 'X-AskM6-Proxy-Secret': proxySecret,
+    'X-AskM6-Client-IP': '203.0.113.99',
+  } }), { ...proxyEnv, AUTH_PROXY_TRUST_ENABLED: 'false' })
+  assert.equal(response.status, 200)
+  await response.arrayBuffer()
+})
+
 for (const status of [201, 204, 301, 302, 303, 307, 308, 400, 429, 500]) {
   test(`masks unexpected HTTP ${status} and never follows or forwards redirects`, async (t) => {
     const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(status === 204 ? null : 'private', {

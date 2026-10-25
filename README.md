@@ -296,7 +296,7 @@ Guest creation and Google initiation each default to 10 attempts per rolling 600
 seconds, using `GUEST_CREATION_IP_*` and `ACCOUNT_GOOGLE_OAUTH_IP_*` respectively.
 These are configurable starting policies.
 
-Canonical peer IPs become versioned HMAC-SHA256 fingerprints; raw IP/email fields
+Validated client IPs become versioned HMAC-SHA256 fingerprints; raw IP/email fields
 are absent from `app.auth_rate_limits`. PostgreSQL locks each operation/fingerprint row,
 reads time after lock acquisition, expires attempts individually and commits
 before returning a decision. Denials do not extend the block; retry seconds round
@@ -340,13 +340,21 @@ See the [full accounting and validation reference](reference/IMPLEMENTATION.md#b
 The Pages Function permits `GET /api/v1/health` by default. Existing-account
 session checks have a [separate default-off proxy](reference/IMPLEMENTATION.md#account-session-proxy-request-policy)
 with exact HTTPS origins, cookie filtering and bounded response validation.
-Guest creation, sign-in/sign-up, sign-out and Google redirects are not forwarded.
+An optional [authenticated visitor-IP assertion](reference/IMPLEMENTATION.md#trusted-proxy-client-addresses)
+connects Pages to the backend's seven IP-based abuse limits. It defaults off;
+hosted ingress and secret configuration still require deployment verification.
+Guest creation/refresh has an [independently gated proxy](reference/IMPLEMENTATION.md#guest-session-pages-proxy)
+with bounded JSON, secure guest cookies, verification and retry signals.
+Email sign-in has a [separate default-off proxy](reference/IMPLEMENTATION.md#email-sign-in-pages-proxy)
+that preserves credentials and requires explicit sign-out before another login.
+[Sign-out forwarding](reference/IMPLEMENTATION.md#account-sign-out-pages-proxy) clears only a backend-confirmed account cookie.
+Sign-up, confirmation, recovery/reset and Google redirects are not forwarded.
 Normal production builds still disable development guest/account controls;
 public authentication is not enabled or deployment-validated. A frontend build
 does not provide an API server.
 
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
-and start command `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`.
+and start command `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-proxy-headers`.
 Provide the database CA as secret file `supabase-ca.crt`, referenced through
 `/etc/secrets/supabase-ca.crt`. Set `DATABASE_URL` as a server environment value,
 without dotenv quotes or the `DATABASE_URL=` prefix; do not give the runtime

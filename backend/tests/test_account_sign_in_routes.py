@@ -793,3 +793,25 @@ def test_accounting_finishes_before_credentials_and_sign_in_service(
     assert post_credentials(route_material).status_code == 200
     assert events == ["accounting", "parse", "service"]
     assert_service_called_once(route_material)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"CF-Connecting-IP": "198.51.100.20", "X-Forwarded-For": "198.51.100.20"},
+        {"X-AskM6-Client-IP": "198.51.100.20", "X-AskM6-Proxy-Secret": "00" * 32},
+        {"X-AskM6-Client-IP": "198.51.100.20, 203.0.113.30", "X-AskM6-Proxy-Secret": "ab" * 32},
+    ],
+)
+def test_untrusted_proxy_request_never_reads_credentials_or_counts(
+    guards: GuardMocks, headers: dict[str, str]
+) -> None:
+    settings = make_settings()
+    settings.auth_proxy_trust_enabled = True
+    settings.auth_proxy_shared_secret = SecretStr("ab" * 32)
+    application = create_app(settings)
+    with TestClient(application, base_url="https://api.example.test") as client:
+        install_resources(application)
+        response = client.post(PATH, content=b"not-json", headers={"Origin": ORIGIN, **headers})
+    assert_blocked(response, guards, 503, "Account sign-in is temporarily unavailable.")

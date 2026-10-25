@@ -1,9 +1,12 @@
 import { forwardAccountSession } from '../../server/account-session-proxy.ts'
 import type { AccountSessionProxyEnvironment } from '../../server/account-session-proxy-policy.ts'
+import { forwardGuestSession, type GuestSessionProxyEnvironment } from '../../server/guest-session-proxy.ts'
+import { forwardAccountSignIn, type AccountSignInProxyEnvironment } from '../../server/account-sign-in-proxy.ts'
+import { forwardAccountSignOut, type AccountSignOutProxyEnvironment } from '../../server/account-sign-out-proxy.ts'
 
 type ProxyContext = {
   request: Request
-  env: AccountSessionProxyEnvironment
+  env: AccountSessionProxyEnvironment & GuestSessionProxyEnvironment & AccountSignInProxyEnvironment & AccountSignOutProxyEnvironment
 }
 
 function errorResponse(message: string, status: number): Response {
@@ -21,6 +24,15 @@ export async function onRequest({
 
   if (pathname === '/api/v1/account/session') {
     return forwardAccountSession(request, env)
+  }
+  if (pathname === '/api/v1/guest/session') {
+    return forwardGuestSession(request, env)
+  }
+  if (pathname === '/api/v1/account/sign-in') {
+    return forwardAccountSignIn(request, env)
+  }
+  if (pathname === '/api/v1/account/sign-out') {
+    return forwardAccountSignOut(request, env)
   }
 
   if (pathname !== '/api/v1/health') {

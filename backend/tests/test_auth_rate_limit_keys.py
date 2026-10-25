@@ -80,6 +80,27 @@ def make_request(
     return Request(scope, receive=reject_body_read)
 
 
+def test_all_limiter_purposes_use_authenticated_visitor_ip(
+    settings: Settings, key_function: IPKeyFunction
+) -> None:
+    expected = key_function(make_request("198.51.100.20"), settings)
+    other = key_function(make_request("203.0.113.30"), settings)
+    settings.auth_proxy_trust_enabled = True
+    settings.auth_proxy_shared_secret = SecretStr("ab" * 32)
+    headers = [(b"x-askm6-proxy-secret", b"ab" * 32), (b"x-askm6-client-ip", b"198.51.100.20")]
+    assert key_function(make_request("127.0.0.1", headers), settings) == expected
+    assert key_function(make_request("10.0.0.1", headers), settings) == expected
+    assert (
+        key_function(
+            make_request("127.0.0.1", [headers[0], (b"x-askm6-client-ip", b"203.0.113.30")]),
+            settings,
+        )
+        == other
+    )
+    with pytest.raises(ClientIPUnavailable):
+        key_function(make_request("198.51.100.20"), settings)
+
+
 @pytest.mark.parametrize(
     ("function", "expected"),
     [

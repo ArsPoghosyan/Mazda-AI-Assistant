@@ -13,6 +13,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from sqlalchemy import delete, event, insert, select, text
 from sqlalchemy.engine import Connection, Engine
@@ -499,3 +500,23 @@ def test_disabled_sign_in_never_counts(sign_in_case: SignInCase) -> None:
     assert response.status_code == 503
     assert_private(response)
     assert state(sign_in_case) is None and not sign_in_case.requests
+
+
+def test_proxy_visitors_have_separate_budgets_and_spoofing_cannot_reset_them(
+    sign_in_case: SignInCase,
+) -> None:
+    sign_in_case.settings.auth_proxy_trust_enabled = True
+    sign_in_case.settings.auth_proxy_shared_secret = SecretStr("ab" * 32)
+    sign_in_case.settings.account_sign_in_ip_max_requests = 1
+    headers = {"X-AskM6-Proxy-Secret": "ab" * 32, "X-AskM6-Client-IP": PEER}
+    assert post(sign_in_case, **headers).status_code == 401
+    before = state(sign_in_case)
+    assert post(sign_in_case, **{**headers, "X-Forwarded-For": OTHER_PEER}).status_code == 429
+    assert (
+        post(sign_in_case, **{**headers, "X-AskM6-Client-IP": f"::ffff:{PEER}"}).status_code == 429
+    )
+    assert post(sign_in_case, **{**headers, "X-AskM6-Client-IP": OTHER_PEER}).status_code == 401
+    assert post(sign_in_case, **{"CF-Connecting-IP": OTHER_PEER}).status_code == 503
+    assert state(sign_in_case) == before
+    assert len(sign_in_case.requests) == 2
+    assert all("x-askm6-proxy-secret" not in request.headers for request in sign_in_case.requests)

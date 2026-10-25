@@ -32,6 +32,10 @@ not a fresh complete-suite run. The README provides the compact entry point.
 - [Account sign-out endpoint](#account-sign-out-endpoint)
 - [Account session endpoint](#account-session-endpoint)
 - [Provider refresh foundation](#provider-refresh-foundation)
+- [Trusted proxy client addresses](#trusted-proxy-client-addresses)
+- [Guest-session Pages proxy](#guest-session-pages-proxy)
+- [Email sign-in Pages proxy](#email-sign-in-pages-proxy)
+- [Account sign-out Pages proxy](#account-sign-out-pages-proxy)
 - [Account-session proxy request policy](#account-session-proxy-request-policy)
 - [Checks](#checks)
 - [License](#license)
@@ -301,7 +305,8 @@ rolling 600 seconds, configured through `GUEST_CREATION_IP_MAX_REQUESTS` (1–1,
 and `GUEST_CREATION_IP_WINDOW_SECONDS` (60–86,400). The backend needs the independent
 `AUTH_RATE_LIMIT_HMAC_SECRET`; raw peer addresses are not stored. Forwarding headers,
 challenge values and cookie clearing cannot select another budget. IPv4-mapped
-IPv6 uses the same canonical address. Production proxy trust remains pending.
+IPv6 uses the same canonical address. The optional authenticated assertion below
+adds proxy integration; live ingress verification remains pending.
 
 Origin/feature/database guards and bounded body parsing run first. An active
 cookie refresh commits and returns without resolving a fingerprint or charging
@@ -1290,9 +1295,10 @@ passed without reading private environment files or contacting services.
 
 The standalone `get_password_recovery_ip_key` helper uses HMAC-SHA256 with the
 decoded secret and a versioned password-recovery/IP context. It returns 32 bytes
-from the canonical ASGI client address, so equivalent IPv6 spellings and mapped
-IPv4 addresses share the same key. It reads no request body or forwarding headers
-directly, emits no logs, and performs no storage or network operations. Missing
+from the validated client address (ASGI peer by default), so equivalent IPv6
+spellings and mapped IPv4 addresses share the same key. It reads no request body,
+emits no logs, and performs no storage or network operations. Its resolver uses
+only the authenticated assertion when trusted proxy mode is enabled. Missing
 or malformed secret configuration fails with a generic error; unusable client
 addresses retain the IP helper's controlled error. Changing the secret changes
 the keys and therefore requires deliberate handling before active enforcement.
@@ -1670,8 +1676,8 @@ attempt and the exact rolling window. Invalid bodies never reached the provider;
 this test sent no additional recovery emails. These checks do not establish
 production proxy trust, automatic retention cleanup or all live failure cases.
 
-The standalone `get_client_ip` helper validates and normalizes the ASGI client
-address, including IPv4-mapped IPv6, without reading forwarding headers. Missing,
+By default, the standalone `get_client_ip` helper validates and normalizes the ASGI
+client address, including IPv4-mapped IPv6, without reading forwarding headers. Missing,
 malformed, oversized or scoped addresses raise a generic `ClientIPUnavailable`
 error rather than falling back to a header. Its 39 focused tests cover canonical
 addresses, source ports, invalid inputs and ignored forwarding headers. The helper
@@ -1681,7 +1687,8 @@ Uvicorn can rewrite the ASGI client address before the helper runs. Ignoring
 headers in the helper therefore does not establish a trusted proxy boundary.
 Use `--no-proxy-headers` for local peer-only validation; requests through Vite
 may then share a loopback address. Production client identification still requires
-reviewing the actual proxy chain and its header handling before integration.
+reviewing the actual proxy chain and its header handling before enabling the
+[optional authenticated assertion](#trusted-proxy-client-addresses).
 See [Uvicorn proxy settings](https://uvicorn.dev/settings/).
 
 An additional 22 in-process tests exercise the helper through Uvicorn's actual
@@ -2221,8 +2228,10 @@ fresh flow and never automatically replay a code exchange.
 
 Google initiation uses the shared atomic rolling-window limiter with its own
 `google_start` purpose and `askm6:auth-rate-limit:v1:google_start:ip:` HMAC namespace.
-The key comes only from the canonical ASGI peer; forwarded headers and browser
-cookie changes cannot select a different budget. Limiter rows store no raw IP. Resource,
+The key comes from the canonical ASGI peer by default, or the authenticated
+visitor-IP assertion when proxy trust is explicitly enabled (see below).
+Ordinary forwarding headers and browser cookie changes cannot select a different
+budget. Limiter rows store no raw IP. Resource,
 Origin, signed-in-cookie, query and body guards precede accounting. Once allowed,
 the count remains committed even if binding validation, attempt persistence,
 replacement or destination construction later fails.
@@ -2668,6 +2677,241 @@ reuse behavior. PostgreSQL rollback cannot undo provider-side token rotation, an
 an uncertain database commit is not resolved by these tests. A later request must
 reload committed state before attempting recovery; fresh sign-in may be required.
 
+## Trusted proxy client addresses
+
+All seven IP-based auth/guest limiter purposes use `app.client_ip.get_client_ip`.
+By default it uses only the ASGI peer, normalizing IPv6 and mapped IPv4, and ignores
+all forwarding headers. `AUTH_PROXY_TRUST_ENABLED=true` switches the resolver to a
+single authenticated assertion with **no peer or standard-header fallback**:
+
+| Setting | Backend | Pages server binding |
+| --- | --- | --- |
+| `AUTH_PROXY_TRUST_ENABLED` | Boolean, default `false` | Exact `true` to enable; unset/`false` disables |
+| `AUTH_PROXY_SHARED_SECRET` | `SecretStr`, empty by default | Secret binding, never `VITE_*` |
+
+Generate a dedicated random 32-byte key represented by 64 hexadecimal characters;
+use the same value on both servers, separate from the limiter HMAC key. No key or
+live setting is supplied by the repository. Keep the backend destination HTTPS
+and redirects disabled; the secret is a bearer credential protected by TLS, not
+a request signature or a user credential. A leaked key permits forged assertions
+and requires coordinated rotation. Exclude these headers, cookies and raw IPs
+from application/hosting logs; the existing access filter is not a blanket header
+logging sanitizer.
+
+`frontend/server/proxy-client-ip.ts` reads only the Pages ingress
+`CF-Connecting-IP`, validates a single bounded IPv4/IPv6 address and sets
+`X-AskM6-Client-IP` plus `X-AskM6-Proxy-Secret` from its private binding. It never
+copies browser-supplied custom assertions, Authorization, Forwarded or
+X-Forwarded-For. Missing/invalid source, secret or an unrecognized flag returns
+a fixed no-store 503 before fetching and without changing cookies. Disabled mode
+emits neither header. The session proxy filters both headers from replies.
+
+FastAPI accepts exactly one of each custom header, validates the secret format,
+compares decoded key bytes in constant time and canonicalizes the supplied IP.
+Missing/forged/duplicate/combined/malformed assertions raise the existing fixed
+client-address error, producing a controlled 503 at the limiter boundary before
+accounting/provider work. Fingerprint namespaces, rolling windows, stored HMAC
+keys and account/session authentication remain unchanged. Shared visitor IPs share
+a purpose's budget; distinct visitor IPs behind one proxy receive separate budgets.
+
+This is **not global backend access control**. Only routes using these limiter
+keys require the assertion in enabled mode. Session lookup currently has no IP
+limiter; its gated Pages helper emits the contract for subsequent auth-route
+integration. Other routes still enforce their own authentication and Origin
+rules. Public auth controls remain disabled; the guest proxy below has its own
+default-off gate and requires the assertion whenever enabled.
+
+Before enabling, verify that the actual Pages ingress supplies an unspoofable
+visitor address, including custom-domain and preview routing. Cloudflare documents
+[different Worker-subrequest and Pseudo IPv4 behaviour](https://developers.cloudflare.com/fundamentals/reference/http-headers/):
+same-zone Workers can affect the source, cross-zone requests can use a shared
+sentinel, and header-removal/overwrite transforms can change it. Do not run this
+producer on a directly reachable generic server that trusts a browser's CF header.
+The dedicated secret authenticates the Pages-to-backend hop; it does not establish
+the integrity of an incorrectly configured Pages ingress. Missing source headers
+must be fixed at ingress, not replaced with X-Forwarded-For or the Render peer.
+Keep [Uvicorn proxy-header rewriting disabled](https://uvicorn.dev/settings/)
+(`--no-proxy-headers`) for this application-level contract. The repository tests
+use synthetic ingress headers and isolated workerd; they do not validate live
+Cloudflare/Render routing, TLS termination, logs or secret provisioning.
+
+Validation: the focused offline resolver/fingerprint/sign-in guards passed 386
+tests. The broader guarded configuration/rate-limiter run passed 1,233 tests,
+including all seven PostgreSQL limiter route suites and Uvicorn boundary tests
+(these runs overlap). The complete frontend pipeline passed 512 API/proxy tests,
+13 workerd tests and 356 UI tests, plus lint, strict types and production build.
+Backend lint and mypy passed; private-config/build audits and documentation links
+passed. No live proxy secret, trust flag, schema or hosting setting was changed.
+
+## Guest-session Pages proxy
+
+The Pages handler dispatches exact `POST /api/v1/guest/session` to
+`frontend/server/guest-session-proxy.ts`. Its independent
+`GUEST_SESSION_PROXY_ENABLED` server binding must be exactly `true`; other/unset
+values return 404 without fetching. Enabled requests also require the configured
+HTTPS backend/public origins, matching URL/Origin and same-origin Fetch Metadata
+when present, plus `AUTH_PROXY_TRUST_ENABLED=true` and a valid private proxy key
+and ingress IP. Enable backend trusted-IP mode with the same key before enabling
+this route. No live binding is configured by adding the implementation.
+
+The total 20-second deadline covers input, fetch and output; cancellation aborts
+work and returns no cookie, even if a late transport ignores its signal. There
+are no retries or redirect following. Limits are 16 KiB actual request bytes and
+4 KiB actual response bytes. Declared lengths must be valid and match actual
+bytes. Workers' decoded chunked input is accepted only without Content-Length;
+other/combined framing, queries, fragments and compressed input are rejected.
+The validated JSON is rebuilt, and incoming framing headers are never copied.
+See the [Workers body/length contract](https://developers.cloudflare.com/workers/runtime-apis/request/#set-the-content-length-header).
+
+Empty input carries no proof. Nonempty input requires JSON with only optional
+`turnstile_token` (null or 1–2,048 Unicode characters, valid UTF-8). Arrays,
+unknown fields and invalid input fail before contacting the backend. Only the
+validated `__Host-askm6_guest` cookie is forwarded; duplicate/oversized cookie
+headers fail, missing/malformed/development credentials are omitted, and account,
+OAuth, Authorization and browser-supplied IP assertions are stripped. The server
+adds its authenticated visitor-IP assertion. The backend retains responsibility
+for guest refresh/create decisions, Turnstile verification and creation budgets.
+
+Success requires exactly `status: "ok"` and future UTC `expires_at`, plus exactly
+one correctly scoped secure/HttpOnly/SameSite=Lax guest cookie with a 43-character
+opaque token and matching expiry to whole seconds. A newly created token may
+differ from an expired/unknown incoming credential. No Domain, Max-Age, unknown
+or duplicate cookie attributes are accepted. Metadata and cookie are rebuilt;
+upstream CORS, redirects, unrelated cookies and private headers are dropped.
+
+All replies are no-store. Errors preserve the existing browser cookie. Only an
+exact 403 `X-Guest-Verification: required` signals a new challenge; 429 forwards
+only validated Retry-After delta-seconds from 1–86,400. Backend 400/413/415/503
+become fixed safe errors; unexpected statuses, invalid success contracts,
+network failures and timeouts become 502. No backend error body is forwarded.
+
+The account-session proxy reuses the extracted origin policy, cookie parser,
+UTC validation and bounded stream reader while retaining its own empty-body and
+renewal/deletion contracts. Public UI/auth feature flags and live settings remain
+unchanged. Tests exercise the real Pages handler in Node and isolated workerd,
+including native chunked bodies and Set-Cookie APIs; live deployment and automatic
+browser-disconnect delivery are still separate verification gates.
+
+Validation: all 630 API/proxy tests, 18 workerd tests and 356 UI tests passed,
+along with frontend lint, strict types and production build. The unchanged
+backend guest parsing/cookie/HTTP/refresh/creation-limit contracts passed 89 tests,
+including guarded PostgreSQL checks. No new dependency, migration or private
+configuration was introduced.
+
+## Email sign-in Pages proxy
+
+Exact `POST /api/v1/account/sign-in` is independently gated by the server-only
+`ACCOUNT_SIGN_IN_PROXY_ENABLED=true` binding. Unset/other values return 404;
+backend `ACCOUNT_SIGN_IN_API_ENABLED` remains independent. The same canonical
+HTTPS origins, request URL/Origin and Fetch Metadata checks apply as for guest
+creation. Proxy trust must be explicitly enabled with the matching backend secret
+and verified ingress IP before use. Public controls and live bindings stay off.
+
+Only JSON containing required `email` (1–320 Unicode characters) and `password`
+(1–1,024) plus optional `captcha_token` is accepted. Credentials retain exact case,
+whitespace and Unicode; no email-format or password-policy rule is added by the
+proxy. Provided proof must be null or 1–2,048 printable non-space ASCII characters.
+Omitted/null proof reaches the backend, which enforces verification and its
+attempt budget. Invalid UTF-8, unknown fields and invalid schemas fail before
+forwarding. Edge-rejected requests do not reach backend accounting; forwarded
+attempts retain the backend's accounting-before-authentication policy.
+
+Limits are 16 KiB actual input and 4 KiB actual output with a 20-second total
+deadline covering body reading, fetch and response consumption. Decoded chunked
+input is accepted without Content-Length; ambiguous framing and compressed input
+are rejected. Validated JSON is rebuilt and incoming framing headers are omitted.
+Credentials are submitted once, with no redirect following or automatic retry.
+Cancellation produces no browser cookie, including after a late transport result.
+
+Any `__Host-askm6_account` cookie presence returns fixed no-store 409 before
+parsing credentials or fetching, including stale, malformed, empty or quoted-empty
+values. Duplicate/oversized cookie headers return 400. This preserves explicit
+sign-out before switching accounts rather than silently omitting an invalid
+credential. Guest, OAuth, development and unrelated cookies and Authorization
+are never forwarded or cleared; guest-history transfer remains separate work.
+Only fixed JSON headers, configured Origin and authenticated visitor-IP headers
+accompany the validated credentials.
+
+Success must contain exactly a canonical-shaped UUID `user_id`, future UTC idle
+expiry and absolute expiry no earlier than idle expiry. Metadata validation is
+shared with account-session lookup. A newly issued account cookie must be the
+only Set-Cookie, carry a correctly shaped opaque token and match idle expiry to
+whole seconds, with Path=/, Secure, HttpOnly and SameSite=Lax and no Domain,
+Max-Age, duplicate or unknown attributes. Lookup still requires renewal of the
+same incoming token; sign-in validates a new token without exposing it in JSON.
+
+All replies are no-store. 401 is a fixed rejection without cookie deletion; 409
+requires sign-out; only exact 403 `X-Account-Verification: required` signals a
+challenge. 429 preserves only validated Retry-After delta-seconds 1–86,400.
+400/413/415/503 become fixed safe responses; unexpected statuses, redirects,
+network failures and malformed success/cookie contracts become 502. Upstream
+error bodies, CORS, Location, secrets and cookies on errors are not forwarded.
+
+Tests exercise the real Pages handler in Node and isolated workerd, including
+actual credential-body bytes and cookie preservation. Hosted ingress/TLS/logging,
+secret provisioning and automatic browser-disconnect delivery remain separate
+deployment checks. No dependencies, schema or private/live configuration changed.
+
+Validation: the final frontend pipeline passed 762 API/proxy tests, 24 workerd
+tests and 356 UI tests, plus lint, strict types and production build. Existing
+backend sign-in parsing, sign-out-first guards, account cookies and PostgreSQL
+limits passed 139 tests. The shared metadata validator also rejects UUID strings
+with trailing newlines. These checks use synthetic credentials/provider mocks;
+they do not establish deployed end-to-end behavior.
+
+## Account sign-out Pages proxy
+
+Exact `POST /api/v1/account/sign-out` uses an independent server-only
+`ACCOUNT_SIGN_OUT_PROXY_ENABLED=true` gate; unset/other values return 404.
+Backend `ACCOUNT_SIGN_OUT_API_ENABLED` is separate. The shared canonical HTTPS
+origins, request URL/Origin and Fetch Metadata rules apply. Only an empty request
+without query, fragment, compression, nonzero/ambiguous Content-Length or
+Transfer-Encoding is accepted. Workers' declared-zero stream must reach actual
+EOF before forwarding; an unfinished zero-byte chunk is insufficient.
+
+Only a correctly shaped `__Host-askm6_account` cookie is forwarded. Missing,
+malformed, empty and development credentials are omitted so the backend can
+confirm safe clearing; duplicate/oversized cookie headers fail before fetching.
+Guest/OAuth/development cookies and Authorization are neither forwarded nor
+cleared. The optional authenticated visitor-IP assertion follows session lookup's
+settings; sign-out has no IP limiter. Enabled but invalid proxy configuration
+fails closed without a deletion cookie.
+
+Success requires an empty backend 204 and exactly one correctly scoped account
+clearing cookie: empty or quoted-empty value, Max-Age=0, canonical expiry syntax,
+Path=/, Secure, HttpOnly, SameSite=Lax and no Domain, duplicate/unknown attributes
+or unrelated cookies. Nonzero/combined response lengths, Transfer-Encoding,
+compression or non-EOF response streams fail validation. The proxy constructs
+one canonical account deletion cookie with epoch expiry and returns an empty
+no-store 204. It does not blindly forward Set-Cookie or Content-Type.
+
+403/503 become fixed safe errors; other statuses, redirects, malformed success
+contracts and transport failures become 502, with no cookie changes. A 20-second
+total deadline includes input confirmation, fetch and checking an empty response.
+Cancellation/late responses cannot return a clearing cookie. There are no retries
+or redirect following; streams/timers/listeners are cleaned up. Cancellation or
+network failure does not promise rollback of deletion already committed by the
+backend. Manual retry or a later session check can resolve uncertain browser state.
+
+This signs out only the current local application session. The backend commits
+its deletion before returning 204 for a valid token; absent/malformed tokens need
+no database deletion. It does not revoke Supabase provider sessions or other local
+account sessions. No dependency, schema, live setting, public control or private
+configuration is changed. The shared empty-body and clearing-cookie helpers also
+retain existing account-session lookup behaviour.
+
+Validation: the final frontend pipeline passed 843 API/proxy tests, 30 isolated
+workerd tests and 356 UI tests, plus lint, strict types and production build.
+The backend sign-out/cookie/committed-deletion contracts passed 84 tests, including
+guarded PostgreSQL. Runtime coverage includes a complete mocked email sign-in,
+session-check and sign-out cycle; this does not establish live hosted behaviour.
+
+Checkpoint-wide validation passed the complete 4,807-test backend suite with
+guarded PostgreSQL integration enabled, backend lint/format and app/test/migration
+type checks, and the full 1,229-test frontend pipeline with lint/types/build.
+Private-file and configured-secret audits passed for the exact 28-file scope
+and generated browser assets. Hosted authentication remains disabled by default.
+
 ## Account-session proxy request policy
 
 `frontend/server/account-session-proxy-policy.ts` supplies the routing policy used
@@ -2703,11 +2947,13 @@ credentials or client-supplied destinations. The policy makes no network calls,
 does not authenticate sessions or set cookies, and issues no CORS permissions.
 
 The forwarding helper below implements cookie filtering and bounded transport.
-The Pages handler dispatches only the exact session path to it; all other account,
-guest and Google paths still return 404 even if session forwarding is enabled.
+The Pages handler dispatches only the exact account-session path to it. Guest
+sessions, email sign-in and sign-out use separate gates above; other account/Google paths
+still return 404. Those gates remain closed when only account-session forwarding
+is enabled.
 Health retains its original method/origin handling and remains independent of
-auth configuration. Target-runtime verification and trusted client-IP integration
-remain separate work before public authentication can be enabled.
+auth configuration. Live target-runtime and ingress verification remain separate
+work before public authentication can be enabled.
 
 Validation: 61 new policy cases plus 8 existing health-proxy cases passed; the
 complete frontend API suite passed 394 cases. Frontend lint, strict TypeScript
@@ -2721,8 +2967,9 @@ tests do not replace a deployed Pages runtime test.
 forwards one fixed `POST /api/v1/account/session` request. It sends only JSON Accept,
 identity Accept-Encoding, the configured public Origin and, if correctly shaped,
 the secure `__Host-askm6_account` cookie. Guest, OAuth, unrelated and development
-account cookies, Authorization and browser-supplied forwarding/IP headers are not
-copied. Cookie headers are limited to 8,192 characters; duplicate account cookies
+account cookies, Authorization and browser-supplied forwarding/IP assertions are not
+copied. The optional server-only visitor-IP assertion is described above.
+Cookie headers are limited to 8,192 characters; duplicate account cookies
 or oversized headers return 400 without fetching. Missing/malformed credentials
 are omitted so the backend can confirm signed-out status and cookie deletion.
 
@@ -2780,8 +3027,9 @@ suites were not rerun for this server helper.
 
 ### Gated Pages handler integration
 
-`frontend/functions/api/[[path]].ts` dispatches only the exact session path to the
-forwarding helper. It does not reimplement cookie, origin or transport rules.
+`frontend/functions/api/[[path]].ts` dispatches the exact account-session path to
+its forwarding helper; guest creation, email sign-in and sign-out have independent gates.
+It does not reimplement cookie, origin or transport rules.
 The feature flag defaults off; an unset/false flag returns 404 without network
 access or cookie changes. To exercise it in an isolated test environment, both
 HTTPS origins and the exact `true` flag are required. Keep live bindings unset or

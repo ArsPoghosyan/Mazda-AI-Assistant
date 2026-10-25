@@ -26,7 +26,7 @@ def _get_ip_key(
     *,
     context: bytes,
 ) -> bytes:
-    """Validate the secret and hash a canonical peer address in a fixed namespace."""
+    """Hash the validated client address in an operation-specific namespace."""
     secret = settings.auth_rate_limit_hmac_secret
 
     if secret is None:
@@ -39,7 +39,7 @@ def _get_ip_key(
         raise AuthRateLimitKeyUnavailable("Authentication rate-limit key is unavailable.")
 
     key = bytes.fromhex(raw_secret)
-    client_ip = get_client_ip(request)
+    client_ip = get_client_ip(request, settings=settings)
     message = context + client_ip.encode("ascii")
 
     return digest(key, message, "sha256")
