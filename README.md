@@ -48,7 +48,7 @@ is present; a blocked attempt preserves the current session.
 | Backend | Python 3.12, FastAPI, Pydantic, SQLAlchemy, Alembic — `backend/` |
 | Database | PostgreSQL with pgvector — Docker Compose locally |
 | Identity | Supabase Auth; Cloudflare Turnstile |
-| Deployment | Cloudflare Pages + health-only Pages Function; FastAPI on Render |
+| Deployment | Cloudflare Pages with health and default-off session proxy; FastAPI on Render |
 | Dependencies | Locked in `backend/uv.lock` and `frontend/package-lock.json` |
 
 This is a personal project developed in small, testable changes; external
@@ -337,9 +337,12 @@ See the [full accounting and validation reference](reference/IMPLEMENTATION.md#b
 
 ## Deployment boundary
 
-The production Pages Function currently permits only `GET /api/v1/health`.
-Authentication proxy/cookie/redirect forwarding is not implemented, and normal
-production builds disable development guest/account controls. A frontend build
+The Pages Function permits `GET /api/v1/health` by default. Existing-account
+session checks have a [separate default-off proxy](reference/IMPLEMENTATION.md#account-session-proxy-request-policy)
+with exact HTTPS origins, cookie filtering and bounded response validation.
+Guest creation, sign-in/sign-up, sign-out and Google redirects are not forwarded.
+Normal production builds still disable development guest/account controls;
+public authentication is not enabled or deployment-validated. A frontend build
 does not provide an API server.
 
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
@@ -387,9 +390,11 @@ npm test
 npm run build
 ```
 
-`npm test` runs Node API/proxy tests then Vitest/jsdom UI tests; `build` includes
-strict TypeScript checking. Automated external-provider calls are mocked; no live
-paid APIs are needed. jsdom layout/dialog stubs do not replace real browser checks.
+`npm test` runs API/proxy tests, isolated Workers-runtime tests, then Vitest/jsdom
+UI tests; `build` includes strict TypeScript checking. `npm run test:runtime` runs
+the pinned Miniflare/workerd suite alone with synthetic bindings and outbound
+network connections blocked. No live paid APIs are needed. Local runtime and
+jsdom checks do not replace deployed browser validation.
 CI runs backend tests/lint/format/types and frontend tests/lint/build without
 provider secrets. A separate PostgreSQL job creates a disposable database with
 synthetic credentials, bootstraps restricted roles, applies all migrations, checks

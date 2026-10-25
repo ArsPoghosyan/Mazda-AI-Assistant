@@ -9,7 +9,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['functions/**/*.ts'],
+    files: ['functions/**/*.ts', 'server/**/*.ts'],
     languageOptions: { globals: globals.worker },
   },
   {

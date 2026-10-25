@@ -1,8 +1,9 @@
+import { forwardAccountSession } from '../../server/account-session-proxy.ts'
+import type { AccountSessionProxyEnvironment } from '../../server/account-session-proxy-policy.ts'
+
 type ProxyContext = {
   request: Request
-  env: {
-    API_ORIGIN?: string
-  }
+  env: AccountSessionProxyEnvironment
 }
 
 function errorResponse(message: string, status: number): Response {
@@ -17,6 +18,10 @@ export async function onRequest({
   env,
 }: ProxyContext): Promise<Response> {
   const pathname = new URL(request.url).pathname
+
+  if (pathname === '/api/v1/account/session') {
+    return forwardAccountSession(request, env)
+  }
 
   if (pathname !== '/api/v1/health') {
     return errorResponse('API route not found.', 404)

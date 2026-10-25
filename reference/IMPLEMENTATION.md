@@ -32,6 +32,7 @@ not a fresh complete-suite run. The README provides the compact entry point.
 - [Account sign-out endpoint](#account-sign-out-endpoint)
 - [Account session endpoint](#account-session-endpoint)
 - [Provider refresh foundation](#provider-refresh-foundation)
+- [Account-session proxy request policy](#account-session-proxy-request-policy)
 - [Checks](#checks)
 - [License](#license)
 
@@ -210,9 +211,9 @@ Local startup explicitly disables Uvicorn proxy-header processing so incoming
 forwarding headers cannot replace the peer address or scheme. Requests through
 Vite may share a loopback address; this is not production visitor identification.
 Both servers bind to loopback. The production build does not supply an API server;
-production uses Cloudflare Pages, a health-only Pages Function proxy,
-and a FastAPI backend on Render. The proxy currently permits only
-`GET /api/v1/health`; readiness is available directly on the backend.
+production uses Cloudflare Pages and a FastAPI backend on Render. The Pages
+proxy permits `GET /api/v1/health` by default, with separately gated existing
+account-session forwarding described below. Readiness is backend-only.
 
 For PyCharm, use `backend/.venv/Scripts/python.exe` after `uv sync`, with `backend`
 as the working directory. The pre-existing root `.venv` is not used by this setup.
@@ -346,8 +347,8 @@ verification, and an uncertain commit does not guarantee that no row was created
 The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
 Keep public guest access disabled until abuse controls and production integration
 are ready.
-The Cloudflare Pages proxy still forwards only health requests; production guest
-route and cookie forwarding are not implemented. The frontend guest action is
+The Cloudflare Pages proxy does not forward guest creation or its cookies.
+The frontend guest action is
 enabled only in Vite development and remains disabled in normal production builds.
 
 Requests require exactly one Origin matching `CSRF_TRUSTED_ORIGINS`, configured
@@ -540,8 +541,8 @@ parameters or cookies are not accepted.
 
 This endpoint does not implement sign-up/sign-in UI, create account profiles,
 check live session revocation or account suspension, or grant resource ownership
-or administrator permissions. The Cloudflare Pages proxy still forwards only
-health requests; production account-route forwarding is not implemented.
+or administrator permissions. Pages does not forward this Bearer-token endpoint;
+only the separately gated cookie-session check is supported alongside health.
 
 Tests generate temporary signing keys in memory and mock downloads and lifecycle
 failures. They require no Supabase requests, real user tokens, or database access.
@@ -1091,8 +1092,8 @@ defaults to `false` and is independent of `ACCOUNT_SESSION_API_ENABLED`. Keep
 public sign-in disabled until Supabase CAPTCHA enforcement, additional abuse controls,
 and deployment checks are ready.
 The development frontend calls this route through Vite's same-origin proxy. The
-Cloudflare Pages proxy still forwards health requests only, and account access
-remains disabled in normal production frontend builds.
+Pages proxy does not forward password sign-in. Its separate account-session
+check proxy is default-off, and production frontend account controls stay disabled.
 
 ```dotenv
 ACCOUNT_SIGN_IN_API_ENABLED=false
@@ -2359,8 +2360,8 @@ destination validation, cancellation, retries, StrictMode and forged return hint
 
 The standard Uvicorn access-log filter removes callback query values, including
 rejected callback subpaths. Hosting, reverse-proxy, custom access/error logging
-need separate review. The current Cloudflare Pages function proxies only health;
-production auth proxy/cookie/redirect handling is not implemented.
+need separate review. Pages now has separately gated account-session forwarding,
+but Google start/callback and OAuth cookie/redirect forwarding remain unimplemented.
 
 Before public Google enablement, verify cleanup scheduling in the target
 environment, complete broader provider/linking checks, upstream provider-method assurance,
@@ -2667,6 +2668,173 @@ reuse behavior. PostgreSQL rollback cannot undo provider-side token rotation, an
 an uncertain database commit is not resolved by these tests. A later request must
 reload committed state before attempting recovery; fresh sign-in may be required.
 
+## Account-session proxy request policy
+
+`frontend/server/account-session-proxy-policy.ts` supplies the routing policy used
+by the Pages handler through the forwarding helper. It does not authenticate
+users. Pages permits `GET /api/v1/health` by default; an explicit flag can also
+permit only `POST /api/v1/account/session`, subject to every policy/transport check.
+
+The policy accepts only `POST /api/v1/account/session` when
+`AUTH_SESSION_PROXY_ENABLED` is exactly `true`. Missing/other values and all other
+routes return no-store 404; unsupported methods return 405 with `Allow: POST`.
+Its server environment inputs are `API_ORIGIN` and `AUTH_PUBLIC_ORIGIN`, both
+canonical HTTPS origins (an optional trailing slash is accepted). Credentials,
+paths, queries, fragments, whitespace-normalized spellings and a backend origin
+equal to the frontend origin are rejected with 503. These are server-side Pages
+bindings, not browser `VITE_` settings. Leave the flag unset or false until the
+target runtime and deployment gates have been verified. No live binding is set
+by adding this code. The backend's session feature flag is independent.
+
+The actual request URL origin and its single Origin header must match the
+configured public origin exactly. Combined/duplicate origins fail. Fetch Metadata
+may be absent for nonbrowser clients; when present, `Sec-Fetch-Site` must be
+`same-origin`. Forwarded/Host headers cannot authorize another host or a preview
+deployment. These checks protect a routing boundary; they do not establish a user.
+
+This endpoint has no input payload: queries, fragments, nonzero/ambiguous
+Content-Length, Transfer-Encoding and undeclared body streams are rejected with
+400. Workers represents even an empty POST as a readable stream with explicit
+Content-Length: 0. Only that declared-zero form may reach the transport's bounded
+EOF check; any supplied bytes or ambiguous chunk are rejected before fetching.
+The header alone is never trusted to prove emptiness. An allowed plan contains only the
+fixed backend session URL and public origin, never copied browser headers,
+credentials or client-supplied destinations. The policy makes no network calls,
+does not authenticate sessions or set cookies, and issues no CORS permissions.
+
+The forwarding helper below implements cookie filtering and bounded transport.
+The Pages handler dispatches only the exact session path to it; all other account,
+guest and Google paths still return 404 even if session forwarding is enabled.
+Health retains its original method/origin handling and remains independent of
+auth configuration. Target-runtime verification and trusted client-IP integration
+remain separate work before public authentication can be enabled.
+
+Validation: 61 new policy cases plus 8 existing health-proxy cases passed; the
+complete frontend API suite passed 394 cases. Frontend lint, strict TypeScript
+and the production build passed. UI/backend code was unchanged and their suites
+were not rerun for this isolated routing-policy slice. Node request/response
+tests do not replace a deployed Pages runtime test.
+
+### Account-session forwarding helper
+
+`frontend/server/account-session-proxy.ts` applies the request policy itself, then
+forwards one fixed `POST /api/v1/account/session` request. It sends only JSON Accept,
+identity Accept-Encoding, the configured public Origin and, if correctly shaped,
+the secure `__Host-askm6_account` cookie. Guest, OAuth, unrelated and development
+account cookies, Authorization and browser-supplied forwarding/IP headers are not
+copied. Cookie headers are limited to 8,192 characters; duplicate account cookies
+or oversized headers return 400 without fetching. Missing/malformed credentials
+are omitted so the backend can confirm signed-out status and cookie deletion.
+
+There are no retries. A 20-second deadline covers fetch and body consumption;
+incoming cancellation aborts the upstream request and returns no session cookie.
+A cancellation race also prevents returning late credentials when a transport
+ignores its abort signal. Streams are cancelled and timers/listeners cleaned up.
+Cancellation does not promise rollback of work already performed by the backend.
+The deadline gives the backend's default 15-second session operation a margin;
+frontend/backend/hosting deadlines still need alignment at deployment.
+
+The helper uses no-store fetch and manual redirects, following the
+[Workers request API](https://developers.cloudflare.com/workers/runtime-apis/request/).
+Redirects are never followed or forwarded. Live delivery of browser disconnect
+signals requires target-runtime compatibility validation; the request API documents
+the `enable_request_signal` flag for incoming cancellation notification. The total
+deadline remains a separate bound even without such notification.
+
+Successful metadata must be UTF-8 JSON within 4,096 actual bytes, with only a valid
+UUID `user_id` and UTC `expires_at`/`absolute_expires_at` strings. The idle deadline
+must be future and no later than the absolute deadline. Declared length, if present,
+must match received bytes. Extra fields, non-JSON, compression and malformed
+metadata fail with a fixed 502 and no cookie. Only sanitized metadata is returned.
+
+`account-session-proxy-cookies.ts` requires exactly one upstream account cookie.
+It uses Workers `getAll('Set-Cookie')` or Node `getSetCookie()`, preserving separate
+headers instead of splitting on the comma in Expires; see the
+[Workers headers contract](https://developers.cloudflare.com/workers/runtime-apis/headers/).
+The name, Path=/, Secure, HttpOnly, SameSite=Lax, canonical expiry and absence of
+Domain/unknown/duplicate attributes are validated. On 200, the token must match
+the forwarded browser credential and the cookie expiry must match the metadata
+to whole seconds. This endpoint renews the existing token; it does not log in.
+On 401, only an empty account cookie with Max-Age=0 authorizes deletion. A fresh
+canonical cookie is constructed after validation rather than blindly copying it.
+
+401 returns fixed signed-out text and a validated clearing cookie, without reading
+provider error content. 403/503 return fixed messages and no cookies; other statuses,
+redirects, network failures and invalid success/deletion contracts become 502.
+All replies are no-store; upstream CORS, Location and unrelated headers are dropped.
+An unavailable response preserves the current browser credential.
+
+The Pages handler imports this helper for the exact account-session path. Without
+`AUTH_SESSION_PROXY_ENABLED=true`, that path remains 404 before any backend request.
+With the flag, invalid configuration/origin/method/body/cookie inputs fail closed.
+Production frontend controls remain disabled; tests mock fetch and exercise both
+header API shapes rather than establishing deployed runtime behavior.
+
+The forwarding slice passed 68 focused transport tests and the complete 462-case
+API/proxy suite, plus frontend lint, strict TypeScript and the production build.
+Coverage includes credential/header filtering, renewed/cleared cookie contracts,
+the Workers header API, actual byte bounds, metadata validation, redirects,
+network failure, cancellation before headers/during body reading, total deadlines
+and late responses after cancellation. UI and backend code was unchanged; those
+suites were not rerun for this server helper.
+
+### Gated Pages handler integration
+
+`frontend/functions/api/[[path]].ts` dispatches only the exact session path to the
+forwarding helper. It does not reimplement cookie, origin or transport rules.
+The feature flag defaults off; an unset/false flag returns 404 without network
+access or cookie changes. To exercise it in an isolated test environment, both
+HTTPS origins and the exact `true` flag are required. Keep live bindings unset or
+false until deployment validation is complete. This is existing-session lookup,
+not a way to create an account session or enable the full sign-in experience.
+
+29 new handler tests exercise the actual policy/transport chain with mocked fetch:
+default-off behavior, successful renewal, confirmed 401 deletion, rejected origins,
+preview hosts, methods and bodies, route isolation, invalid upstream contracts,
+cancellation and health independence. The complete API/proxy suite passed 491
+cases; focused policy/transport/handler/health coverage passed 166. Frontend lint,
+strict TypeScript and the production build passed. No UI/backend code changed,
+and no live provider, Cloudflare binding or deployment changes were made.
+The local Workers runtime validation below supplements these Node tests.
+
+### Local Workers runtime validation
+
+`npm run test:runtime` bundles the real Pages handler and its imports into an
+in-memory test adapter using the existing Vite build API. Configuration and dotenv
+loading are disabled. Pinned development-only Miniflare `4.20260730.0` (MIT) runs
+the bundle under workerd `1.20260730.1` (Apache-2.0), with compatibility date
+`2026-07-30` and `enable_request_signal` in the test instance only. No Wrangler
+login, deployment, live bindings, private environment files or database are used.
+See Cloudflare's [Miniflare overview](https://developers.cloudflare.com/workers/testing/miniflare/)
+and [outbound fetch mocking](https://developers.cloudflare.com/workers/testing/miniflare/core/standards/).
+MockAgent disables network connections, the optional cf metadata fetch is disabled,
+and temporary runtime listeners bind only to loopback and are disposed after tests.
+
+This suite found a real compatibility defect: the prior null-body-only policy
+rejected legitimate empty Workers POSTs. The policy now accepts a declared-zero
+stream only for confirmation by the transport, which requires immediate EOF under
+the same total deadline before any backend request. A false Content-Length: 0 with
+actual content is rejected and cancelled; a stalled stream cannot bypass the bound.
+Three additional Node regressions cover these cases.
+
+Eleven runtime tests cover renewal, native cookie headers, confirmed deletion,
+multiple separate cookies, credential/IP-header filtering, default-off routing,
+origin/path/body rejection, redirect isolation, metadata masking and health.
+An explicitly injected test signal verifies runtime abort handling. Another test
+uses the real 20-second timer against a delayed mock upstream and confirms a 502
+without cookies. The full frontend pipeline passed 494 API/proxy, 11 runtime and
+356 UI tests (861 total), frontend lint, strict TypeScript and production build.
+The standard `npm test` command includes this suite, so existing frontend CI runs it.
+
+Automatic client-disconnect notification was not confirmed in this pinned local
+runtime: investigation via simulated dispatch and a direct loopback connection
+did not observe the incoming abort event. That failed expectation is not counted
+as passing; explicit signal handling and fixed-deadline coverage are separate
+evidence. Hosted/browser disconnect delivery still needs validation. The adapter
+also does not exercise Pages' deployed file router, TLS/host/proxy chain, preview
+configuration or real provider/database behavior. Public authentication remains
+disabled pending those gates; no live compatibility date/flags were changed.
+
 ## Checks
 
 From `backend`:
@@ -2739,7 +2907,8 @@ npm run build
 Dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 GitHub Actions runs these checks without provider secrets.
 
-`npm test` runs the Node API/proxy tests followed by Vitest React tests in jsdom.
+`npm test` runs Node API/proxy tests, the isolated Miniflare/workerd suite, then
+Vitest React tests in jsdom. `npm run test:runtime` selects only the runtime suite.
 UI tests render the app under Strict Mode and verify that loading the page checks
 API health without creating a guest session. They also cover a guest-button click,
 the disabled loading state, prevention of repeat requests while pending, success,
