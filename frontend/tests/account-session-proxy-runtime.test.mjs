@@ -94,8 +94,11 @@ test('Workers authenticates only the edge IP assertion and strips echoed proxy s
 })
 
 test('Workers rejects missing or combined edge IPs without contacting the backend', { timeout: 30_000 }, async (t) => {
-  const { mf } = await runtime(t, { AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) })
-  for (const headers of [{}, { 'CF-Connecting-IP': '198.51.100.20, 203.0.113.30' }]) {
+  for (const mode of ['missing', 'empty', undefined]) {
+    const { mf } = await runtime(t, { AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32),
+      ...(mode === undefined ? {} : { TEST_CLIENT_IP_MODE: mode }),
+    })
+    const headers = { 'CF-Connecting-IP': mode === undefined ? '198.51.100.20, 203.0.113.30' : '198.51.100.20' }
     const response = await mf.dispatchFetch(site + endpoint, options(headers))
     assert.equal(response.status, 503)
     assert.equal(response.headers.get('Set-Cookie'), null)
@@ -273,9 +276,15 @@ test('Workers guest routing is independently gated and requires an ingress asser
   const closed = await mf.dispatchFetch(site + guestPath, options())
   assert.equal(closed.status, 404)
   await closed.arrayBuffer()
+  for (const mode of ['missing', 'empty']) {
+    const absent = await runtime(t, { ...guestBindings, TEST_CLIENT_IP_MODE: mode })
+    const response = await absent.mf.dispatchFetch(site + guestPath, options({ 'CF-Connecting-IP': '198.51.100.20' }))
+    assert.equal(response.status, 503)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
   const enabled = await runtime(t, guestBindings)
   for (const [url, init, status] of [
-    [site + guestPath, options(), 503],
     [site + guestPath, options({ Origin: 'https://foreign.example' }), 403],
     [site + guestPath, { ...options({ 'CF-Connecting-IP': '198.51.100.20', 'Content-Type': 'application/json' }), body: ' '.repeat(16385) }, 413],
     [site + guestPath, { ...options({ 'CF-Connecting-IP': '198.51.100.20', 'Content-Type': 'application/json' }), body: '{"user_id":"private"}' }, 400],
@@ -371,9 +380,15 @@ test('Workers email sign-in is independently gated and requires trusted ingress'
   const response = await closed.mf.dispatchFetch(site + signInPath, signInOptions())
   assert.equal(response.status, 404)
   await response.arrayBuffer()
+  for (const mode of ['missing', 'empty']) {
+    const absent = await runtime(t, { ...signInBindings, TEST_CLIENT_IP_MODE: mode })
+    const result = await absent.mf.dispatchFetch(site + signInPath, signInOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
   const enabled = await runtime(t, signInBindings)
   for (const [url, init, status] of [
-    [site + signInPath, signInOptions({ 'CF-Connecting-IP': '' }), 503],
     [site + signInPath, signInOptions({ Origin: 'https://foreign.example' }), 403],
     ['https://preview.example' + signInPath, signInOptions(), 403],
     [site + signInPath, { ...signInOptions(), body: ' '.repeat(16385) }, 413],
