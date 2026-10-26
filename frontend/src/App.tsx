@@ -15,7 +15,8 @@ const statusMessages: Record<ApiStatus, string> = {
 
 export default function App() {
   const { status, retry } = useApiHealth()
-  const account = useAccountSession()
+  const backendReady = status === 'connected'
+  const account = useAccountSession(backendReady)
   const signOut = useAccountSignOut()
   const guest = useGuestSession()
 
@@ -24,13 +25,18 @@ export default function App() {
   const accessStatus = useRef<HTMLParagraphElement>(null)
 
   const signingOut = signOut.status === 'loading'
-  const accessMessage =
+  const sessionMessage =
     account.status === 'signed_in' &&
     (signOut.status === 'loading' || signOut.status === 'error')
       ? signOut.message
       : account.status === 'signed_out' && guest.message
         ? guest.message
         : account.message || guest.message
+  const accessMessage = backendReady
+    ? sessionMessage
+    : status === 'checking'
+      ? 'Starting the service… This may take about a minute.'
+      : 'Service unavailable. Use “Try again” below to reconnect.'
 
   useEffect(() => {
     if (account.status === 'signed_out' && signOut.status === 'ready') {
@@ -47,6 +53,7 @@ export default function App() {
   }
 
   const signInDisabled =
+    !backendReady ||
     !account.enabled ||
     account.status === 'checking' ||
     account.status === 'signed_in' ||
@@ -54,15 +61,20 @@ export default function App() {
     guest.status === 'verification'
 
   const accountLabel =
-    account.status === 'checking'
-      ? 'Checking account…'
-      : account.status === 'signed_in'
-        ? 'Signed in'
-        : account.status === 'unavailable'
-          ? 'Retry session check'
-          : 'Sign In'
+    !backendReady && account.enabled
+      ? status === 'checking'
+        ? 'Waiting for service…'
+        : 'Service unavailable'
+      : account.status === 'checking'
+        ? 'Checking account…'
+        : account.status === 'signed_in'
+          ? 'Signed in'
+          : account.status === 'unavailable'
+            ? 'Retry session check'
+            : 'Sign In'
 
   const guestDisabled =
+    !backendReady ||
     signInOpen ||
     (account.enabled && account.status !== 'signed_out') ||
     !guest.enabled ||
@@ -91,6 +103,7 @@ export default function App() {
             aria-busy={guest.status === 'loading'}
             aria-describedby="access-status development-notice"
             onClick={() => {
+              if (!backendReady) return
               void guest.start()
             }}
             className="inline-flex min-h-11 items-center justify-center rounded-control bg-accent px-6 py-3 font-semibold text-on-accent enabled:hover:bg-accent-hover disabled:opacity-60"
@@ -98,7 +111,7 @@ export default function App() {
             {guestLabel}
           </button>
 
-          {guest.enabled && guest.status === 'verification' && (
+          {backendReady && guest.enabled && guest.status === 'verification' && (
             <TurnstileChallenge
               siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? ''}
               onToken={(token) => {
@@ -126,7 +139,10 @@ export default function App() {
             ref={signInButton}
             type="button"
             disabled={signInDisabled}
-            aria-busy={account.status === 'checking'}
+            aria-busy={
+              account.enabled &&
+              (status === 'checking' || (backendReady && account.status === 'checking'))
+            }
             aria-expanded={
               account.status === 'signed_out' ? signInOpen : undefined
             }
@@ -140,6 +156,7 @@ export default function App() {
             }
             aria-describedby="access-status development-notice"
             onClick={() => {
+              if (!backendReady) return
               if (account.status === 'unavailable') {
                 account.refresh()
               } else if (account.status === 'signed_out') {

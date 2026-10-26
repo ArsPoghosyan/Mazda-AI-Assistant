@@ -1244,9 +1244,13 @@ without another session request, controlled failure, and ignored late results.
 jsdom's native dialog methods and layout are stubbed in those tests;
 they do not replace browser checks of native modal behavior or the real widget.
 
-In development, the page checks `POST /api/v1/account/session` on mount, with a
-15-second deadline and cleanup on unmount. While checking, guest access and
-sign-in are disabled. HTTP 401 enables signed-out access; an unavailable service
+On page load, the health check allows up to 75 seconds for backend startup,
+shows a waiting message and offers manual retry on failure. It bypasses browser
+caching, rejects redirects and ignores late success after cancellation or timeout.
+In development, only after health succeeds does the page check
+`POST /api/v1/account/session`, with its own full 15-second deadline and cleanup
+on unmount. Guest access and sign-in stay disabled during both stages. Health
+failure sends no session or guest requests. HTTP 401 enables signed-out access; an unavailable service
 or invalid response keeps guest access blocked and offers an explicit retry.
 There is no automatic polling. A successful sign-in supplies validated session
 metadata directly to the page's account state without another session request.

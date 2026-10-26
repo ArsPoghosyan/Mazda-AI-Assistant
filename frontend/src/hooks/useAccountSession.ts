@@ -22,7 +22,7 @@ const GOOGLE_RETURN_MESSAGES: Record<GoogleReturnOutcome, string> = {
     'The previous account session is no longer available. Please sign in again.',
 }
 
-export function useAccountSession() {
+export function useAccountSession(backendReady = true) {
   const enabled = import.meta.env.DEV
   const request = useRef<AbortController | null>(null)
   const googleReturn = useRef<GoogleReturnOutcome | null | undefined>(undefined)
@@ -35,7 +35,7 @@ export function useAccountSession() {
   })
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !backendReady) return
 
     if (googleReturn.current === undefined) {
       googleReturn.current = consumeGoogleReturn()
@@ -117,10 +117,10 @@ export function useAccountSession() {
         request.current = null
       }
     }
-  }, [enabled, attempt])
+  }, [enabled, backendReady, attempt])
 
   function refresh() {
-    if (!enabled || request.current) return
+    if (!enabled || !backendReady || request.current) return
 
     setState({
       status: 'checking',

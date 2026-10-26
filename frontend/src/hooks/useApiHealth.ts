@@ -8,13 +8,18 @@ export function useApiHealth() {
 
   useEffect(() => {
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 75_000)
     let active = true
+    const timeout = window.setTimeout(() => {
+      controller.abort()
+      if (active) setStatus('unavailable')
+    }, 75_000)
 
     async function checkHealth() {
       try {
         const response = await fetch('/api/v1/health', {
           signal: controller.signal,
+          cache: 'no-store',
+          redirect: 'error',
         })
 
         if (!response.ok) {
@@ -34,7 +39,7 @@ export function useApiHealth() {
           throw new Error('Unexpected health response')
         }
 
-        if (active) setStatus('connected')
+        if (active && !controller.signal.aborted) setStatus('connected')
       } catch {
         if (active) setStatus('unavailable')
       } finally {

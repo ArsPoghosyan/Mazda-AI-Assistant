@@ -40,6 +40,11 @@ remains unimplemented, and broader hosted linking/method behavior needs release 
 Both Google and password sign-in require explicit sign-out when an account cookie
 is present; a blocked attempt preserves the current session.
 
+On page load, access controls wait for a bounded health check before account
+session restoration starts, allowing an idle backend time to wake. Startup shows
+a waiting message and offers manual retry on failure; it does not send periodic
+keepalive requests. Public authentication remains disabled.
+
 ## Stack and layout
 
 | Layer | Technology / location |

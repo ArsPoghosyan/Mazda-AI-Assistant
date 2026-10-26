@@ -214,9 +214,10 @@ test('blocks access while checking and restores the account once', async () => {
 
   const { rerender } = mountApp()
 
+  expect(accountRequests(fetchMock)).toHaveLength(0)
   expect(
     screen
-      .getByRole('button', { name: 'Checking account…' })
+      .getByRole('button', { name: 'Waiting for service…' })
       .hasAttribute('disabled'),
   ).toBe(true)
 
@@ -228,6 +229,9 @@ test('blocks access while checking and restores the account once', async () => {
 
   await screen.findByText('API connected')
 
+  expect(
+    screen.getByRole('button', { name: 'Checking account…' }).hasAttribute('disabled'),
+  ).toBe(true)
   expect(accountRequests(fetchMock)).toHaveLength(1)
 
   const options = accountRequests(fetchMock)[0]?.[1]
