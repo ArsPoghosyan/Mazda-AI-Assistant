@@ -18,3 +18,10 @@ Google provides this icon for this sign-in use. Preserve the
 artwork, proportions and attribution. The Google marks/artwork are not licensed
 under this repository's MIT license; no endorsement or unrestricted reuse is
 claimed. No Google font or third-party runtime script is included by this asset.
+
+## askm6 tab icon
+
+`frontend/public/favicon.svg` is an original geometric `a6` monogram under the
+repository's MIT license. It uses the site's teal (`#6ba99f`) and navy (`#0f172a`),
+with vector paths for consistent rendering without fonts or external requests.
+The SVG is served from `/favicon.svg` on the landing and policy pages.

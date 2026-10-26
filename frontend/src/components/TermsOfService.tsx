@@ -3,7 +3,7 @@ import PrivacyNoticeLink from './PrivacyNoticeLink'
 export default function TermsOfService() {
   return (
     <div className="min-h-dvh bg-background text-foreground">
-      <title>Terms of Service | Mazda AI Assistant</title>
+      <title>Terms of Service | askm6</title>
       <a
         href="#terms-content"
         className="sr-only rounded-control bg-accent px-4 py-2 text-on-accent focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50"
@@ -13,7 +13,7 @@ export default function TermsOfService() {
       <header className="mx-auto max-w-3xl border-b border-divider px-6 py-5">
         <nav aria-label="Policy navigation" className="flex flex-wrap items-center gap-x-6">
           <a href="/" className="inline-flex min-h-11 items-center text-accent underline underline-offset-4 hover:text-accent-hover">
-            Back to Mazda AI Assistant
+            Back to askm6
           </a>
           <PrivacyNoticeLink />
         </nav>
@@ -27,7 +27,7 @@ export default function TermsOfService() {
           <p>
             These terms describe the current development-stage website at
             askm6.com, operated by Arsen Poghosyan in Yerevan, Armenia.
-            Mazda AI Assistant is independent, unofficial and unaffiliated
+            askm6 is independent, unofficial and unaffiliated
             with Mazda.
           </p>
         </section>

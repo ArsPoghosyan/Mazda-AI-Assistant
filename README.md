@@ -1,8 +1,8 @@
-# Mazda AI Assistant
+# askm6
 
 [![Checks](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml)
 
-An independent, unofficial Mazda information assistant, unaffiliated with Mazda.
+An independent, unofficial vehicle information assistant, unaffiliated with Mazda.
 The first version targets Mazda 6, starting with verified 2020 information;
 support for other Mazda models is a future possibility.
 
@@ -71,6 +71,10 @@ is independently default-off through `ACCOUNT_TERMS_PROXY_ENABLED`.
 Guarded local database tests rehearse scoped manual account deletion and partial
 failures with a mocked provider. They do not add an account-deletion endpoint or
 establish live provider deletion behavior.
+
+The public product name is **askm6**. The tab icon is an original `a6` monogram
+in the website palette. Mazda 6 describes initial vehicle coverage; existing
+repository, package, service and database identifiers retain their current names.
 
 ## Stack and layout
 

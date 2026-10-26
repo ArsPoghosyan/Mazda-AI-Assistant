@@ -6,6 +6,11 @@ Detailed implementation contracts, setup notes, validation coverage and
 limitations. Test counts refer to the checkpoints described in each section,
 not a fresh complete-suite run. The README provides the compact entry point.
 
+The public product name is **askm6**, matching the Google sign-in display name.
+Website metadata, policy-page titles/navigation, API documentation and the README
+use that name. The original `a6` favicon uses the site palette; Mazda 6 remains
+vehicle coverage. Repository/package names and runtime identifiers remain stable.
+
 ## Contents
 
 - [Engineering workflow](#engineering-workflow)

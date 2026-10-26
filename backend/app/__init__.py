@@ -1,1 +1,1 @@
-"""Mazda6 Assistant backend."""
+"""askm6 backend."""
