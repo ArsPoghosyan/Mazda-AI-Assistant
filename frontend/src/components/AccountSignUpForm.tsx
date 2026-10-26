@@ -9,7 +9,9 @@ import { useAccountSignUp } from '../hooks/useAccountSignUp'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import GoogleAccessOption from './GoogleAccessOption'
 import PrivacyNoticeLink from './PrivacyNoticeLink'
+import TermsOfServiceLink from './TermsOfServiceLink'
 import TurnstileChallenge from './TurnstileChallenge'
+import { CURRENT_TERMS_VERSION } from '../../shared/account-terms'
 
 type AccountSignUpFormProps = {
   siteKey: string
@@ -40,6 +42,7 @@ export default function AccountSignUpForm({
   const [verified, setVerified] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [showPassword, setShowPassword] = useState(false)
+  const [agreed, setAgreed] = useState(false)
 
   const loading = signUp.status === 'loading'
   const accepted = signUp.status === 'accepted'
@@ -63,7 +66,7 @@ export default function AccountSignUpForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
-    if (fieldsDisabled || !proof.current || accessOperation.current) return
+    if (fieldsDisabled || !agreed || !proof.current || accessOperation.current) return
 
     const form = event.currentTarget
     const data = new FormData(form)
@@ -95,6 +98,8 @@ export default function AccountSignUpForm({
         email,
         password,
         captcha_token: captchaToken,
+        accepted: true,
+        terms_version: CURRENT_TERMS_VERSION,
       })
 
       if (completed && active.current) onAccepted(email)
@@ -151,8 +156,6 @@ export default function AccountSignUpForm({
           : 'Enter your email and choose a password. Confirm your email before signing in.'}
       </p>
 
-      <p className="mt-2 text-sm text-muted"><PrivacyNoticeLink newTab /></p>
-
       {google.enabled && (
         <GoogleAccessOption
           statusId={`${id}-google-status`}
@@ -169,7 +172,7 @@ export default function AccountSignUpForm({
         onSubmit={submit}
         aria-labelledby={headingId}
         aria-describedby={`${id}-help ${id}-status`}
-        className="mt-6 space-y-5"
+        className="mt-5 space-y-4"
       >
         <fieldset disabled={fieldsDisabled} className="space-y-5">
           <legend className="sr-only">Registration details</legend>
@@ -246,18 +249,33 @@ export default function AccountSignUpForm({
           />
         )}
 
-        <p
-          id={`${id}-status`}
-          role="status"
-          aria-atomic="true"
-          className={statusMessage ? 'text-sm text-muted' : 'sr-only'}
-        >
-          {statusMessage}
-        </p>
+        <div className="space-y-1">
+          <div className="flex min-h-11 items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              aria-labelledby={`${id}-agreement`}
+              required
+              checked={agreed}
+              disabled={fieldsDisabled}
+              onChange={event => setAgreed(event.target.checked)}
+              className="h-5 w-5 shrink-0 accent-accent"
+            />
+            <span id={`${id}-agreement`}>I agree to the <TermsOfServiceLink newTab />.</span>
+          </div>
+          <p className="text-sm text-muted"><PrivacyNoticeLink newTab /></p>
+          <p
+            id={`${id}-status`}
+            role="status"
+            aria-atomic="true"
+            className={statusMessage ? 'text-sm text-muted' : 'sr-only'}
+          >
+            {statusMessage}
+          </p>
+        </div>
 
         <button
           type="submit"
-          disabled={fieldsDisabled || !verified}
+          disabled={fieldsDisabled || !verified || !agreed}
           aria-busy={loading}
           aria-describedby={`${id}-status`}
           className="inline-flex min-h-11 w-full items-center justify-center rounded-control bg-accent px-6 py-3 font-semibold text-on-accent enabled:hover:bg-accent-hover disabled:opacity-60"

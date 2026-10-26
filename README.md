@@ -46,9 +46,27 @@ a waiting message and offers manual retry on failure; it does not send periodic
 keepalive requests. Public authentication remains disabled.
 
 A Privacy Notice page is available at `/privacy`, with links from the footer and
-account forms. It describes development-stage data flows and approved retention
+account-creation form. It describes development-stage data flows and approved retention
 choices. Further privacy and operational checks remain before public
 authentication is enabled.
+
+Development-stage Terms of Service are prepared at `/terms`, cross-linked with
+the Privacy Notice and account-creation form. They describe current availability and
+responsible use; these pages do not enable public sign-in.
+The default-disabled Terms acceptance backend records a verified account's Terms
+revision and server timestamp, exposes authenticated setup status, and provides
+a tested access dependency for account resources. In development, verified
+sign-in/restoration now checks setup status: missing agreement opens a modal
+with an unchecked Terms checkbox and separate Privacy Notice link. Returning
+accounts with recorded acceptance skip it. Email signup requires an unchecked
+Terms checkbox before provider registration. An encrypted, one-hour HttpOnly
+receipt carries the agreement through email confirmation and matching verified
+sign-in; a Google callback can also save the confirmed receipt when its verified
+account ID matches. Missing or expired receipts use the setup dialog. First-time
+Google accounts without confirmed signup agreement keep the one-time setup flow.
+Escape dismisses without accepting;
+setup can be reopened and sign-out remains available. Hosted Terms forwarding
+is independently default-off through `ACCOUNT_TERMS_PROXY_ENABLED`.
 
 Guarded local database tests rehearse scoped manual account deletion and partial
 failures with a mocked provider. They do not add an account-deletion endpoint or
@@ -162,7 +180,11 @@ Email-confirmation throttling requires `6ef221a79f00`, also verified on both
 local databases. Password-reset throttling requires `0ffc842c5360`, verified on
 both local databases. Guest-creation throttling requires `aefd9866f033`, verified
 on both local databases with unchanged grants. Google initiation throttling requires
-`46250b6b2d17`, verified on both local databases. Integration tests require this head.
+`46250b6b2d17`, verified on both local databases. Terms acceptance adds
+`b4d7e2806a12`, verified on both local website and test databases; integration tests
+require this head. The local website now has Terms setup enabled for controlled
+manual flow checks. The hosted database has not received this Terms migration;
+hosted authentication remains disabled.
 
 Remote URLs require `sslmode=verify-full` and `sslrootcert` pointing to the CA
 certificate. Keep ordinary development on Docker. For an explicit Supabase
@@ -241,10 +263,12 @@ returned in JSON. Feature flags and full contracts are in the
 | `GET /api/v1/ready` | Direct-backend connectivity check: 200 / 503 |
 | `POST /api/v1/guest/session` | Refresh valid guest session or verify a fresh challenge before creation |
 | `GET /api/v1/account/me` | Bearer JWT identity; not a live provider-revocation check |
-| `POST /api/v1/account/sign-up` | 202 neutral acknowledgement; no application login/cookie |
+| `POST /api/v1/account/sign-up` | 202 neutral acknowledgement and temporary Terms receipt; no login |
 | `POST /api/v1/account/confirm-email` | 200 confirmation metadata; separate sign-in required |
 | `POST /api/v1/account/sign-in` | CAPTCHA-protected credentials; cookie/session metadata after commit |
 | `POST /api/v1/account/session` | Verify existing cookie, live-check provider session, refresh credentials as needed |
+| `POST /api/v1/account/terms/accept` | Default-disabled; explicitly accept the current Terms after session verification and database commit |
+| `POST /api/v1/account/terms/status` | Default-disabled; verify the cookie and report whether current Terms acceptance is missing |
 | `POST /api/v1/account/sign-out` | 204 after current application-session deletion commits; provider logout is separate |
 | `POST /api/v1/account/password-recovery` | 202 neutral acknowledgement; no guarantee of account existence or email delivery |
 | `POST /api/v1/account/password-reset` | Recovery code/new password, provider cleanup, committed application-session invalidation; fresh sign-in required |
@@ -363,9 +387,9 @@ Email sign-in has a [separate default-off proxy](reference/IMPLEMENTATION.md#ema
 that preserves credentials and requires explicit sign-out before another login.
 [Sign-out forwarding](reference/IMPLEMENTATION.md#account-sign-out-pages-proxy) clears only a backend-confirmed account cookie.
 [Sign-up forwarding](reference/IMPLEMENTATION.md#sign-up-pages-proxy) has its own default-off gate,
-returns generic email-verification instructions and preserves existing cookies.
+returns generic email-verification instructions and only a validated Terms receipt.
 [Email-confirmation forwarding](reference/IMPLEMENTATION.md#email-confirmation-pages-proxy) is independently gated
-and confirms the code without signing in or changing cookies.
+and confirms the code without signing in; it can bind the temporary Terms receipt.
 [Recovery-request forwarding](reference/IMPLEMENTATION.md#password-recovery-request-pages-proxy) has its own default-off gate,
 requires CAPTCHA and returns neutral acceptance without changing cookies.
 [Password-reset forwarding](reference/IMPLEMENTATION.md#password-reset-pages-proxy) is independently gated,
@@ -439,16 +463,20 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-Latest complete backend run: **4,732 passed including PostgreSQL**. Backend lint,
-formatting (229 files), typing (217 app/test files) and migration typing (12 files)
-passed. Cleanup coverage includes expiry, concurrency, deadlines, rollback and
-shutdown. Earlier reset-throttling validation included six rollback-only migration probes.
-Previously recorded frontend validation passed lint, **685 tests** (331 API + 354 UI/hook),
-strict TypeScript and production build, including Google and email-flow retry messages.
+Latest checkpoint validation passed **3,929 offline backend tests**, **41 affected
+PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**
+and **393 UI/hook tests**. Backend lint, formatting (242 files), typing (229 app/test
+files) and migration typing (13 files) passed, along with frontend lint, strict
+TypeScript and production build. Earlier complete backend validation passed 4,732
+tests including PostgreSQL; the current PostgreSQL run covers the affected Terms
+and signup-limiter suites. Rollback, expiry, cancellation, account isolation and
+confirmed-email-to-Google agreement are covered with mocked providers.
 Automated limiter coverage includes concurrency, expiry,
 transaction failures, cancellation, restricted maintenance targets and disposal.
 Local manual checks confirmed guest verification, registration/email confirmation,
-email/Google sign-in, restoration/sign-out, and recovery/reset with old-password
+email/Google sign-in, Terms setup and returning-account skip behavior, and
+confirmed email signup followed by password or Google as the first login. Earlier
+checks covered restoration/sign-out and recovery/reset with old-password
 rejection and new-password sign-in. After local migration/key setup, recovery
 returned 202 with email delivery; maintenance completed, and a bounded invalid-body
 test reached 429 with a positive `Retry-After`. These checks do not establish live

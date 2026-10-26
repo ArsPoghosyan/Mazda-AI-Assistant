@@ -555,3 +555,73 @@ def test_fingerprint_failure_never_counts(
     route_material.counter.assert_not_awaited()
     route_material.parse.assert_not_awaited()
     assert not route_material.requests
+
+
+@pytest.mark.parametrize(
+    "kind", ["pending", "confirmed", "other-account", "other-email", "invalid-code", "tampered"]
+)
+def test_confirmation_binds_only_matching_signup_receipt(
+    route_material: RouteMaterial, kind: str
+) -> None:
+    from uuid import UUID, uuid4
+
+    from cryptography.fernet import Fernet
+    from fastapi import Response
+    from pydantic import SecretStr
+
+    from app.account_signup_terms import (
+        decode_signup_terms_receipt,
+        make_signup_terms_receipt,
+        set_signup_terms_cookie,
+        signup_terms_cookie_name,
+    )
+
+    material = route_material
+    material.settings.account_session_encryption_key = SecretStr(
+        Fernet.generate_key().decode("ascii")
+    )
+    material.settings.account_terms_api_enabled = True
+    receipt = make_signup_terms_receipt(
+        SecretStr(EMAIL if kind != "other-email" else "other@example.test")
+    )
+    if kind in ("confirmed", "other-account"):
+        receipt = receipt.model_copy(
+            update={"confirmed_user_id": UUID(USER_ID) if kind == "confirmed" else uuid4()}
+        )
+    initial = Response()
+    set_signup_terms_cookie(initial, receipt, material.settings)
+    from http.cookies import SimpleCookie
+
+    cookie = SimpleCookie()
+    cookie.load(initial.headers["set-cookie"])
+    name = signup_terms_cookie_name(material.settings)
+    value = cookie[name].value
+    if kind == "tampered":
+        value = "B" + value[1:]
+    if kind == "invalid-code":
+        material.provider.return_value = provider_response({"error_code": "otp_expired"}, 403)
+    result = material.client.post(
+        PATH,
+        json={"email": EMAIL, "code": CODE},
+        headers={"Origin": ORIGIN, "Cookie": f"{name}={value}"},
+    )
+    if kind == "invalid-code":
+        assert result.status_code == 400
+        assert "set-cookie" not in result.headers
+        return
+    assert result.status_code == 200
+    assert result.json() == {
+        "status": "confirmed",
+        "message": "Email confirmed. You can now sign in.",
+    }
+    cookie.load(result.headers["set-cookie"])
+    if kind in ("pending", "confirmed"):
+        decoded = decode_signup_terms_receipt(
+            SecretStr(cookie[name].value), SecretStr(EMAIL), material.settings
+        )
+        assert decoded is not None
+        assert decoded.confirmed_user_id == UUID(USER_ID)
+        assert decoded.accepted_at == receipt.accepted_at
+        assert decoded.expires_at == receipt.expires_at
+    else:
+        assert cookie[name]["max-age"] == "0"

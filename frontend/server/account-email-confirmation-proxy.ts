@@ -1,6 +1,7 @@
 import { ProxyBodyTooLarge, readProxyBytes } from './session-proxy-io.ts'
 import { proxyClientIPHeaders, ProxyClientIPUnavailable } from './proxy-client-ip.ts'
 import { planSessionProxyOrigin, type SessionProxyEnvironment } from './session-proxy-policy.ts'
+import { readSignupTermsProxyCookie, validatedSignupTermsCookie } from './signup-terms-proxy-cookies.ts'
 
 export type AccountEmailConfirmationProxyEnvironment = SessionProxyEnvironment & { ACCOUNT_EMAIL_CONFIRMATION_PROXY_ENABLED?: string }
 const PATH = '/api/v1/account/confirm-email'
@@ -46,9 +47,9 @@ async function readCredentials(request: Request, signal: AbortSignal): Promise<s
   return JSON.stringify({ email: body.email, code: body.code })
 }
 
-async function confirmed(response: Response, signal: AbortSignal): Promise<Response> {
+async function confirmed(response: Response, signal: AbortSignal, hadReceipt: boolean): Promise<Response> {
   const length = response.headers.get('Content-Length')
-  if (response.headers.has('Set-Cookie') ||
+  if ((!hadReceipt && response.headers.has('Set-Cookie')) ||
       response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json' ||
       !['', 'identity'].includes(response.headers.get('Content-Encoding')?.toLowerCase() ?? '') ||
       (length !== null && (!/^[0-9]{1,5}$/.test(length) || Number(length) > MAX_BYTES))) {
@@ -63,13 +64,17 @@ async function confirmed(response: Response, signal: AbortSignal): Promise<Respo
     throw new Error('Invalid confirmation response')
   }
   signal.throwIfAborted()
-  return Response.json({ status: 'confirmed', message: CONFIRMED_MESSAGE }, { headers: { 'Cache-Control': 'no-store' } })
+  return Response.json({ status: 'confirmed', message: CONFIRMED_MESSAGE }, { headers: {
+    'Cache-Control': 'no-store', ...(hadReceipt ? { 'Set-Cookie': validatedSignupTermsCookie(response.headers, true) } : {}),
+  } })
 }
 
 export async function forwardAccountEmailConfirmation(request: Request, env: AccountEmailConfirmationProxyEnvironment): Promise<Response> {
   const decision = planSessionProxyOrigin(request, env, PATH, env.ACCOUNT_EMAIL_CONFIRMATION_PROXY_ENABLED)
   if (decision instanceof Response) return decision
   const plan = decision
+  let receipt: string | null
+  try { receipt = readSignupTermsProxyCookie(request) } catch { return reply('Invalid email confirmation request.', 400) }
   const url = new URL(request.url)
   const transfer = request.headers.get('Transfer-Encoding')
   if (url.search || url.hash ||
@@ -95,13 +100,14 @@ export async function forwardAccountEmailConfirmation(request: Request, env: Acc
       headers.set('Accept-Encoding', 'identity')
       headers.set('Content-Type', 'application/json')
       headers.set('Origin', plan.publicOrigin)
+      if (receipt) headers.set('Cookie', receipt)
       const body = await readCredentials(request, controller.signal)
       controller.signal.throwIfAborted()
       upstream = await fetch(plan.upstreamUrl, { method: 'POST', headers, body,
         redirect: 'manual', cache: 'no-store', credentials: 'omit', signal: controller.signal,
       })
       controller.signal.throwIfAborted()
-      if (upstream.status === 200) return await confirmed(upstream, controller.signal)
+      if (upstream.status === 200) return await confirmed(upstream, controller.signal, receipt !== null)
       if (upstream.status === 400) return reply('Email confirmation was rejected.', 400)
       if (upstream.status === 403) return reply('Request origin is not allowed.', 403)
       if (upstream.status === 429) {

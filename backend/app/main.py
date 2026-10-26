@@ -21,6 +21,7 @@ from app.account_session_routes import router as account_session_router
 from app.account_sign_in_routes import router as account_sign_in_router
 from app.account_sign_out_routes import router as account_sign_out_router
 from app.account_sign_up_routes import router as account_sign_up_router
+from app.account_terms_routes import router as account_terms_router
 from app.auth_rate_limit_scheduler import auth_rate_limit_cleanup_lifespan
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
@@ -127,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(account_password_recovery_router)
     application.include_router(account_password_reset_router)
     application.include_router(account_google_router)
+    application.include_router(account_terms_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

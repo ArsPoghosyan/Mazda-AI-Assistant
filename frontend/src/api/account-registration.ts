@@ -1,7 +1,11 @@
+import { CURRENT_TERMS_VERSION } from '../../shared/account-terms.ts'
+
 export type AccountSignUpCredentials = {
   email: string
   password: string
   captcha_token: string
+  accepted: boolean
+  terms_version: string
 }
 
 export type AccountSignUpResponse = {
@@ -42,6 +46,9 @@ export async function signUpAccount(
   signal?: AbortSignal,
 ): Promise<AccountSignUpResponse> {
   let response: Response
+  if (credentials.accepted !== true || credentials.terms_version !== CURRENT_TERMS_VERSION) {
+    throw new AccountSignUpRejectedError()
+  }
 
   try {
     response = await fetch('/api/v1/account/sign-up', {
@@ -55,6 +62,8 @@ export async function signUpAccount(
         email: credentials.email,
         password: credentials.password,
         captcha_token: credentials.captcha_token,
+        accepted: credentials.accepted,
+        terms_version: credentials.terms_version,
       }),
     })
   } catch (error) {

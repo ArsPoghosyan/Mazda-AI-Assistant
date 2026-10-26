@@ -1,3 +1,5 @@
+import TermsOfServiceLink from './TermsOfServiceLink'
+
 export default function PrivacyNotice() {
   return (
     <div className="min-h-dvh bg-background text-foreground">
@@ -9,9 +11,12 @@ export default function PrivacyNotice() {
         Skip to privacy notice
       </a>
       <header className="mx-auto max-w-3xl border-b border-divider px-6 py-5">
-        <a href="/" className="inline-flex min-h-11 items-center text-accent underline underline-offset-4 hover:text-accent-hover">
-          Back to Mazda AI Assistant
-        </a>
+        <nav aria-label="Policy navigation" className="flex flex-wrap items-center gap-x-6">
+          <a href="/" className="inline-flex min-h-11 items-center text-accent underline underline-offset-4 hover:text-accent-hover">
+            Back to Mazda AI Assistant
+          </a>
+          <TermsOfServiceLink />
+        </nav>
       </header>
       <main id="privacy-content" tabIndex={-1} className="mx-auto max-w-3xl px-6 py-10 leading-7">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Privacy Notice</h1>
@@ -66,6 +71,12 @@ export default function PrivacyNotice() {
             Emailing the privacy contact also sends your address and message
             through Gmail so the operator can respond.
           </p>
+          <p>
+            When account setup is enabled, accepting the Terms records the
+            account identifier, Terms version and acceptance time. This records
+            Terms agreement, not blanket consent to personal-data processing.
+            These acceptance records are removed with the application account profile.
+          </p>
         </section>
 
         <section aria-labelledby="privacy-cookies" className="mt-8 space-y-3">
@@ -73,7 +84,12 @@ export default function PrivacyNotice() {
           <p>
             When used, account and guest session cookies remember the browser
             session. A temporary cookie binds Google sign-in to its originating
-            browser. Production session cookies use Secure and HttpOnly
+            browser. Email registration uses an encrypted, HttpOnly cookie for up to one
+            hour to carry your Terms agreement through email confirmation and a
+            matching sign-in; it is then cleared. It stores an email hash, the
+            Terms revision and time, and a confirmed account identifier after
+            verification, without passwords or provider tokens. If it expires,
+            account setup asks you to agree again. Production session cookies use Secure and HttpOnly
             protections. Blocking or clearing cookies can prevent sign-in or
             remove access to the guest identity in that browser. Signing out
             ends the local session; it does not delete the account.

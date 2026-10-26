@@ -11,6 +11,8 @@ from app.account_auth import authenticate_active_account_token
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import CreatedAccountSession, create_account_session
 from app.account_sign_in import AccountSignInUnavailable, sign_in_with_password
+from app.account_signup_terms import decode_signup_terms_receipt
+from app.account_terms import record_signup_terms_acceptance
 from app.config import Settings
 
 _logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ async def sign_in_account(
     client: httpx2.AsyncClient,
     key_cache: AccountKeyCache | None,
     captcha_token: SecretStr | None = None,
+    signup_terms_receipt: SecretStr | None = None,
 ) -> CreatedAccountSession:
     """Return a browser credential only after successful database commit.
 
@@ -68,6 +71,11 @@ async def sign_in_account(
                 refresh_token=tokens.refresh_token,
                 key_cache=key_cache,
             )
+            if settings.account_terms_api_enabled and signup_terms_receipt is not None:
+                receipt = decode_signup_terms_receipt(signup_terms_receipt, email, settings)
+                if receipt is not None and receipt.confirmed_user_id == created.user_id:
+                    stage = "persist_registration_agreement"
+                    await record_signup_terms_acceptance(connection, created, receipt)
             stage = "commit_or_release"
     except (Exception, asyncio.CancelledError):
         # A failed/uncertain commit must not expose a credential or trigger blind

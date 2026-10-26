@@ -177,7 +177,9 @@ def material(monkeypatch: pytest.MonkeyPatch) -> Material:
     )
 
 
-async def invoke(material: Material) -> CreatedAccountSession:
+async def invoke(
+    material: Material, signup_terms_receipt: SecretStr | None = None
+) -> CreatedAccountSession:
     return await callback.complete_google_callback(
         cast(AsyncEngine, material.engine),
         material.code,
@@ -185,6 +187,7 @@ async def invoke(material: Material) -> CreatedAccountSession:
         settings=material.settings,
         client=material.client,
         key_cache=material.key_cache,
+        signup_terms_receipt=signup_terms_receipt,
     )
 
 
@@ -501,3 +504,109 @@ async def test_nested_timeout_is_generic_and_never_retried(material: Material, s
     assert str(caught.value) == "Google sign-in is unavailable."
     assert caught.value.__suppress_context__ is True
     assert_stopped_at(material, stage)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "matching",
+        "unconfirmed",
+        "other-account",
+        "expired",
+        "tampered",
+        "old-version",
+        "missing",
+        "disabled",
+    ],
+)
+async def test_confirmed_signup_agreement_follows_only_same_verified_google_account(
+    material: Material,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    from app.account_signup_terms import make_signup_terms_receipt
+
+    material.settings.account_terms_api_enabled = kind != "disabled"
+    receipt = make_signup_terms_receipt(SecretStr("signup@example.test")).model_copy(
+        update={"confirmed_user_id": material.created.user_id}
+    )
+    if kind == "unconfirmed":
+        receipt = receipt.model_copy(update={"confirmed_user_id": None})
+    elif kind == "other-account":
+        receipt = receipt.model_copy(update={"confirmed_user_id": uuid4()})
+    elif kind == "expired":
+        receipt = receipt.model_copy(
+            update={
+                "accepted_at": datetime.now(UTC) - timedelta(hours=2),
+                "expires_at": datetime.now(UTC) - timedelta(hours=1),
+            }
+        )
+    elif kind == "old-version":
+        receipt = receipt.model_copy(update={"terms_version": "old"})
+    assert material.settings.account_session_encryption_key is not None
+    value = (
+        AccountTokenCipher(material.settings.account_session_encryption_key)
+        .encrypt(SecretStr(receipt.model_dump_json()))
+        .decode("ascii")
+    )
+    if kind == "tampered":
+        value = "B" + value[1:]
+
+    async def record(*args: object) -> None:
+        assert material.events[-2:] == ["session_begin", "persist"]
+        material.events.append("agreement")
+
+    saved = AsyncMock(side_effect=record)
+    monkeypatch.setattr(session_service, "record_signup_terms_acceptance", saved)
+    assert (
+        await invoke(material, None if kind == "missing" else SecretStr(value)) is material.created
+    )
+    if kind == "matching":
+        saved.assert_awaited_once_with(material.connection, material.created, receipt)
+        assert material.events[-5:] == [
+            "session_begin",
+            "persist",
+            "agreement",
+            "session_commit",
+            "session_release",
+        ]
+    else:
+        saved.assert_not_awaited()
+    material.operations["exchange"].assert_awaited_once()
+    material.operations["session_commit"].assert_awaited_once()
+
+
+@pytest.mark.parametrize("phase", ["agreement", "commit"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_google_signup_agreement_failure_never_returns_session_or_retries(
+    material: Material,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    cancelled: bool,
+) -> None:
+    from app.account_signup_terms import make_signup_terms_receipt
+
+    material.settings.account_terms_api_enabled = True
+    receipt = make_signup_terms_receipt(SecretStr("signup@example.test")).model_copy(
+        update={"confirmed_user_id": material.created.user_id}
+    )
+    assert material.settings.account_session_encryption_key is not None
+    value = (
+        AccountTokenCipher(material.settings.account_session_encryption_key)
+        .encrypt(SecretStr(receipt.model_dump_json()))
+        .decode("ascii")
+    )
+    failure = asyncio.CancelledError("private") if cancelled else SQLAlchemyError("private")
+    record = AsyncMock(side_effect=failure if phase == "agreement" else None)
+    monkeypatch.setattr(session_service, "record_signup_terms_acceptance", record)
+    if phase == "commit":
+        material.operations["session_commit"].side_effect = failure
+    with pytest.raises(type(failure)):
+        await invoke(material, SecretStr(value))
+    record.assert_awaited_once_with(material.connection, material.created, receipt)
+    material.operations["exchange"].assert_awaited_once()
+    material.operations["persist"].assert_awaited_once()
+    assert material.events[-1] == "session_release"
+    if phase == "agreement":
+        material.operations["session_commit"].assert_not_awaited()
+        assert "session_rollback" in material.events

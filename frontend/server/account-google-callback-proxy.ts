@@ -1,6 +1,7 @@
 import { ACCOUNT_COOKIE } from './account-session-proxy-cookies.ts'
 import { readOAuthProxyCookies, validatedOAuthCallbackCookies } from './account-oauth-proxy-cookies.ts'
 import { readProxyCookieValue } from './session-proxy-cookies.ts'
+import { readSignupTermsProxyCookie, validatedGoogleSignupTermsCookies } from './signup-terms-proxy-cookies.ts'
 import { confirmEmptyProxyBody } from './session-proxy-io.ts'
 import { httpsOrigin, type SessionProxyEnvironment } from './session-proxy-policy.ts'
 
@@ -50,11 +51,13 @@ export async function forwardAccountGoogleCallback(request: Request, env: Accoun
   }
   let code: string
   let binding: string | null
+  let receipt: string | null
   try {
     if (readProxyCookieValue(request, ACCOUNT_COOKIE) !== null) return returned(origin, 'sign-out-required')
     code = callbackCode(url)
     binding = readOAuthProxyCookies(request)
     if (binding === null) return returned(origin, 'rejected')
+    receipt = readSignupTermsProxyCookie(request)
   } catch { return returned(origin, 'rejected') }
   if (request.signal.aborted) return returned(origin, 'unavailable')
   const controller = new AbortController()
@@ -70,7 +73,9 @@ export async function forwardAccountGoogleCallback(request: Request, env: Accoun
       if (!await confirmEmptyProxyBody(request.body, controller.signal)) return returned(origin!, 'rejected')
       const target = new URL(PATH, backend!)
       target.search = new URLSearchParams({ code }).toString()
-      const headers = new Headers({ Accept: 'application/json', 'Accept-Encoding': 'identity', Cookie: binding! })
+      const headers = new Headers({ Accept: 'application/json', 'Accept-Encoding': 'identity',
+        Cookie: [binding, receipt].filter(Boolean).join('; '),
+      })
       controller.signal.throwIfAborted()
       upstream = await fetch(target, { method: 'GET', headers, redirect: 'manual', cache: 'no-store',
         credentials: 'omit', signal: controller.signal,
@@ -88,7 +93,7 @@ export async function forwardAccountGoogleCallback(request: Request, env: Accoun
           upstream.headers.has('Transfer-Encoding') ||
           !['', 'identity'].includes(upstream.headers.get('Content-Encoding')?.toLowerCase() ?? '') ||
           !await confirmEmptyProxyBody(upstream.body, controller.signal)) throw new Error('Invalid callback response')
-      const cookies = validatedOAuthCallbackCookies(upstream.headers, outcome === 'success')
+      const cookies = validatedGoogleSignupTermsCookies(upstream.headers, outcome === 'success', receipt !== null)
       controller.signal.throwIfAborted()
       return returned(origin!, outcome, cookies)
     } finally {

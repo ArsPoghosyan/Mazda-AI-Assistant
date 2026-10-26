@@ -1,4 +1,5 @@
-import { ACCOUNT_COOKIE, validatedCreatedAccountCookie } from './account-session-proxy-cookies.ts'
+import { ACCOUNT_COOKIE } from './account-session-proxy-cookies.ts'
+import { readSignupTermsProxyCookie, validatedSigninTermsCookies } from './signup-terms-proxy-cookies.ts'
 import { readAccountProxyMetadata } from './account-session-proxy-response.ts'
 import { proxyClientIPHeaders, ProxyClientIPUnavailable } from './proxy-client-ip.ts'
 import { readProxyCookieValue } from './session-proxy-cookies.ts'
@@ -18,6 +19,8 @@ export async function forwardAccountSignIn(request: Request, env: AccountSignInP
   const decision = planSessionProxyOrigin(request, env, PATH, env.ACCOUNT_SIGN_IN_PROXY_ENABLED)
   if (decision instanceof Response) return decision
   const plan = decision
+  let receipt: string | null
+  try { receipt = readSignupTermsProxyCookie(request) } catch { return reply('Invalid sign-in request.', 400) }
   const url = new URL(request.url)
   const transfer = request.headers.get('Transfer-Encoding')
   if (url.search || url.hash ||
@@ -26,7 +29,8 @@ export async function forwardAccountSignIn(request: Request, env: AccountSignInP
     return reply('Invalid sign-in request.', 400)
   }
   // Presence, not token validity: never bypass explicit sign-out by omitting a
-  // malformed/stale credential. No other browser cookies belong on this request.
+  // malformed/stale credential. Only the provisional signup Terms receipt may
+  // accompany credentials; guest/OAuth cookies remain in the browser.
   try {
     if (readProxyCookieValue(request, ACCOUNT_COOKIE) !== null) return reply(SIGN_OUT_FIRST, 409)
   } catch { return reply('Invalid sign-in request.', 400) }
@@ -48,6 +52,7 @@ export async function forwardAccountSignIn(request: Request, env: AccountSignInP
       headers.set('Accept-Encoding', 'identity')
       headers.set('Content-Type', 'application/json')
       headers.set('Origin', plan.publicOrigin)
+      if (receipt) headers.set('Cookie', receipt)
       const body = await readCredentialProxyBody(request, controller.signal, { requireCaptcha: false })
       controller.signal.throwIfAborted()
       upstream = await fetch(plan.upstreamUrl, { method: 'POST', headers, body,
@@ -56,9 +61,11 @@ export async function forwardAccountSignIn(request: Request, env: AccountSignInP
       controller.signal.throwIfAborted()
       if (upstream.status === 200) {
         const metadata = await readAccountProxyMetadata(upstream, controller.signal)
-        const cookie = validatedCreatedAccountCookie(upstream.headers, metadata.idle)
+        const cookies = validatedSigninTermsCookies(upstream.headers, metadata.idle, receipt !== null)
         controller.signal.throwIfAborted()
-        return Response.json(metadata.body, { headers: { 'Cache-Control': 'no-store', 'Set-Cookie': cookie } })
+        const response = Response.json(metadata.body, { headers: { 'Cache-Control': 'no-store' } })
+        cookies.forEach(cookie => response.headers.append('Set-Cookie', cookie))
+        return response
       }
       if (upstream.status === 401) return reply('Sign-in was rejected.', 401)
       if (upstream.status === 409) return reply(SIGN_OUT_FIRST, 409)

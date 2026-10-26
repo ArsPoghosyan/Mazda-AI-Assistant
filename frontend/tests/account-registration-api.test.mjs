@@ -14,6 +14,7 @@ const credentials = {
   email: 'owner@example.test',
   password: '  synthetic-password-é  ',
   captcha_token: 'synthetic-captcha-proof',
+  accepted: true, terms_version: '2026-10-26',
 }
 
 const acknowledgement = { status: 'accepted' }

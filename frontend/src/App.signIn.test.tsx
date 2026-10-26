@@ -211,7 +211,8 @@ test('registration and confirmation return to a separate sign-in inside the same
 
   await user.type(within(dialog).getByLabelText('Email'), 'owner@example.test')
   await user.type(within(dialog).getByLabelText('Password', { exact: true }), 'synthetic-password')
-  act(() => options().callback('synthetic-registration-proof'))
+  fireEvent.click(within(dialog).getByRole('checkbox'))
+      act(() => options().callback('synthetic-registration-proof'))
   await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
 
   await screen.findByRole('dialog', { name: 'Confirm your email' })
@@ -265,6 +266,7 @@ test.each(['registration', 'confirmation'] as const)(
     await user.type(within(dialog).getByLabelText('Password', { exact: true }), 'synthetic-password')
 
     if (stage === 'confirmation') {
+      fireEvent.click(within(dialog).getByRole('checkbox'))
       act(() => options().callback('synthetic-registration-proof'))
       await user.click(within(dialog).getByRole('button', { name: 'Create account' }))
       await screen.findByRole('dialog', { name: 'Confirm your email' })

@@ -237,3 +237,49 @@ test('deadline bounds stalled redirect-body EOF and cancels its reader', async (
   await returned(await pending)
   assert.equal(cancelled, true)
 })
+
+
+const receiptName = '__Host-askm6_signup_terms'
+const receiptValue = 'R'.repeat(120)
+const receiptClear = `${receiptName}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`
+
+test('Google callback forwards only OAuth binding and signup receipt and validates all three success cookies', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', async (_target, options) => {
+    assert.equal(options.headers.get('Cookie'), `${oauth}=${binding}; ${receiptName}=${receiptValue}`)
+    assert.equal(options.headers.get('Authorization'), null)
+    return upstream('success', [receiptClear, created, clear])
+  })
+  await returned(await dispatch({ headers: { Cookie: `${oauth}=${binding}; ${receiptName}=${receiptValue}; __Host-askm6_guest=private`, Authorization: 'Bearer private' } }), 'success', [canonicalClear, canonicalCreated, receiptClear])
+  assert.equal(fetch.mock.callCount(), 1)
+})
+
+for (const outcome of ['rejected', 'unavailable', 'sign-out-required']) {
+  test(`Google callback ${outcome} preserves signup agreement evidence`, async t => {
+    t.mock.method(globalThis, 'fetch', async () => upstream(outcome))
+    await returned(await dispatch({ headers: { Cookie: `${oauth}=${binding}; ${receiptName}=${receiptValue}` } }), outcome, [canonicalClear])
+  })
+}
+
+for (const mode of ['missing', 'persistent', 'duplicate', 'extra', 'unsafe-scope']) {
+  test(`Google callback rejects ${mode} receipt cookie contract`, async t => {
+    const cookies = [clear, created]
+    if (mode !== 'missing') cookies.push(mode === 'persistent'
+      ? `${receiptName}=${receiptValue}; Expires=${expiry}; Max-Age=1000; Path=/; Secure; HttpOnly; SameSite=Lax`
+      : mode === 'unsafe-scope' ? receiptClear.replace('; Secure', '') : receiptClear)
+    if (mode === 'duplicate') cookies.push(receiptClear)
+    if (mode === 'extra') cookies.push('__Host-askm6_guest=private')
+    t.mock.method(globalThis, 'fetch', async () => upstream('success', cookies))
+    await returned(await dispatch({ headers: { Cookie: `${oauth}=${binding}; ${receiptName}=${receiptValue}` } }))
+  })
+}
+
+test('Google callback rejects duplicate signup receipt cookies before code exchange', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => upstream())
+  await returned(await dispatch({ headers: { Cookie: `${oauth}=${binding}; ${receiptName}=${receiptValue}; ${receiptName}=${receiptValue}` } }), 'rejected')
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
+test('Google callback cannot clear unsolicited signup receipt when none was forwarded', async t => {
+  t.mock.method(globalThis, 'fetch', async () => upstream('success', [clear, created, receiptClear]))
+  await returned(await dispatch())
+})

@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 import httpx2
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.account_auth import authenticate_active_account_token
@@ -13,6 +14,8 @@ from app.account_google_exchange import (
 )
 from app.account_key_cache import AccountKeyCache
 from app.account_sessions import CreatedAccountSession, create_account_session
+from app.account_signup_terms import decode_confirmed_signup_terms_receipt
+from app.account_terms import record_signup_terms_acceptance
 from app.config import Settings
 
 _logger = logging.getLogger(__name__)
@@ -25,6 +28,7 @@ async def create_google_account_session(
     settings: Settings,
     client: httpx2.AsyncClient,
     key_cache: AccountKeyCache | None,
+    signup_terms_receipt: SecretStr | None = None,
 ) -> CreatedAccountSession:
     """Return browser credentials only after verification and database commit.
 
@@ -63,6 +67,13 @@ async def create_google_account_session(
                 refresh_token=tokens.refresh_token,
                 key_cache=key_cache,
             )
+            if settings.account_terms_api_enabled and signup_terms_receipt is not None:
+                receipt = decode_confirmed_signup_terms_receipt(
+                    signup_terms_receipt, created.user_id, settings
+                )
+                if receipt is not None:
+                    stage = "persist_registration_agreement"
+                    await record_signup_terms_acceptance(connection, created, receipt)
             stage = "commit_or_release"
     except (Exception, asyncio.CancelledError):
         # No credential or exception text enters diagnostics. In particular,

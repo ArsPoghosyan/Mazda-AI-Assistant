@@ -391,6 +391,7 @@ def assert_service_called_once(material: RouteMaterial) -> None:
         client=material.http_client,
         key_cache=material.key_cache,
         captcha_token=SecretStr(CAPTCHA_TOKEN),
+        signup_terms_receipt=None,
     )
 
 

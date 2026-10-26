@@ -22,6 +22,12 @@ from app.account_sign_in import (
 )
 from app.account_sign_in_requests import read_sign_in_credentials
 from app.account_sign_in_service import sign_in_account
+from app.account_signup_terms import (
+    clear_signup_terms_cookie,
+    read_signup_terms_cookie,
+    signup_terms_cookie_name,
+)
+from app.account_terms import AccountTermsUnavailable
 from app.account_tokens import InvalidAccountToken
 from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_in_ip_key
 from app.auth_rate_limits import AuthRateLimitUnavailable, commit_sign_in_attempt
@@ -135,6 +141,7 @@ async def sign_in(
                 client=client,
                 key_cache=key_cache,
                 captcha_token=credentials.captcha_token,
+                signup_terms_receipt=read_signup_terms_cookie(request, settings),
             )
     except AccountSignInCaptchaRejected:
         raise HTTPException(
@@ -153,6 +160,7 @@ async def sign_in(
         ) from None
     except (
         AccountSignInUnavailable,
+        AccountTermsUnavailable,
         AccountAuthenticationUnavailable,
         AccountSessionUnavailable,
         AccountSessionAlreadyExists,
@@ -171,6 +179,8 @@ async def sign_in(
         created.idle_expires_at,
         settings,
     )
+    if signup_terms_cookie_name(settings) in request.cookies:
+        clear_signup_terms_cookie(response, settings)
 
     return AccountSignInResponse(
         user_id=created.user_id,

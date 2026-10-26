@@ -170,6 +170,7 @@ async def invoke(
     material: SignInMaterial,
     *,
     captcha_token: SecretStr | None = None,
+    signup_terms_receipt: SecretStr | None = None,
 ) -> CreatedAccountSession:
     return await service.sign_in_account(
         cast(AsyncEngine, material.engine),
@@ -179,6 +180,7 @@ async def invoke(
         client=material.client,
         key_cache=material.key_cache,
         captcha_token=captcha_token,
+        signup_terms_receipt=signup_terms_receipt,
     )
 
 
@@ -485,4 +487,93 @@ async def test_active_verification_failure_prevents_database_work(
     )
     material.engine.begin.assert_not_called()
     material.create_session.assert_not_awaited()
+    material.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["matching", "unconfirmed", "other-account", "other-email", "expired", "tampered", "disabled"],
+)
+async def test_signup_agreement_requires_confirmed_matching_receipt(
+    material: SignInMaterial,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    from app.account_signup_terms import make_signup_terms_receipt
+    from app.account_token_encryption import AccountTokenCipher
+
+    material.settings.account_terms_api_enabled = kind != "disabled"
+    receipt = make_signup_terms_receipt(
+        SecretStr("different@example.test") if kind == "other-email" else EMAIL
+    )
+    receipt = receipt.model_copy(update={"confirmed_user_id": material.created.user_id})
+    if kind == "unconfirmed":
+        receipt = receipt.model_copy(update={"confirmed_user_id": None})
+    elif kind == "other-account":
+        receipt = receipt.model_copy(update={"confirmed_user_id": uuid4()})
+    elif kind == "expired":
+        receipt = receipt.model_copy(
+            update={
+                "accepted_at": datetime.now(UTC) - timedelta(hours=2),
+                "expires_at": datetime.now(UTC) - timedelta(hours=1),
+            }
+        )
+    assert material.settings.account_session_encryption_key is not None
+    encrypted = (
+        AccountTokenCipher(material.settings.account_session_encryption_key)
+        .encrypt(SecretStr(receipt.model_dump_json()))
+        .decode("ascii")
+    )
+    if kind == "tampered":
+        encrypted = "B" + encrypted[1:]
+
+    async def save(*args: object) -> None:
+        assert material.events == ["provider", "verify", "begin", "create"]
+        material.events.append("agreement")
+
+    record = AsyncMock(side_effect=save)
+    monkeypatch.setattr(service, "record_signup_terms_acceptance", record)
+    assert await invoke(material, signup_terms_receipt=SecretStr(encrypted)) is material.created
+    if kind == "matching":
+        record.assert_awaited_once_with(material.connection, material.created, receipt)
+        assert material.events == [
+            "provider",
+            "verify",
+            "begin",
+            "create",
+            "agreement",
+            "commit",
+            "release",
+        ]
+    else:
+        record.assert_not_awaited()
+        assert material.events == ["provider", "verify", "begin", "create", "commit", "release"]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_signup_agreement_failure_rolls_back_session_without_retry(
+    material: SignInMaterial,
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    from app.account_signup_terms import make_signup_terms_receipt
+    from app.account_token_encryption import AccountTokenCipher
+
+    material.settings.account_terms_api_enabled = True
+    receipt = make_signup_terms_receipt(EMAIL).model_copy(
+        update={"confirmed_user_id": material.created.user_id}
+    )
+    assert material.settings.account_session_encryption_key is not None
+    encrypted = (
+        AccountTokenCipher(material.settings.account_session_encryption_key)
+        .encrypt(SecretStr(receipt.model_dump_json()))
+        .decode("ascii")
+    )
+    error = asyncio.CancelledError() if cancelled else SQLAlchemyError("private")
+    monkeypatch.setattr(service, "record_signup_terms_acceptance", AsyncMock(side_effect=error))
+    with pytest.raises(type(error)):
+        await invoke(material, signup_terms_receipt=SecretStr(encrypted))
+    assert material.events == ["provider", "verify", "begin", "create", "rollback", "release"]
+    material.sign_in.assert_awaited_once()
+    material.create_session.assert_awaited_once()
     material.commit.assert_not_awaited()

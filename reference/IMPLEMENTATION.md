@@ -744,6 +744,10 @@ tests make no database or provider requests and do not enable account endpoints.
 
 Registration currently consists of configuration, bounded credential parsing,
 provider-response interpretation, and an internal `sign_up_with_password` adapter.
+The application request additionally requires literal `accepted: true` and the
+current `terms_version`; these are validated before the provider call and are
+never sent to Supabase. The Terms feature and existing session encryption key
+must be configured for registration.
 `POST /api/v1/account/sign-up` connects these helpers without creating an
 application session. Sign-up and email-confirmation interfaces are available only
 in development; the complete flow has been manually validated locally with the
@@ -1263,13 +1267,128 @@ The frontend entry point renders a standalone Privacy Notice for `/privacy` and
 start health/authentication requests on that page. Other paths retain the existing
 landing behavior; no routing dependency was added. The notice uses the existing
 visual tokens, a skip link, semantic headings, a return-home link and the approved
-public contact address. Footer navigation stays in the same tab; sign-in and
-registration links explicitly open a new tab with `noopener noreferrer` to keep
+public contact address. Footer navigation stays in the same tab; registration
+links explicitly open a new tab with `noopener noreferrer` to keep
 in-progress credentials in the original form. They neither submit the form nor
 record consent. The copy describes current development status and approved
 retention choices. The development-stage notice does not establish legal
 clearance or manual-process readiness for activation of hosted authentication;
 those release checks remain separate.
+
+Development-stage Terms are prepared at `/terms` and `/terms/`, with reciprocal
+Privacy Notice navigation and links in the landing footer and account-creation form.
+Registration places both policy links below verification, above the submit button;
+the sign-in form contains neither policy link.
+The Terms page also renders without mounting App or sending backend requests.
+Form links open a labelled new tab with `noopener noreferrer`, preserving form
+entries. The content covers current availability, responsible use, account
+security, privacy/contact and unofficial status. The Terms page itself records
+no agreement and adds no liability cap, governing-law clause or public auth activation.
+Content review/publication and Google branding verification remain separate steps.
+
+The additive migration `b4d7e2806a12` introduces `app.account_terms_acceptances`:
+composite account/revision primary key, database-generated `accepted_at`, and a
+profile foreign key with `ON DELETE CASCADE`. It backfills no agreement for
+existing accounts. Runtime privileges are SELECT/INSERT only; duplicates preserve
+the original timestamp, including concurrent submissions. A populated table
+prevents downgrade rather than silently discarding acceptance records.
+
+`POST /api/v1/account/terms/accept` is independently disabled by default through
+`ACCOUNT_TERMS_API_ENABLED=false`. It requires a trusted Origin, opaque account
+cookie and live session verification. The 1 KiB JSON body accepts only literal
+boolean `accepted: true` and the exact current `terms_version` (`2026-10-26`);
+client account IDs, timestamps, privacy-consent fields and query options are
+rejected. Parsing, verification and commit share the existing account-session
+deadline. The response contains only revision and acceptance time, renews the
+cookie after commit and uses no-store; failures cannot report successful
+acceptance. Invalid sessions clear the account cookie, while temporary failures
+preserve it. Provider metadata is never treated as agreement.
+
+`POST /api/v1/account/terms/status` accepts an empty, trusted-Origin POST with the
+same verified account cookie. It shares `ACCOUNT_TERMS_API_ENABLED` and the total
+session-authentication deadline. The response contains the server-controlled
+`terms_version`, nullable `accepted_at`, and derived `acceptance_required`.
+Missing/old revisions require acceptance; another account's record never counts.
+The status transaction performs live authentication and a subject-scoped lookup,
+commits before returning/renewing the cookie, and creates no acceptance record.
+Bodies and query options are rejected before authentication. Invalid sessions
+clear the cookie; unavailable storage/provider/commit results remain generic 503.
+The existing three-field `/account/session` and sign-in response contracts stay
+unchanged, preserving their strict proxy validators.
+
+`TermsAccountDependency` is the reusable resource gate. It requires enabled Terms
+support, cookie authentication and current acceptance before yielding a verified
+subject and its active transaction connection. Account resource handlers must
+use that connection and still enforce per-resource ownership. Missing agreement
+returns 428 with `X-Account-Setup: terms-required`, without clearing a valid cookie.
+Disabled/unavailable support never bypasses the gate. Mutation requests require
+a trusted Origin. Its function-scoped FastAPI dependency commits before sending
+HTTP success, rolls back consumer failures/cancellation and cannot release a
+successful response after a failed commit. Work must finish before the handler
+returns; the connection cannot be used by later streaming/background work.
+No synthetic resource endpoint is added to the application; tests register a
+temporary protected probe only. Account resources will use this dependency when
+implemented. Status, acceptance, identity bootstrap and sign-out intentionally
+remain outside the Terms prerequisite.
+
+Development account UI mounts setup only after successful session restoration
+or email sign-in, including a verified Google return. `useAccountSetup` reads
+the separate status endpoint; missing/unavailable status never marks setup ready.
+First use opens `AccountSetupFlow` in a native modal styled like sign-in, with
+an initially unchecked Terms checkbox, separate policy links in safe new tabs,
+and explicit submission. Returning accepted accounts skip the modal. Escape or
+Close dismisses without agreement and leaves a reopen action; sign-out is still
+available. Authentication and setup remain distinct states; future account
+resources must use the server access dependency as well as ownership checks.
+
+Status and acceptance requests have 15-second client deadlines, cancellation on
+session change/unmount, duplicate-submit protection and stale-response guards.
+Timeout or unconfirmed acceptance stays blocked and offers manual retry; there
+are no automatic retries or localStorage agreement records. A verified 401
+offers a return to sign-in. Shared frontend/proxy validation pins revision
+`2026-10-26`, exact fields, consistent required/accepted state and UTC timestamps;
+changing the Terms requires coordinated revision updates, never relabeling old
+acceptance records. The Privacy Notice now describes the agreement record and
+its removal with the application profile, separately from privacy consent.
+
+Pages forwards only `/account/terms/status` and `/account/terms/accept`, behind
+the independent default-off `ACCOUNT_TERMS_PROXY_ENABLED=true` gate. Origin,
+exact method/path and edge assertion rules are shared with the other proxies.
+Status requires an empty body; acceptance allows only the current revision and
+literal `accepted: true` in at most 1 KiB of JSON. Requests and metadata responses
+are bounded, redirects rejected, errors rebuilt, and unrelated cookies/headers
+stripped. Secure account-cookie renewal must preserve the original token, valid
+scope and future expiry; this endpoint's JSON has no expiry metadata to compare.
+Bounded acceptance JSON may use chunked framing only when Content-Length is
+absent; status remains empty-only and ambiguous framing is rejected.
+Only a validated backend deletion cookie can clear a session on 401. A 20-second
+proxy deadline and cancellation cover request reading, upstream and response
+validation. Existing session/sign-in response formats remain unchanged.
+
+Both setup endpoints and the resource dependency require `X-Account-Subject`
+containing the account ID from the previously verified session response. This
+is an account-match precondition, never identity or authorization authority.
+The backend locks the cookie's existing session and rejects a mismatch with 409
+before provider refresh, lookup or acceptance writes; live verification is still
+required for a matching account. The same lock is retained throughout the
+operation. This avoids recording a stale tab's agreement for an account selected
+in another tab, or rotating that other account's provider credentials first.
+Missing/malformed preconditions return 400; a changed account preserves its valid
+cookie and offers a fresh session check. The proxy forwards only the validated
+UUID-shaped precondition; the browser cannot choose the acceptance record owner.
+
+The local website and test databases now have the Terms migration. A verified
+private database snapshot preceded local website activation, and existing table
+counts stayed unchanged. `ACCOUNT_TERMS_API_ENABLED=true` is set only in the
+ignored local backend environment; the development reloader loaded it. FastAPI
+and Vite readiness/unauthenticated rejection checks passed, with zero acceptance
+records before human testing. Archive decoding was checked; no restore rehearsal
+was performed. Manual email/Google interaction and visual review remain pending.
+Hosted database/provider settings, public authentication and Google branding
+publication are unchanged. Real agreement must be submitted by the user.
+Terms agreement is distinct from consent to personal-data processing. Only the
+local website and test databases have received this migration, with unchanged
+pre-existing table counts and no model drift; the hosted target is unchanged.
 
 A guarded local PostgreSQL rehearsal exercises manual provider-first deletion
 steps using synthetic records and mocked provider outcomes. It checks committed
@@ -2909,7 +3028,8 @@ No public controls or live settings are enabled by this implementation.
 
 Sign-up and sign-in share `account-credential-proxy-request.ts`: 16 KiB actual
 request limit, JSON only, required email/password bounded at 320/1,024 Unicode
-characters, exact credential preservation and no unknown fields. Sign-up requires
+characters, exact credential preservation and no unknown fields. Sign-up also
+requires literal `accepted: true` and the current Terms revision. Sign-up requires
 a 1–2,048-character printable non-space ASCII CAPTCHA proof; sign-in retains its
 optional/null proof contract so the backend can require verification. No email
 normalization, password policy or client-supplied identity/redirect is added.
@@ -2924,10 +3044,13 @@ does not sign in, switch accounts, transfer guest data or create a local session
 
 Acceptance requires 202, bounded UTF-8 JSON within 4 KiB, exactly `status: accepted`
 and the backend's generic message asking the user to check email for a verification
-code. A success carrying any visible Set-Cookie or identity/provider fields fails
-with 502. The returned acceptance is rebuilt from fixed values, and never confirms
-whether the email already has an account. All responses are no-store and contain
-no Set-Cookie. Backend 400/413/415/503 become fixed safe messages; exact 403
+code. Success additionally requires exactly one bounded, Secure/HttpOnly,
+SameSite=Lax, root-scoped `__Host-askm6_signup_terms` receipt with at most one
+hour lifetime. Unexpected cookies or identity/provider fields fail with 502. The
+returned acceptance is rebuilt from fixed values, and never confirms
+whether the email already has an account. All responses are no-store; only a
+validated successful receipt may set a cookie. Backend 400/413/415/503 become
+fixed safe messages; exact 403
 `X-Account-Verification: required` and bounded 429 Retry-After seconds (1–86,400)
 are preserved. Other statuses, redirects, transport failures and invalid success
 contracts become 502; provider details and unrelated headers are dropped.
@@ -2966,20 +3089,25 @@ compression, ambiguous framing and mismatched declared lengths are rejected.
 Decoded chunked input is bounded and rebuilt without forwarding browser framing.
 
 The upstream request contains only validated email/code, fixed JSON headers,
-configured Origin and the authenticated visitor-IP assertion. Browser Cookie,
-Authorization, client-supplied identities and unrelated forwarding headers are
-omitted. This confirms email without creating a local login, replacing an
-account, transferring guest data or changing any browser cookies. Sign-in remains
+configured Origin and the authenticated visitor-IP assertion. Only a bounded
+signup Terms receipt may be forwarded from browser cookies; Authorization,
+client-supplied identities and unrelated forwarding headers are omitted. This confirms email without creating a local login, replacing an
+account or transferring guest data. A matching registration receipt may be
+reissued with the provider-confirmed subject, preserving its original time and
+expiry; invalid receipts are cleared. Sign-in remains
 a separate explicit action.
 
 Success requires HTTP 200 and at most 4 KiB of valid UTF-8 JSON containing exactly
 `status: confirmed` and `message: Email confirmed. You can now sign in.` Any
-visible Set-Cookie, extra identity/provider fields or changed response contract
-fails with 502. Only the fixed success body is returned. Backend 400/403/413/415/
+unexpected Set-Cookie, extra identity/provider fields or changed response
+contract fails with 502. With an incoming receipt, success must return exactly
+one validated receipt rotation/deletion; without one no cookies are allowed.
+Only the fixed success body is returned. Backend 400/403/413/415/
 503 become safe fixed messages; 429 retains only bounded Retry-After seconds
 (1–86,400). CAPTCHA headers are not part of this endpoint. Other statuses,
 redirects, network errors and malformed success become 502. All replies are
-no-store, without cookies, provider details or unrelated headers.
+no-store, without provider details or unrelated headers; only the validated
+receipt rotation/deletion may change a cookie.
 
 A 20-second total deadline includes body reading, fetch and response consumption.
 Client cancellation and deadline expiry abort upstream work, cancel streams and
@@ -3566,3 +3694,57 @@ alongside registration and confirmation. Public deployment remains a separate st
 Project code is available under the [MIT License](../LICENSE).
 Third-party dependencies and automotive source material retain their own licenses.
 No Mazda manufacturer manuals or proprietary diagrams are included in this repository.
+
+
+## Email signup Terms receipt
+
+Email signup starts unchecked and requires an explicit Terms checkbox as well as
+human verification. Terms is an underlined link within the agreement sentence;
+Privacy Notice is separate. The links open safely in another tab without toggling
+the checkbox, and only the checkbox control changes agreement. Sign-in has no
+policy checkbox. Google registration retains first-time account setup unless a
+confirmed email-signup receipt already records agreement for the same account.
+
+A neutral registration response sets an encrypted, HttpOnly, SameSite=Lax receipt
+for at most one hour (`__Host-askm6_signup_terms` on HTTPS, `askm6_signup_terms`
+locally). It is provisional, not authentication or evidence that an account
+exists. The payload records a purpose marker, current Terms revision, exact-input
+email hash, server UTC acceptance time and original expiry. It contains neither
+plaintext email/password nor provider credentials. It reuses the configured
+Fernet session key; no new schema, service or provider metadata is required.
+
+A successful signup-code confirmation internally returns the provider-confirmed
+UUID, discards provider tokens and binds only a matching valid receipt. It never
+creates an application login. A subsequent live/JWT-verified password login can
+save acceptance only for that confirmed UUID and the same exact email input. A
+Google callback may save the receipt only when its backend-verified subject is
+the OTP-confirmed UUID; no email-address or provider-metadata matching is used.
+Both paths persist acceptance inside the session-creation transaction. The first
+recorded timestamp is preserved;
+persistence failure/cancellation rolls the session transaction back and returns
+no account cookie. Successful sign-in clears the receipt. Invalid, expired,
+unconfirmed or other-account receipts grant no agreement; password login also
+requires the original exact email input.
+sign-in still works and missing agreement uses the normal setup dialog. A
+receipt for another account never supplies agreement on a shared browser.
+
+Proxies forward only the bounded receipt on confirmation/password sign-in, and
+only OAuth binding plus that receipt on Google callback. They reject duplicate
+receipt names, validate its one-hour lifetime/security scope, preserve other
+browser cookies and require its deletion alongside the newly created account
+cookie on successful sign-in. Google success requires exactly three cookies when
+a receipt was forwarded: OAuth deletion, new account session and receipt deletion;
+ordinary callback cookie validation remains unchanged. Failures preserve the
+receipt while retaining the existing backend-confirmed OAuth deletion contract.
+Providers remain mocked in automated tests; this addition does not enable hosted features.
+
+
+### Terms checkpoint review
+
+The additive Terms migration starts with no inferred acceptances and gives the
+runtime role SELECT/INSERT only. Downgrade takes an exclusive table lock before
+checking emptiness, so a concurrent acceptance cannot race the protected DROP.
+A guarded local PostgreSQL probe verifies the writer is blocked, then aborts
+before the check or DROP; its migration transaction always rolls back. Populated
+records continue to make downgrade refuse. This does not run a live downgrade
+or change the upgrade schema.

@@ -30,6 +30,12 @@ from app.account_oauth_transactions import (
     replace_oauth_login_attempt_transaction,
 )
 from app.account_sessions import AccountSessionAlreadyExists, AccountSessionUnavailable
+from app.account_signup_terms import (
+    clear_signup_terms_cookie,
+    read_signup_terms_cookie,
+    signup_terms_cookie_name,
+)
+from app.account_terms import AccountTermsUnavailable
 from app.account_tokens import InvalidAccountToken
 from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_google_start_ip_key
 from app.auth_rate_limits import AuthRateLimitUnavailable, commit_google_start_attempt
@@ -234,6 +240,7 @@ async def finish_google_login(request: Request) -> Response:
             settings=settings,
             client=client,
             key_cache=key_cache,
+            signup_terms_receipt=read_signup_terms_cookie(request, settings),
         )
     except (InvalidOAuthLoginMaterial, GoogleCodeExchangeRejected, InvalidAccountToken):
         return _callback_return(settings, "rejected")
@@ -243,6 +250,7 @@ async def finish_google_login(request: Request) -> Response:
         AccountAuthenticationUnavailable,
         AccountSessionAlreadyExists,
         AccountSessionUnavailable,
+        AccountTermsUnavailable,
         SQLAlchemyError,
         TimeoutError,
     ):
@@ -250,4 +258,6 @@ async def finish_google_login(request: Request) -> Response:
 
     response = _callback_return(settings, "success")
     set_account_cookie(response, created.token, created.idle_expires_at, settings)
+    if signup_terms_cookie_name(settings) in request.cookies:
+        clear_signup_terms_cookie(response, settings)
     return response

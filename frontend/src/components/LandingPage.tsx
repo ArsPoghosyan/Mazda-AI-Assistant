@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import PrivacyNoticeLink from './PrivacyNoticeLink'
+import TermsOfServiceLink from './TermsOfServiceLink'
 
 type LandingPageProps = {
   guestAction: ReactNode
@@ -159,7 +160,10 @@ export default function LandingPage({
 
       <footer className="mx-auto flex w-full max-w-7xl flex-col gap-4 border-t border-divider px-6 py-6 text-sm text-muted sm:flex-row sm:items-center sm:justify-between lg:px-10">
         <p>Independent, unofficial and unaffiliated with Mazda.</p>
-        <PrivacyNoticeLink />
+        <nav aria-label="Site policies" className="flex flex-wrap items-center gap-x-6">
+          <PrivacyNoticeLink />
+          <TermsOfServiceLink />
+        </nav>
         {serviceStatus}
       </footer>
 

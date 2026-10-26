@@ -16,6 +16,7 @@ from app.account_sign_up import (
     sign_up_with_password,
 )
 from app.account_sign_up_requests import read_sign_up_credentials
+from app.account_signup_terms import make_signup_terms_receipt, set_signup_terms_cookie
 from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_sign_up_ip_key
 from app.auth_rate_limits import AuthRateLimitUnavailable, commit_sign_up_attempt
 from app.client_ip import ClientIPUnavailable
@@ -76,6 +77,8 @@ async def sign_up(
         or settings.auth_rate_limit_hmac_secret is None
         or settings.supabase_auth_issuer is None
         or settings.supabase_auth_publishable_key is None
+        or settings.account_session_encryption_key is None
+        or not settings.account_terms_api_enabled
     ):
         raise account_sign_up_unavailable()
 
@@ -99,6 +102,7 @@ async def sign_up(
                 )
 
             credentials = await read_sign_up_credentials(request)
+            receipt = make_signup_terms_receipt(credentials.email)
 
             await sign_up_with_password(
                 credentials.email,
@@ -133,4 +137,5 @@ async def sign_up(
         raise account_sign_up_unavailable() from None
 
     response.headers["Cache-Control"] = "no-store"
+    set_signup_terms_cookie(response, receipt, settings)
     return AccountSignUpResponse()

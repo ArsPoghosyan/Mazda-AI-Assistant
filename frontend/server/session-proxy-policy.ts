@@ -25,7 +25,7 @@ export function httpsOrigin(value: string | undefined): string | null {
 export function planSessionProxyOrigin(
   request: Request,
   env: SessionProxyEnvironment,
-  endpoint: '/api/v1/account/session' | '/api/v1/guest/session' | '/api/v1/account/sign-in' | '/api/v1/account/sign-out' | '/api/v1/account/sign-up' | '/api/v1/account/confirm-email' | '/api/v1/account/password-recovery' | '/api/v1/account/password-reset' | '/api/v1/account/google/start',
+  endpoint: '/api/v1/account/session' | '/api/v1/guest/session' | '/api/v1/account/sign-in' | '/api/v1/account/sign-out' | '/api/v1/account/sign-up' | '/api/v1/account/confirm-email' | '/api/v1/account/password-recovery' | '/api/v1/account/password-reset' | '/api/v1/account/google/start' | '/api/v1/account/terms/status' | '/api/v1/account/terms/accept',
   enabled: string | undefined,
 ): SessionProxyPlan | Response {
   const incoming = new URL(request.url)

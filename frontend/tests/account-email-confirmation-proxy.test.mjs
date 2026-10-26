@@ -264,3 +264,31 @@ test('the deadline covers response consumption and cancels its stream', async (t
   await failure(await pending)
   assert.equal(cancelled, true)
 })
+
+
+for (const clear of [false, true]) {
+  test(`confirmation forwards only agreement receipt and accepts its ${clear ? 'deletion' : 'rotation'}`, async t => {
+    const name = '__Host-askm6_signup_terms'
+    const token = 'A'.repeat(120)
+    const receipt = clear ? `${name}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`
+      : `${name}=${'B'.repeat(120)}; Expires=${new Date(Date.now() + 3_000_000).toUTCString()}; Max-Age=3000; Path=/; Secure; HttpOnly; SameSite=Lax`
+    const fetch = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      assert.equal(options.headers.get('Cookie'), `${name}=${token}`)
+      assert.equal(options.headers.get('Authorization'), null)
+      return upstream(accepted, { headers: { 'Set-Cookie': receipt } })
+    })
+    const response = await dispatch({ headers: { Cookie: `__Host-askm6_guest=private; ${name}=${token}; __Host-askm6_google=private`, Authorization: 'Bearer private' } })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), accepted)
+    assert.equal(response.headers.getSetCookie().length, 1)
+    assert.match(response.headers.get('Set-Cookie'), new RegExp(`^${name}=`))
+    assert.equal(fetch.mock.callCount(), 1)
+  })
+}
+
+test('confirmation rejects duplicate agreement cookies before fetching', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => upstream())
+  const value = `__Host-askm6_signup_terms=${'A'.repeat(120)}`
+  await failure(await dispatch({ headers: { Cookie: `${value}; ${value}` } }), 400)
+  assert.equal(fetch.mock.callCount(), 0)
+})

@@ -9,10 +9,11 @@ import { forwardAccountPasswordRecovery, type AccountPasswordRecoveryProxyEnviro
 import { forwardAccountPasswordReset, type AccountPasswordResetProxyEnvironment } from '../../server/account-password-reset-proxy.ts'
 import { forwardAccountGoogleStart, type AccountGoogleStartProxyEnvironment } from '../../server/account-google-start-proxy.ts'
 import { forwardAccountGoogleCallback, type AccountGoogleCallbackProxyEnvironment } from '../../server/account-google-callback-proxy.ts'
+import { forwardAccountTerms, type AccountTermsProxyEnvironment } from '../../server/account-terms-proxy.ts'
 
 type ProxyContext = {
   request: Request
-  env: AccountSessionProxyEnvironment & GuestSessionProxyEnvironment & AccountSignInProxyEnvironment & AccountSignOutProxyEnvironment & AccountSignUpProxyEnvironment & AccountEmailConfirmationProxyEnvironment & AccountPasswordRecoveryProxyEnvironment & AccountPasswordResetProxyEnvironment & AccountGoogleStartProxyEnvironment & AccountGoogleCallbackProxyEnvironment
+  env: AccountSessionProxyEnvironment & GuestSessionProxyEnvironment & AccountSignInProxyEnvironment & AccountSignOutProxyEnvironment & AccountSignUpProxyEnvironment & AccountEmailConfirmationProxyEnvironment & AccountPasswordRecoveryProxyEnvironment & AccountPasswordResetProxyEnvironment & AccountGoogleStartProxyEnvironment & AccountGoogleCallbackProxyEnvironment & AccountTermsProxyEnvironment
 }
 
 function errorResponse(message: string, status: number): Response {
@@ -27,6 +28,10 @@ export async function onRequest({
   env,
 }: ProxyContext): Promise<Response> {
   const pathname = new URL(request.url).pathname
+
+  if (pathname === '/api/v1/account/terms/status' || pathname === '/api/v1/account/terms/accept') {
+    return forwardAccountTerms(request, env)
+  }
 
   if (pathname === '/api/v1/account/session') {
     return forwardAccountSession(request, env)

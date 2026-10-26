@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import AccountSignInDialog from './components/AccountSignInDialog'
+import AccountSetupFlow from './components/AccountSetupFlow'
 import LandingPage from './components/LandingPage'
 import TurnstileChallenge from './components/TurnstileChallenge'
 import { useAccountSession } from './hooks/useAccountSession'
@@ -181,6 +182,10 @@ export default function App() {
             >
               {signingOut ? 'Signing out…' : 'Sign out'}
             </button>
+          )}
+          {backendReady && account.enabled && account.status === 'signed_in' && account.session && (
+            <AccountSetupFlow key={account.session.user_id} session={account.session}
+              onSessionExpired={account.refresh} />
           )}
         </>
       }

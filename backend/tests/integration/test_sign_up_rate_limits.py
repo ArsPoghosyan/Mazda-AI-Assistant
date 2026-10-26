@@ -10,6 +10,7 @@ from secrets import token_hex
 
 import httpx2
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic_settings import SettingsConfigDict
@@ -72,7 +73,8 @@ def sign_up_case(integration_engine: Engine) -> Iterator[SignUpCase]:
             "migration_database_url": None,
             "supabase_auth_issuer": "https://auth.example.test/auth/v1",
             "supabase_auth_publishable_key": "sb_publishable_synthetic_test_key",
-            "account_session_encryption_key": None,
+            "account_session_encryption_key": Fernet.generate_key().decode("ascii"),
+            "account_terms_api_enabled": True,
             "auth_rate_limit_hmac_secret": token_hex(32),
             "account_sign_up_api_enabled": True,
             "account_sign_up_ip_max_requests": 2,
@@ -186,7 +188,13 @@ def post(case: SignUpCase, **headers: str) -> httpx2.Response:
     assert case.client is not None
     return case.client.post(
         PATH,
-        json={"email": EMAIL, "password": PASSWORD, "captcha_token": CAPTCHA},
+        json={
+            "email": EMAIL,
+            "password": PASSWORD,
+            "captcha_token": CAPTCHA,
+            "accepted": True,
+            "terms_version": "2026-10-26",
+        },
         headers={"Origin": ORIGIN, **headers},
     )
 
@@ -217,7 +225,10 @@ def seed(case: SignUpCase, times: list[datetime], purpose: str = "sign_up") -> N
 
 def assert_private(response: httpx2.Response) -> None:
     assert response.headers["Cache-Control"] == "no-store"
-    assert "set-cookie" not in response.headers
+    if response.status_code == 202:
+        assert "askm6_signup_terms=" in response.headers["set-cookie"]
+    else:
+        assert "set-cookie" not in response.headers
     assert all(value not in response.text for value in (EMAIL, PASSWORD, CAPTCHA, USER_ID))
 
 
@@ -245,7 +256,13 @@ def test_local_cap_prevents_body_parsing_and_cannot_be_bypassed_by_email_or_head
     assert (
         sign_up_case.client.post(
             PATH,
-            json={"email": "another@example.test", "password": PASSWORD, "captcha_token": CAPTCHA},
+            json={
+                "email": "another@example.test",
+                "password": PASSWORD,
+                "captcha_token": CAPTCHA,
+                "accepted": True,
+                "terms_version": "2026-10-26",
+            },
             headers={"Origin": ORIGIN},
         ).status_code
         == 202
@@ -393,6 +410,8 @@ def test_concurrent_registrations_cannot_exceed_cap(sign_up_case: SignUpCase) ->
                                     "email": EMAIL,
                                     "password": PASSWORD,
                                     "captcha_token": CAPTCHA,
+                                    "accepted": True,
+                                    "terms_version": "2026-10-26",
                                 },
                                 headers={"Origin": ORIGIN},
                             )
@@ -457,7 +476,13 @@ def test_mapped_peer_cannot_split_budget_and_distinct_peer_is_independent(
         ) as browser:
             return await browser.post(
                 PATH,
-                json={"email": EMAIL, "password": PASSWORD, "captcha_token": CAPTCHA},
+                json={
+                    "email": EMAIL,
+                    "password": PASSWORD,
+                    "captcha_token": CAPTCHA,
+                    "accepted": True,
+                    "terms_version": "2026-10-26",
+                },
                 headers={"Origin": ORIGIN},
             )
 

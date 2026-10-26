@@ -44,6 +44,29 @@ class UserProfile(Base):
     )
 
 
+class AccountTermsAcceptance(Base):
+    """Minimal per-account record of an explicitly accepted Terms revision."""
+
+    __tablename__ = "account_terms_acceptances"
+    __table_args__ = (
+        CheckConstraint(
+            "terms_version ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'",
+            name="version_format",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("app.user_profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    terms_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.statement_timestamp(),
+    )
+
+
 class GuestSession(Base):
     """Guest identity storing a token verifier rather than the cookie token."""
 

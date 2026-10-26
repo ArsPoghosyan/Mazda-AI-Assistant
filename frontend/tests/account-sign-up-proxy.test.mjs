@@ -5,7 +5,7 @@ import { onRequest } from '../functions/api/[[path]].ts'
 const site = 'https://site.example'
 const path = '/api/v1/account/sign-up'
 const secret = 'ab'.repeat(32) // Public synthetic fixture.
-const credentials = { email: ' Owner@Example.test ', password: '  synthetic-password-é  ', captcha_token: 'synthetic-proof' }
+const credentials = { email: ' Owner@Example.test ', password: '  synthetic-password-é  ', captcha_token: 'synthetic-proof', accepted: true, terms_version: '2026-10-26' }
 const accepted = { status: 'accepted', message: 'If registration can proceed, check your email for a verification code.' }
 const env = { API_ORIGIN: 'https://backend.example', AUTH_PUBLIC_ORIGIN: site,
   ACCOUNT_SIGN_UP_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: secret }
@@ -20,7 +20,8 @@ function dispatch(options = {}, configuration = env, url) {
   return onRequest({ request: incoming(options, url), env: configuration })
 }
 
-function upstream(body = accepted, options = {}) { return Response.json(body, { status: 202, ...options }) }
+const receiptCookie = () => `__Host-askm6_signup_terms=${'A'.repeat(120)}; Max-Age=3000; Expires=${new Date(Date.now() + 3_000_000).toUTCString()}; Path=/; Secure; HttpOnly; SameSite=Lax`
+function upstream(body = accepted, options = {}) { return Response.json(body, { status: 202, ...options, headers: { 'Set-Cookie': receiptCookie(), ...options.headers } }) }
 
 async function failure(response, status = 502) {
   assert.equal(response.status, status)
@@ -33,7 +34,7 @@ async function failure(response, status = 502) {
 }
 
 for (const [label, input] of [['exact credentials', credentials],
-  ['Unicode and maximum lengths', { email: '\ufeff' + 'é'.repeat(319), password: '😀'.repeat(1024), captcha_token: 'x'.repeat(2048) }]]) {
+  ['Unicode and maximum lengths', { email: '\ufeff' + 'é'.repeat(319), password: '😀'.repeat(1024), captcha_token: 'x'.repeat(2048), accepted: true, terms_version: '2026-10-26' }]]) {
   test(`forwards ${label} once without browser credentials, returns only the generic acceptance`, async (t) => {
     const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
       assert.equal(url.href, env.API_ORIGIN + path)
@@ -55,7 +56,8 @@ for (const [label, input] of [['exact credentials', credentials],
     assert.equal(response.status, 202)
     assert.deepEqual(await response.json(), accepted)
     assert.equal(response.headers.get('Cache-Control'), 'no-store')
-    for (const header of ['Set-Cookie', 'X-Private', 'X-AskM6-Proxy-Secret', 'Access-Control-Allow-Origin']) assert.equal(response.headers.get(header), null)
+    assert.match(response.headers.get('Set-Cookie'), /^__Host-askm6_signup_terms=/)
+    for (const header of ['X-Private', 'X-AskM6-Proxy-Secret', 'Access-Control-Allow-Origin']) assert.equal(response.headers.get(header), null)
     assert.equal(fetch.mock.callCount(), 1)
   })
 }
@@ -261,3 +263,26 @@ test('the deadline covers response consumption and cancels its stream', async (t
   await failure(await pending)
   assert.equal(cancelled, true)
 })
+
+
+for (const patch of [{ accepted: false }, { accepted: 'true' }, { terms_version: 'old' }, { accepted: undefined }, { terms_version: undefined }]) {
+  test(`signup rejects absent or invalid agreement ${JSON.stringify(patch)} without fetching`, async t => {
+    const fetch = t.mock.method(globalThis, 'fetch', async () => upstream())
+    await failure(await dispatch({ body: JSON.stringify({ ...credentials, ...patch }) }), 400)
+    assert.equal(fetch.mock.callCount(), 0)
+  })
+}
+
+for (const [label, transform] of [
+  ['missing Secure', x => x.replace('; Secure', '')], ['missing HttpOnly', x => x.replace('; HttpOnly', '')],
+  ['domain scope', x => x + '; Domain=site.example'], ['wrong path', x => x.replace('Path=/', 'Path=/api')],
+  ['wrong name', x => x.replace('__Host-askm6_signup_terms', '__Host-askm6_account')],
+  ['excess lifetime', x => x.replace('Max-Age=3000', 'Max-Age=3601')],
+  ['expired', x => x.replace(/Expires=[^;]+/, 'Expires=Thu, 01 Jan 1970 00:00:00 GMT')],
+  ['bad value', x => x.replace('A'.repeat(120), 'private')],
+]) {
+  test(`signup rejects receipt with ${label}`, async t => {
+    t.mock.method(globalThis, 'fetch', async () => upstream(accepted, { headers: { 'Set-Cookie': transform(receiptCookie()) } }))
+    await failure(await dispatch())
+  })
+}

@@ -1,4 +1,5 @@
 import { ProxyBodyTooLarge, readProxyBytes } from './session-proxy-io.ts'
+import { CURRENT_TERMS_VERSION } from '../shared/account-terms.ts'
 
 const MAX_REQUEST_BYTES = 16 * 1024
 
@@ -17,7 +18,7 @@ function validCredential(value: unknown, maximum: number): value is string {
 export async function readCredentialProxyBody(
   request: Request,
   signal: AbortSignal,
-  options: { requireCaptcha: boolean },
+  options: { requireCaptcha: boolean; requireTerms?: boolean },
 ): Promise<string> {
   if (request.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
     throw new InvalidCredentialProxyRequest(415)
@@ -38,10 +39,11 @@ export async function readCredentialProxyBody(
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new InvalidCredentialProxyRequest()
   const body = payload as Record<string, unknown>
   if (
-    Object.keys(body).some((key) => !['email', 'password', 'captcha_token'].includes(key)) ||
+    Object.keys(body).some((key) => !['email', 'password', 'captcha_token', ...(options.requireTerms ? ['accepted', 'terms_version'] : [])].includes(key)) ||
     !validCredential(body.email, 320) || !validCredential(body.password, 1024)
   ) throw new InvalidCredentialProxyRequest()
   const proof = body.captcha_token
+  if (options.requireTerms && (body.accepted !== true || body.terms_version !== CURRENT_TERMS_VERSION)) throw new InvalidCredentialProxyRequest()
   if (options.requireCaptcha && (proof === undefined || proof === null)) throw new InvalidCredentialProxyRequest()
   if (proof !== undefined && proof !== null &&
       (typeof proof !== 'string' || proof.length < 1 || proof.length > 2048 || /[^\x21-\x7e]/.test(proof))) {
@@ -50,5 +52,6 @@ export async function readCredentialProxyBody(
   // Preserve credential case/whitespace/Unicode. Only the backend authenticates.
   return JSON.stringify({ email: body.email, password: body.password,
     ...(proof === undefined ? {} : { captcha_token: proof }),
+    ...(options.requireTerms ? { accepted: true, terms_version: CURRENT_TERMS_VERSION } : {}),
   })
 }

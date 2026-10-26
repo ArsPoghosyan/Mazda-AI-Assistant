@@ -41,8 +41,8 @@ def _error_code(payload: dict[str, object]) -> str | None:
 def interpret_email_confirmation_response(
     status_code: int,
     payload: object,
-) -> None:
-    """Validate a confirmation outcome without returning identity or tokens.
+) -> UUID:
+    """Validate a confirmation outcome returning only the confirmed internal user ID.
 
     The caller must supply a bounded response from the trusted provider.
     This does not verify a JWT or authenticate an application session.
@@ -68,7 +68,7 @@ def interpret_email_confirmation_response(
             raise AccountEmailConfirmationUnavailable("Email confirmation is unavailable.")
 
         try:
-            UUID(user_id)
+            confirmed_user_id = UUID(user_id)
             confirmation_time = datetime.fromisoformat(confirmed_at)
         except ValueError:
             raise AccountEmailConfirmationUnavailable(
@@ -78,8 +78,8 @@ def interpret_email_confirmation_response(
         if confirmation_time.utcoffset() is None:
             raise AccountEmailConfirmationUnavailable("Email confirmation is unavailable.")
 
-        # Discard provider identity and any returned session credentials.
-        return
+        # Internal confirmation identity only; all provider credentials are discarded.
+        return confirmed_user_id
 
     if status_code not in (400, 401, 403, 404, 422):
         raise AccountEmailConfirmationUnavailable("Email confirmation is unavailable.")
@@ -101,7 +101,7 @@ async def confirm_email_code(
     *,
     settings: Settings,
     client: httpx2.AsyncClient,
-) -> None:
+) -> UUID:
     """Submit a signup confirmation once using a caller-owned HTTP client.
 
     Does not create an application session, issue browser cookies, persist
@@ -182,4 +182,4 @@ async def confirm_email_code(
     except (ValueError, UnicodeError, RecursionError):
         raise AccountEmailConfirmationUnavailable("Email confirmation is unavailable.") from None
 
-    interpret_email_confirmation_response(status_code, payload)
+    return interpret_email_confirmation_response(status_code, payload)

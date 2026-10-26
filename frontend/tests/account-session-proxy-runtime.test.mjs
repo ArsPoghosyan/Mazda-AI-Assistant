@@ -3,6 +3,7 @@ import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Miniflare, createFetchMock, fetch as mockFetch } from 'miniflare'
 import { build } from 'vite'
+import { CURRENT_TERMS_VERSION } from '../shared/account-terms.ts'
 
 const site = 'https://site.example'
 const endpoint = '/api/v1/account/session'
@@ -51,6 +52,44 @@ async function runtime(t, overrides = {}) {
 
 function options(headers = {}) {
   return { method: 'POST', headers: { Origin: site, Cookie: `${name}=${token}`, ...headers } }
+}
+
+for (const operation of ['status', 'accept']) {
+  test(`Workers Terms ${operation} validates ingress, cookie renewal and explicit metadata`, { timeout: 30_000 }, async (t) => {
+    const secret = 'ab'.repeat(32)
+    const { mf, mock } = await runtime(t, { ACCOUNT_TERMS_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: secret })
+    const path = `/api/v1/account/terms/${operation}`
+    const body = operation === 'status' ? { terms_version: CURRENT_TERMS_VERSION, accepted_at: null, acceptance_required: true }
+      : { terms_version: CURRENT_TERMS_VERSION, accepted_at: new Date(Date.now() - 1000).toISOString() }
+    let deliveredHeaders, deliveredBody
+    mock.get(backend).intercept({ method: 'POST', path }).reply(request => {
+      deliveredHeaders = new Headers(request.headers)
+      deliveredBody = request.body
+      return { statusCode: 200, data: JSON.stringify(body), responseOptions: { headers: {
+        'Content-Type': 'application/json', 'Set-Cookie': renewal, 'X-Private': 'private',
+      } } }
+    })
+    const response = await mf.dispatchFetch(site + path, { ...options({ 'CF-Connecting-IP': '198.51.100.20', 'X-Account-Subject': metadata.user_id,
+      ...(operation === 'accept' ? { 'Content-Type': 'application/json' } : {}) }),
+      ...(operation === 'accept' ? { body: JSON.stringify({ accepted: true, terms_version: CURRENT_TERMS_VERSION }) } : {}) })
+    assert.equal(response.status, 200, await response.clone().text())
+    assert.deepEqual(await response.json(), body)
+    assert.equal(deliveredHeaders.get('Cookie'), `${name}=${token}`)
+    assert.equal(deliveredHeaders.get('X-AskM6-Proxy-Secret'), secret)
+    assert.equal(deliveredHeaders.get('X-AskM6-Client-IP'), '198.51.100.20')
+    assert.equal(deliveredHeaders.get('X-Account-Subject'), metadata.user_id)
+    assert.equal(deliveredHeaders.get('Authorization'), null)
+    if (operation === 'accept') assert.equal(await new Response(deliveredBody).text(), JSON.stringify({ accepted: true, terms_version: CURRENT_TERMS_VERSION }))
+    assert.equal(response.headers.get('X-Private'), null)
+    assert.equal(response.headers.get('Cache-Control'), 'no-store')
+    mock.assertNoPendingInterceptors()
+  })
+  test(`Workers Terms ${operation} remains default-off`, { timeout: 30_000 }, async t => {
+    const { mf } = await runtime(t)
+    const response = await mf.dispatchFetch(site + `/api/v1/account/terms/${operation}`, options())
+    assert.equal(response.status, 404)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+  })
 }
 
 test('actual Workers runtime accepts session forwarding and secure renewal', { timeout: 30_000 }, async (t) => {
@@ -569,43 +608,45 @@ test('Workers supports a complete mocked sign-in, session-check and sign-out cyc
 })
 
 const signUpPath = '/api/v1/account/sign-up'
+function signUpOptions(...args) { const options = signInOptions(...args); return { ...options, body: JSON.stringify({ ...JSON.parse(options.body), accepted: true, terms_version: CURRENT_TERMS_VERSION }) } }
+const signupReceiptCookie = () => `__Host-askm6_signup_terms=${'A'.repeat(120)}; Max-Age=3000; Expires=${new Date(Date.now() + 3_000_000).toUTCString()}; Path=/; Secure; HttpOnly; SameSite=Lax`
 const registrationAccepted = { status: 'accepted', message: 'If registration can proceed, check your email for a verification code.' }
 const signUpBindings = { ACCOUNT_SIGN_UP_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
 
-test('Workers sign-up forwards exact credentials and returns generic acceptance without any browser cookie changes', { timeout: 30_000 }, async (t) => {
+test('Workers sign-up forwards exact credentials and returns generic acceptance with only the temporary agreement receipt', { timeout: 30_000 }, async (t) => {
   const { mf, mock } = await runtime(t, signUpBindings)
   let sent, deliveredBody
   mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply((request) => {
     sent = new Headers(request.headers)
     deliveredBody = request.body
     return { statusCode: 202, data: JSON.stringify(registrationAccepted), responseOptions: {
-      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': signUpBindings.AUTH_PROXY_SHARED_SECRET },
+      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': signUpBindings.AUTH_PROXY_SHARED_SECRET, 'Set-Cookie': signupReceiptCookie() },
     } }
   })
-  const response = await mf.dispatchFetch(site + signUpPath, signInOptions({
+  const response = await mf.dispatchFetch(site + signUpPath, signUpOptions({
     Cookie: `${name}=${token}; ${guestCookie}=private; __Host-askm6_google=private`,
     Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
   }))
   assert.equal(response.status, 202, await response.clone().text())
   assert.deepEqual(await response.json(), registrationAccepted)
-  assert.equal(await new Response(deliveredBody).text(), JSON.stringify(signInCredentials))
+  assert.equal(await new Response(deliveredBody).text(), JSON.stringify({ ...signInCredentials, accepted: true, terms_version: CURRENT_TERMS_VERSION }))
   assert.equal(sent.get('Origin'), site)
   assert.equal(sent.get('X-AskM6-Proxy-Secret'), signUpBindings.AUTH_PROXY_SHARED_SECRET)
   assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
   for (const header of ['Cookie', 'Authorization', 'X-Forwarded-For', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
-  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.match(response.headers.get('Set-Cookie'), /^__Host-askm6_signup_terms=/)
   assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
   mock.assertNoPendingInterceptors()
 })
 
 test('Workers sign-up is independently gated and rejects explicitly missing/empty edge IPs', { timeout: 30_000 }, async (t) => {
   const closed = await runtime(t)
-  const response = await closed.mf.dispatchFetch(site + signUpPath, signInOptions())
+  const response = await closed.mf.dispatchFetch(site + signUpPath, signUpOptions())
   assert.equal(response.status, 404)
   await response.arrayBuffer()
   for (const mode of ['missing', 'empty']) {
     const { mf } = await runtime(t, { ...signUpBindings, TEST_CLIENT_IP_MODE: mode })
-    const result = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    const result = await mf.dispatchFetch(site + signUpPath, signUpOptions())
     assert.equal(result.status, 503)
     assert.equal(result.headers.get('Set-Cookie'), null)
     await result.arrayBuffer()
@@ -615,11 +656,11 @@ test('Workers sign-up is independently gated and rejects explicitly missing/empt
 test('Workers sign-up rejects wrong origins and invalid/oversized registration input before fetching', { timeout: 30_000 }, async (t) => {
   const { mf } = await runtime(t, signUpBindings)
   for (const [url, init, status] of [
-    [site + signUpPath, signInOptions({ Origin: 'https://foreign.example' }), 403],
-    ['https://preview.example' + signUpPath, signInOptions(), 403],
-    [site + signUpPath, { ...signInOptions(), body: '{"email":"x","password":"x"}' }, 400],
-    [site + signUpPath, { ...signInOptions(), body: '{"email":"x","password":"x","captcha_token":null}' }, 400],
-    [site + signUpPath, { ...signInOptions(), body: ' '.repeat(16385) }, 413],
+    [site + signUpPath, signUpOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + signUpPath, signUpOptions(), 403],
+    [site + signUpPath, { ...signUpOptions(), body: '{"email":"x","password":"x"}' }, 400],
+    [site + signUpPath, { ...signUpOptions(), body: '{"email":"x","password":"x","captcha_token":null}' }, 400],
+    [site + signUpPath, { ...signUpOptions(), body: ' '.repeat(16385) }, 413],
   ]) {
     const response = await mf.dispatchFetch(url, init)
     assert.equal(response.status, status)
@@ -634,7 +675,7 @@ test('Workers sign-up errors preserve only CAPTCHA/retry signals and mask provid
     mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(status, 'private account information', {
       headers: { ...headers, 'Set-Cookie': clearingCookie, Location: 'https://private.example' },
     })
-    const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    const response = await mf.dispatchFetch(site + signUpPath, signUpOptions())
     assert.equal(response.status, status)
     assert.equal(response.headers.get('Set-Cookie'), null)
     assert.equal(response.headers.get('Location'), null)
@@ -645,7 +686,7 @@ test('Workers sign-up errors preserve only CAPTCHA/retry signals and mask provid
   }
 })
 
-test('Workers sign-up rejects unexpected success identity fields and any success cookies', { timeout: 30_000 }, async (t) => {
+test('Workers sign-up rejects unexpected success identity fields and unexpected success cookies', { timeout: 30_000 }, async (t) => {
   const { mf, mock } = await runtime(t, signUpBindings)
   // Empty Set-Cookie fields may be discarded by the HTTP mock before the worker;
   // Node transport tests separately validate rejection when that field is exposed.
@@ -655,7 +696,7 @@ test('Workers sign-up rejects unexpected success identity fields and any success
     mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(202, JSON.stringify(body), {
       headers: { 'Content-Type': 'application/json', ...headers },
     })
-    const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    const response = await mf.dispatchFetch(site + signUpPath, signUpOptions())
     assert.equal(response.status, 502, JSON.stringify(headers))
     assert.equal(response.headers.get('Set-Cookie'), null)
     await response.arrayBuffer()
@@ -668,7 +709,7 @@ test('an explicit Workers sign-up abort never returns a late acceptance', { time
   mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(202, JSON.stringify(registrationAccepted), {
     headers: { 'Content-Type': 'application/json' },
   }).delay(300)
-  const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+  const response = await mf.dispatchFetch(site + signUpPath, signUpOptions())
   assert.equal(response.status, 502)
   assert.equal(response.headers.get('Set-Cookie'), null)
   await response.arrayBuffer()
@@ -1355,4 +1396,83 @@ test('the real Workers deadline stops a stalled upstream without cookies', { tim
   assert.equal(response.headers.get('Cache-Control'), 'no-store')
   await response.arrayBuffer()
   assert.ok(elapsed >= 19_000 && elapsed < 26_000, `Deadline completed after ${elapsed}ms`)
+})
+
+
+test('Workers carries only the Terms receipt through confirmation and clears it with committed signin', { timeout: 30_000 }, async t => {
+  const { mf, mock } = await runtime(t, { ...signInBindings, ...confirmationBindings })
+  const name = '__Host-askm6_signup_terms'
+  const pending = 'A'.repeat(120)
+  const confirmed = 'B'.repeat(120)
+  let confirmationHeaders, signinHeaders
+  mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(request => {
+    confirmationHeaders = new Headers(request.headers)
+    return { statusCode: 200, data: JSON.stringify({ status: 'confirmed', message: 'Email confirmed. You can now sign in.' }), responseOptions: { headers: {
+      'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace(pending, confirmed),
+    } } }
+  })
+  const confirmation = await mf.dispatchFetch(site + confirmationPath, { method: 'POST',
+    body: JSON.stringify({ email: signInCredentials.email, code: '001234' }), headers: {
+      Origin: site, 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.20',
+      Cookie: `${name}=${pending}; __Host-askm6_guest=private; __Host-askm6_google=private`,
+    } })
+  assert.equal(confirmation.status, 200, await confirmation.clone().text())
+  assert.equal(confirmationHeaders.get('Cookie'), `${name}=${pending}`)
+  const rotated = confirmation.headers.getSetCookie()
+  assert.equal(rotated.length, 1)
+  assert.ok(rotated[0].startsWith(`${name}=${confirmed};`))
+  mock.get(backend).intercept({ method: 'POST', path: signInPath }).reply(request => {
+    signinHeaders = new Headers(request.headers)
+    return { statusCode: 200, data: JSON.stringify(metadata), responseOptions: { headers: {
+      'Content-Type': 'application/json', 'Set-Cookie': [renewal,
+        `${name}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`],
+    } } }
+  })
+  const signedIn = await mf.dispatchFetch(site + signInPath, signInOptions({ Cookie: `${name}=${confirmed}; __Host-askm6_guest=private` }))
+  assert.equal(signedIn.status, 200, await signedIn.clone().text())
+  assert.deepEqual(await signedIn.json(), metadata)
+  assert.equal(signinHeaders.get('Cookie'), `${name}=${confirmed}`)
+  const cookies = signedIn.headers.getSetCookie()
+  assert.equal(cookies.length, 2)
+  assert.ok(cookies[0].startsWith('__Host-askm6_account='))
+  assert.ok(cookies[1].startsWith(`${name}=;`))
+  assert.match(cookies[1], /Max-Age=0/)
+  mock.assertNoPendingInterceptors()
+})
+
+
+test('Workers email-confirmed signup can complete Google first with three isolated cookies', { timeout: 30_000 }, async t => {
+  const { mf, mock } = await runtime(t, { ...confirmationBindings, ...googleCallbackBindings })
+  const receipt = '__Host-askm6_signup_terms'
+  const pending = 'A'.repeat(120)
+  const confirmed = 'B'.repeat(120)
+  let forwarded
+  mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(200, JSON.stringify(emailConfirmed), { headers: {
+    'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace(pending, confirmed),
+  } })
+  const verified = await mf.dispatchFetch(site + confirmationPath, confirmationOptions({ Cookie: `${receipt}=${pending}` }))
+  assert.equal(verified.status, 200, await verified.clone().text())
+  assert.ok(verified.headers.getSetCookie()[0].startsWith(`${receipt}=${confirmed};`))
+  mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(request => {
+    forwarded = new Headers(request.headers)
+    return { statusCode: 303, data: '', responseOptions: { headers: {
+      Location: site + '/#google-sign-in=success', 'Content-Length': '0',
+      'Set-Cookie': [googleClear, renewal, `${receipt}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`],
+    } } }
+  })
+  const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, { redirect: 'manual', headers: {
+    Cookie: `${googleCookie}=${googleToken}; ${receipt}=${confirmed}; ${guestCookie}=private`,
+    Authorization: 'Bearer private', Origin: 'https://accounts.google.com',
+  } })
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.get('Location'), site + '/#google-sign-in=success')
+  assert.equal(forwarded.get('Cookie'), `${googleCookie}=${googleToken}; ${receipt}=${confirmed}`)
+  assert.equal(forwarded.get('Authorization'), null)
+  const cookies = response.headers.getSetCookie()
+  assert.equal(cookies.length, 3)
+  assert.equal(cookies[0], googleCanonicalClear)
+  assert.ok(cookies[1].startsWith(`${name}=${token};`))
+  assert.ok(cookies[2].startsWith(`${receipt}=;`))
+  assert.match(cookies[2], /Max-Age=0/)
+  mock.assertNoPendingInterceptors()
 })

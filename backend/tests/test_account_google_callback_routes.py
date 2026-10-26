@@ -162,6 +162,7 @@ def test_success_sets_account_cookie_and_clears_only_pending_cookie_without_orig
         settings=material.settings,
         client=material.http_client,
         key_cache=material.key_cache,
+        signup_terms_receipt=None,
     )
 
 
@@ -451,3 +452,48 @@ def test_real_completion_pipeline_obeys_both_commits_before_cookie_issuance(
         assert events[-1] == "cookie"
     else:
         issue_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_callback_receipt_forwarded_but_cleared_only_after_success(
+    material: Material, fails: bool
+) -> None:
+    from app.account_signup_terms import (
+        make_signup_terms_receipt,
+        set_signup_terms_cookie,
+        signup_terms_cookie_name,
+    )
+
+    receipt = make_signup_terms_receipt(SecretStr("signup@example.test")).model_copy(
+        update={"confirmed_user_id": material.created.user_id}
+    )
+    response = Response()
+    set_signup_terms_cookie(response, receipt, material.settings)
+    parsed = SimpleCookie()
+    parsed.load(response.headers["set-cookie"])
+    name = signup_terms_cookie_name(material.settings)
+    value = parsed[name].value
+    if fails:
+        material.complete.side_effect = SQLAlchemyError("private")
+    result = material.client.get(
+        PATH + "?code=" + CODE,
+        headers={
+            "Cookie": f"__Host-askm6_oauth={BINDING}; {name}={value}; __Host-askm6_guest=preserved"
+        },
+    )
+    assert result.status_code == 303
+    assert result.headers["Location"].endswith("unavailable" if fails else "success")
+    assert material.complete.await_args is not None
+    assert material.complete.await_args.kwargs["signup_terms_receipt"] == SecretStr(value)
+    cookies = SimpleCookie()
+    for header in result.headers.get_list("set-cookie"):
+        cookies.load(header)
+    if fails:
+        assert name not in cookies
+        assert account_cookie_name(material.settings) not in cookies
+    else:
+        assert cookies[name]["max-age"] == "0"
+        assert cookies[name]["secure"] and cookies[name]["httponly"]
+        assert cookies[name]["path"] == "/"
+        assert account_cookie_name(material.settings) in cookies
+    assert "__Host-askm6_guest" not in cookies

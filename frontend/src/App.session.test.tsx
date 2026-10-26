@@ -42,6 +42,7 @@ function mockNetwork(
         })
       }
 
+      if (input === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
       if (input === '/api/v1/account/session') {
         return respond()
       }
@@ -70,7 +71,7 @@ function expectOnlySessionAndHealthRequests(
     fetchMock.mock.calls.every(
       ([input]) =>
         input === '/api/v1/health' ||
-        input === '/api/v1/account/session',
+        input === '/api/v1/account/session' || input === '/api/v1/account/terms/status',
     ),
   ).toBe(true)
 

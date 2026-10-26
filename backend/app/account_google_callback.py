@@ -32,6 +32,7 @@ async def complete_google_callback(
     settings: Settings,
     client: httpx2.AsyncClient,
     key_cache: AccountKeyCache | None,
+    signup_terms_receipt: SecretStr | None = None,
 ) -> CreatedAccountSession:
     """Consume once, exchange once, and return only a committed session.
 
@@ -85,6 +86,7 @@ async def complete_google_callback(
                 settings=settings,
                 client=client,
                 key_cache=key_cache,
+                signup_terms_receipt=signup_terms_receipt,
             )
 
         return created

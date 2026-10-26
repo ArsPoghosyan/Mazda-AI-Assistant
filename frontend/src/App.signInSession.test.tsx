@@ -52,11 +52,13 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-function mockNetwork(signInResponse: () => Response | Promise<Response>) {
+function mockNetwork(signInResponse: () => Response | Promise<Response>, needsSetup = false) {
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url) => {
     if (url === '/api/v1/health') {
       return Response.json({ status: 'ok', service: 'mazda6-assistant-api' })
     }
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: needsSetup ? null : new Date(Date.now() - 1000).toISOString(), acceptance_required: needsSetup })
+    if (url === '/api/v1/account/terms/accept') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString() })
     if (url === '/api/v1/account/session') {
       return new Response(null, { status: 401 })
     }
@@ -103,7 +105,7 @@ test('successful sign-in updates the App, closes the dialog, and focuses status'
   expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/session')).toHaveLength(1)
   expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/sign-in')).toHaveLength(1)
   expect(fetchMock.mock.calls.every(([url]) => [
-    '/api/v1/health', '/api/v1/account/session', '/api/v1/account/sign-in',
+    '/api/v1/health', '/api/v1/account/session', '/api/v1/account/sign-in', '/api/v1/account/terms/status',
   ].includes(String(url)))).toBe(true)
 
   await user.click(screen.getByRole('button', { name: 'Sign out' }))
@@ -166,4 +168,20 @@ test('closing a pending sign-in ignores its late success in the App', async () =
   expect(screen.queryByRole('button', { name: 'Signed in' })).toBeNull()
   expect(screen.queryByText('Signed in. Chat is still in development.')).toBeNull()
   expect(screen.getByRole('button', { name: 'Sign In' }).hasAttribute('disabled')).toBe(false)
+})
+
+
+test('email sign-in enters first-use setup and requires explicit agreement before completing it', async () => {
+  const fetchMock = mockNetwork(() => Response.json(session), true)
+  const { user } = await submitSignIn()
+  const setup = await screen.findByRole('dialog', { name: 'Finish account setup' })
+  expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull()
+  const checkbox = within(setup).getByRole('checkbox') as HTMLInputElement
+  expect(checkbox.checked).toBe(false)
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/terms/accept')).toHaveLength(0)
+  await user.click(checkbox)
+  await user.click(within(setup).getByRole('button', { name: 'Finish setup' }))
+  await screen.findByText('Account setup complete.')
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/terms/accept')).toHaveLength(1)
 })

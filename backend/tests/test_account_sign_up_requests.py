@@ -21,6 +21,8 @@ def valid_payload() -> dict[str, object]:
         "email": EMAIL,
         "password": PASSWORD,
         "captcha_token": CAPTCHA,
+        "accepted": True,
+        "terms_version": "2026-10-26",
     }
 
 
@@ -236,6 +238,8 @@ def test_accepts_structurally_valid_maximum_field_lengths(
             "email": "a" * 307 + "@example.test",
             "password": "p" * 1024,
             "captcha_token": "x" * 2048,
+            "accepted": True,
+            "terms_version": "2026-10-26",
         },
     )
 
@@ -244,3 +248,24 @@ def test_accepts_structurally_valid_maximum_field_lengths(
     assert len(harness.parsed[0].email.get_secret_value()) == 320
     assert len(harness.parsed[0].password.get_secret_value()) == 1024
     assert len(harness.parsed[0].captcha_token.get_secret_value()) == 2048
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [{"accepted": False}, {"accepted": "true"}, {"terms_version": "old"}, {"terms_version": None}],
+)
+def test_signup_requires_explicit_current_terms(
+    harness: ParserHarness, patch: dict[str, object]
+) -> None:
+    payload = valid_payload()
+    payload.update(patch)
+    response = harness.client.post("/parse", json=payload)
+    assert_error(response, harness, 400, "Invalid registration request.")
+
+
+@pytest.mark.parametrize("field", ["accepted", "terms_version"])
+def test_signup_requires_agreement_fields(harness: ParserHarness, field: str) -> None:
+    payload = valid_payload()
+    del payload[field]
+    response = harness.client.post("/parse", json=payload)
+    assert_error(response, harness, 400, "Invalid registration request.")

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx2
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic_settings import SettingsConfigDict
@@ -77,7 +78,8 @@ def route_material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
             "migration_database_url": None,
             "supabase_auth_issuer": ISSUER,
             "supabase_auth_publishable_key": "sb_publishable_synthetic_test_key",
-            "account_session_encryption_key": None,
+            "account_session_encryption_key": Fernet.generate_key().decode("ascii"),
+            "account_terms_api_enabled": True,
             "account_sign_up_api_enabled": True,
             "auth_rate_limit_hmac_secret": token_hex(32),
             "account_sign_in_api_enabled": False,
@@ -130,7 +132,13 @@ def route_material(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteMaterial]:
 def post_credentials(material: RouteMaterial) -> httpx2.Response:
     return material.client.post(
         PATH,
-        json={"email": EMAIL, "password": PASSWORD, "captcha_token": CAPTCHA},
+        json={
+            "email": EMAIL,
+            "password": PASSWORD,
+            "captcha_token": CAPTCHA,
+            "accepted": True,
+            "terms_version": "2026-10-26",
+        },
         headers={
             "Origin": ORIGIN,
             "Cookie": f"__Host-askm6_account={'a' * 43}; __Host-askm6_guest={'b' * 43}",
@@ -140,7 +148,12 @@ def post_credentials(material: RouteMaterial) -> httpx2.Response:
 
 def assert_private_response(response: httpx2.Response) -> None:
     assert response.headers["Cache-Control"] == "no-store"
-    assert "set-cookie" not in response.headers
+    if response.status_code == 202:
+        assert "__Host-askm6_signup_terms=" in response.headers["set-cookie"]
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert "Secure" in response.headers["set-cookie"]
+    else:
+        assert "set-cookie" not in response.headers
     for value in (EMAIL, PASSWORD, CAPTCHA, USER_ID, PRIVATE_DETAIL):
         assert value not in response.text
 
@@ -154,7 +167,7 @@ def assert_failure(response: httpx2.Response, status_code: int, detail: str) -> 
 def test_accepted_registration_forwards_once_without_creating_a_session(
     route_material: RouteMaterial,
 ) -> None:
-    # Registration requires neither application-session keys nor JWT verification.
+    # Registration uses its encryption key for the agreement receipt, not JWT verification.
     route_material.application.state.account_key_cache = None
     response = post_credentials(route_material)
 
@@ -466,3 +479,38 @@ def test_fingerprint_failure_never_counts(
     route_material.counter.assert_not_awaited()
     route_material.parse.assert_not_awaited()
     assert not route_material.requests
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [{"accepted": False}, {"accepted": "true"}, {"terms_version": "old"}, {"accepted": None}],
+)
+def test_invalid_terms_never_reach_provider(
+    route_material: RouteMaterial, patch: dict[str, object]
+) -> None:
+    payload: dict[str, object] = {
+        "email": EMAIL,
+        "password": PASSWORD,
+        "captcha_token": CAPTCHA,
+        "accepted": True,
+        "terms_version": "2026-10-26",
+    }
+    payload.update(patch)
+    response = route_material.client.post(PATH, json=payload, headers={"Origin": ORIGIN})
+    assert response.status_code == 400
+    assert "set-cookie" not in response.headers
+    route_material.provider.assert_not_awaited()
+    route_material.counter.assert_awaited_once()
+
+
+@pytest.mark.parametrize("missing", ["account_terms_api_enabled", "account_session_encryption_key"])
+def test_signup_requires_terms_and_receipt_resources(
+    route_material: RouteMaterial, missing: str
+) -> None:
+    setattr(
+        route_material.settings, missing, False if missing == "account_terms_api_enabled" else None
+    )
+    response = post_credentials(route_material)
+    assert_failure(response, 503, UNAVAILABLE)
+    route_material.provider.assert_not_awaited()
+    route_material.counter.assert_not_awaited()

@@ -172,6 +172,7 @@ test('email registration wins a same-render race and blocks Google after acknowl
   const { user, form, email, password, onSignIn, onAccepted } = await mountForm()
   await user.type(email, 'owner@example.test')
   await user.type(password, 'synthetic-private-password')
+  fireEvent.click(screen.getByRole('checkbox'))
   act(() => widgetOptions().callback('email-proof'))
   const google = screen.getByRole('button', { name: 'Continue with Google' })
   const back = screen.getByRole('button', { name: 'Back to sign in' })
@@ -209,11 +210,12 @@ test.each([
   act(() => { old.callback('late-proof'); fireEvent.submit(form) })
   expect(signUpAccount).not.toHaveBeenCalled()
   expect(screen.getByRole('button', { name: 'Create account' }).hasAttribute('disabled')).toBe(true)
+  fireEvent.click(screen.getByRole('checkbox'))
   await user.type(password, 'fresh-password')
   act(() => widgetOptions(1).callback('fresh-proof'))
   await user.click(screen.getByRole('button', { name: 'Create account' }))
   expect(vi.mocked(signUpAccount).mock.calls[0]?.[0]).toEqual({
-    email: 'owner@example.test', password: 'fresh-password', captcha_token: 'fresh-proof',
+    email: 'owner@example.test', password: 'fresh-password', captcha_token: 'fresh-proof', accepted: true, terms_version: '2026-10-26',
   })
   expect(onAccepted).toHaveBeenCalledExactlyOnceWith('owner@example.test')
   expect(navigate).not.toHaveBeenCalled()
@@ -225,6 +227,7 @@ test('a rejected email registration releases the Google option for an explicit s
   const { user, form, email, password, onAccepted } = await mountForm()
   await user.type(email, 'owner@example.test')
   await user.type(password, 'synthetic-private-password')
+  fireEvent.click(screen.getByRole('checkbox'))
   act(() => widgetOptions().callback('email-proof'))
   fireEvent.submit(form)
   await screen.findByText('Registration was rejected. Check your details and try again.')

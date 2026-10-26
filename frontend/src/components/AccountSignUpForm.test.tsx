@@ -127,6 +127,7 @@ test('shows and hides the password without changing its value', async () => {
   const { user, password } = await mountForm()
 
   await user.type(password, passwordValue)
+  fireEvent.click(screen.getByRole('checkbox'))
 
   const toggle = screen.getByRole('button', { name: 'Show password' })
 
@@ -152,6 +153,7 @@ test('submits once, clears the password, and passes only email to confirmation',
 
   await user.type(email, 'owner@example.test')
   await user.type(password, passwordValue)
+  fireEvent.click(screen.getByRole('checkbox'))
   await user.click(screen.getByRole('button', { name: 'Show password' }))
 
   act(() => {
@@ -165,6 +167,7 @@ test('submits once, clears the password, and passes only email to confirmation',
     email: 'owner@example.test',
     password: passwordValue,
     captcha_token: 'synthetic-registration-proof',
+    accepted: true, terms_version: '2026-10-26',
   })
   expect(vi.mocked(signUpAccount).mock.calls[0]?.[1]).toBeInstanceOf(
     AbortSignal,
@@ -207,6 +210,7 @@ test('submits once, clears the password, and passes only email to confirmation',
 
 test('an expired proof disables submission again', async () => {
   const { form } = await mountForm()
+  fireEvent.click(screen.getByRole('checkbox'))
   const options = widgetOptions()
 
   act(() => {
@@ -261,6 +265,7 @@ test.each([
 
   await user.type(email, 'owner@example.test')
   await user.type(password, passwordValue)
+  fireEvent.click(screen.getByRole('checkbox'))
 
   act(() => {
     oldOptions.callback('first-proof')
@@ -288,6 +293,7 @@ test.each([
   ).toBe(true)
 
   await user.type(password, passwordValue)
+  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true)
 
   act(() => {
     widgetOptions(1).callback('fresh-proof')
@@ -314,6 +320,7 @@ test('closing allows cancellation and ignores a late accepted response', async (
 
   await user.type(email, 'owner@example.test')
   await user.type(password, passwordValue)
+  fireEvent.click(screen.getByRole('checkbox'))
 
   act(() => {
     widgetOptions().callback('synthetic-registration-proof')
@@ -363,4 +370,19 @@ test('does not load verification or submit outside development', () => {
 
   expect(signUpAccount).not.toHaveBeenCalled()
   expect(onAccepted).not.toHaveBeenCalled()
+})
+
+
+test('a completed challenge still requires an explicit checkbox action', async () => {
+  const { user, form } = await mountForm()
+  const checkbox = screen.getByRole<HTMLInputElement>('checkbox')
+  act(() => widgetOptions().callback('ready-proof'))
+  expect(checkbox.checked).toBe(false)
+  fireEvent.submit(form)
+  expect(signUpAccount).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: 'Create account' }).hasAttribute('disabled')).toBe(true)
+  await user.click(checkbox)
+  expect(screen.getByRole('button', { name: 'Create account' }).hasAttribute('disabled')).toBe(false)
+  await user.click(checkbox)
+  expect(screen.getByRole('button', { name: 'Create account' }).hasAttribute('disabled')).toBe(true)
 })

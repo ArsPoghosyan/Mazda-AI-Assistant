@@ -2,7 +2,6 @@
 
 from fastapi import HTTPException, Request, status
 from pydantic import (
-    BaseModel,
     ConfigDict,
     Field,
     SecretStr,
@@ -10,10 +9,12 @@ from pydantic import (
     field_validator,
 )
 
+from app.account_terms_requests import TermsAcceptanceRequest
+
 _MAX_BODY_BYTES = 16 * 1024
 
 
-class SignUpCredentials(BaseModel):
+class SignUpCredentials(TermsAcceptanceRequest):
     model_config = ConfigDict(
         strict=True,
         extra="forbid",

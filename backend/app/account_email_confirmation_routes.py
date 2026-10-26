@@ -17,6 +17,13 @@ from app.account_email_confirmation import (
 from app.account_email_confirmation_requests import (
     read_email_confirmation_credentials,
 )
+from app.account_signup_terms import (
+    clear_signup_terms_cookie,
+    decode_signup_terms_receipt,
+    read_signup_terms_cookie,
+    set_signup_terms_cookie,
+    signup_terms_cookie_name,
+)
 from app.auth_rate_limit_keys import AuthRateLimitKeyUnavailable, get_email_confirmation_ip_key
 from app.auth_rate_limits import AuthRateLimitUnavailable, commit_email_confirmation_attempt
 from app.client_ip import ClientIPUnavailable
@@ -100,7 +107,7 @@ async def confirm_email(
 
             credentials = await read_email_confirmation_credentials(request)
 
-            await confirm_email_code(
+            confirmed_user_id = await confirm_email_code(
                 credentials.email,
                 credentials.code,
                 settings=settings,
@@ -123,4 +130,20 @@ async def confirm_email(
         raise email_confirmation_unavailable() from None
 
     response.headers["Cache-Control"] = "no-store"
+    if signup_terms_cookie_name(settings) in request.cookies:
+        receipt = decode_signup_terms_receipt(
+            read_signup_terms_cookie(request, settings), credentials.email, settings
+        )
+        if (
+            settings.account_terms_api_enabled
+            and receipt is not None
+            and receipt.confirmed_user_id in (None, confirmed_user_id)
+        ):
+            set_signup_terms_cookie(
+                response,
+                receipt.model_copy(update={"confirmed_user_id": confirmed_user_id}),
+                settings,
+            )
+        else:
+            clear_signup_terms_cookie(response, settings)
     return AccountEmailConfirmationResponse()

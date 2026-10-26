@@ -2,6 +2,7 @@ import { InvalidCredentialProxyRequest, readCredentialProxyBody } from './accoun
 import { proxyClientIPHeaders, ProxyClientIPUnavailable } from './proxy-client-ip.ts'
 import { readProxyBytes } from './session-proxy-io.ts'
 import { planSessionProxyOrigin, type SessionProxyEnvironment } from './session-proxy-policy.ts'
+import { validatedSignupTermsCookie } from './signup-terms-proxy-cookies.ts'
 
 export type AccountSignUpProxyEnvironment = SessionProxyEnvironment & { ACCOUNT_SIGN_UP_PROXY_ENABLED?: string }
 const PATH = '/api/v1/account/sign-up'
@@ -15,7 +16,6 @@ function reply(detail: string, status: number, extra: Record<string, string> = {
 async function accepted(response: Response, signal: AbortSignal): Promise<Response> {
   const length = response.headers.get('Content-Length')
   if (
-    response.headers.has('Set-Cookie') ||
     response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json' ||
     !['', 'identity'].includes(response.headers.get('Content-Encoding')?.toLowerCase() ?? '') ||
     (length !== null && (!/^[0-9]{1,5}$/.test(length) || Number(length) > 4096))
@@ -29,7 +29,8 @@ async function accepted(response: Response, signal: AbortSignal): Promise<Respon
     throw new Error('Invalid registration response')
   }
   signal.throwIfAborted()
-  return Response.json({ status: 'accepted', message: ACCEPTED_MESSAGE }, { status: 202, headers: { 'Cache-Control': 'no-store' } })
+  const cookie = validatedSignupTermsCookie(response.headers)
+  return Response.json({ status: 'accepted', message: ACCEPTED_MESSAGE }, { status: 202, headers: { 'Cache-Control': 'no-store', 'Set-Cookie': cookie } })
 }
 
 export async function forwardAccountSignUp(request: Request, env: AccountSignUpProxyEnvironment): Promise<Response> {
@@ -61,7 +62,7 @@ export async function forwardAccountSignUp(request: Request, env: AccountSignUpP
       headers.set('Accept-Encoding', 'identity')
       headers.set('Content-Type', 'application/json')
       headers.set('Origin', plan.publicOrigin)
-      const body = await readCredentialProxyBody(request, controller.signal, { requireCaptcha: true })
+      const body = await readCredentialProxyBody(request, controller.signal, { requireCaptcha: true, requireTerms: true })
       controller.signal.throwIfAborted()
       upstream = await fetch(plan.upstreamUrl, { method: 'POST', headers, body,
         redirect: 'manual', cache: 'no-store', credentials: 'omit', signal: controller.signal,

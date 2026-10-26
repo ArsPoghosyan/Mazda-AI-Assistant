@@ -356,3 +356,27 @@ test('the total deadline covers response consumption and cancels its stream', as
   await failure(await pending, 502)
   assert.equal(cancelled, true)
 })
+
+
+for (const mode of ['clear', 'missing', 'persistent', 'extra']) {
+  test(`signin receipt forwarding validates ${mode} cookie outcome`, async t => {
+    const name = '__Host-askm6_signup_terms'
+    const value = 'A'.repeat(120)
+    const headers = new Headers({ 'Content-Type': 'application/json', 'Set-Cookie': cookie })
+    if (mode !== 'missing') headers.append('Set-Cookie', mode === 'persistent'
+      ? `${name}=${value}; Expires=${new Date(Date.now() + 300_000).toUTCString()}; Max-Age=300; Path=/; Secure; HttpOnly; SameSite=Lax`
+      : `${name}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`)
+    if (mode === 'extra') headers.append('Set-Cookie', '__Host-askm6_guest=private')
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      assert.equal(options.headers.get('Cookie'), `${name}=${value}`)
+      assert.equal(options.headers.get('Authorization'), null)
+      return Response.json(metadata, { headers })
+    })
+    const response = await dispatch({ headers: { Cookie: `__Host-askm6_guest=private; ${name}=${value}`, Authorization: 'Bearer private' } })
+    if (mode !== 'clear') return failure(response, 502)
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), metadata)
+    assert.equal(response.headers.getSetCookie().length, 2)
+    assert.match(response.headers.getSetCookie()[1], /Max-Age=0/)
+  })
+}
