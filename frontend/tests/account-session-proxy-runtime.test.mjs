@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { Miniflare, createFetchMock } from 'miniflare'
+import { Miniflare, createFetchMock, fetch as mockFetch } from 'miniflare'
 import { build } from 'vite'
 
 const site = 'https://site.example'
@@ -39,7 +39,10 @@ async function runtime(t, overrides = {}) {
     host: '127.0.0.1', port: 0, modules: true, script,
     cf: false, compatibilityDate: '2026-07-30',
     compatibilityFlags: ['enable_request_signal'],
-    bindings: { ...bindings, ...overrides }, fetchMock: mock,
+    bindings: { ...bindings, ...overrides },
+    // Miniflare's default fetchMock Node adapter follows redirects. Preserve
+    // manual handling at this hop too, so workerd sees the actual 303/cookies.
+    outboundService: (request) => mockFetch(request, { dispatcher: mock, redirect: 'manual' }),
   })
   t.after(async () => { await mf.dispose(); await mock.close() })
   await mf.ready
@@ -562,6 +565,780 @@ test('Workers supports a complete mocked sign-in, session-check and sign-out cyc
   assert.equal(logout.status, 204, await logout.clone().text())
   assert.equal(logout.headers.get('Set-Cookie'), canonicalClear)
   assert.equal(await logout.text(), '')
+  mock.assertNoPendingInterceptors()
+})
+
+const signUpPath = '/api/v1/account/sign-up'
+const registrationAccepted = { status: 'accepted', message: 'If registration can proceed, check your email for a verification code.' }
+const signUpBindings = { ACCOUNT_SIGN_UP_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
+
+test('Workers sign-up forwards exact credentials and returns generic acceptance without any browser cookie changes', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, signUpBindings)
+  let sent, deliveredBody
+  mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply((request) => {
+    sent = new Headers(request.headers)
+    deliveredBody = request.body
+    return { statusCode: 202, data: JSON.stringify(registrationAccepted), responseOptions: {
+      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': signUpBindings.AUTH_PROXY_SHARED_SECRET },
+    } }
+  })
+  const response = await mf.dispatchFetch(site + signUpPath, signInOptions({
+    Cookie: `${name}=${token}; ${guestCookie}=private; __Host-askm6_google=private`,
+    Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
+  }))
+  assert.equal(response.status, 202, await response.clone().text())
+  assert.deepEqual(await response.json(), registrationAccepted)
+  assert.equal(await new Response(deliveredBody).text(), JSON.stringify(signInCredentials))
+  assert.equal(sent.get('Origin'), site)
+  assert.equal(sent.get('X-AskM6-Proxy-Secret'), signUpBindings.AUTH_PROXY_SHARED_SECRET)
+  assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
+  for (const header of ['Cookie', 'Authorization', 'X-Forwarded-For', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers sign-up is independently gated and rejects explicitly missing/empty edge IPs', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t)
+  const response = await closed.mf.dispatchFetch(site + signUpPath, signInOptions())
+  assert.equal(response.status, 404)
+  await response.arrayBuffer()
+  for (const mode of ['missing', 'empty']) {
+    const { mf } = await runtime(t, { ...signUpBindings, TEST_CLIENT_IP_MODE: mode })
+    const result = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
+})
+
+test('Workers sign-up rejects wrong origins and invalid/oversized registration input before fetching', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, signUpBindings)
+  for (const [url, init, status] of [
+    [site + signUpPath, signInOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + signUpPath, signInOptions(), 403],
+    [site + signUpPath, { ...signInOptions(), body: '{"email":"x","password":"x"}' }, 400],
+    [site + signUpPath, { ...signInOptions(), body: '{"email":"x","password":"x","captcha_token":null}' }, 400],
+    [site + signUpPath, { ...signInOptions(), body: ' '.repeat(16385) }, 413],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers sign-up errors preserve only CAPTCHA/retry signals and mask provider details', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, signUpBindings)
+  for (const [status, headers] of [[400, {}], [403, { 'X-Account-Verification': 'required' }], [429, { 'Retry-After': '37' }], [503, {}]]) {
+    mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(status, 'private account information', {
+      headers: { ...headers, 'Set-Cookie': clearingCookie, Location: 'https://private.example' },
+    })
+    const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('X-Account-Verification'), status === 403 ? 'required' : null)
+    assert.equal(response.headers.get('Retry-After'), status === 429 ? '37' : null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers sign-up rejects unexpected success identity fields and any success cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, signUpBindings)
+  // Empty Set-Cookie fields may be discarded by the HTTP mock before the worker;
+  // Node transport tests separately validate rejection when that field is exposed.
+  for (const [body, headers] of [[{ ...registrationAccepted, user_id: 'private' }, {}],
+    [registrationAccepted, { 'Set-Cookie': renewal }],
+    [registrationAccepted, { 'Set-Cookie': [renewal, guestSetCookie] }]]) {
+    mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(202, JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+    const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+    assert.equal(response.status, 502, JSON.stringify(headers))
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers sign-up abort never returns a late acceptance', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...signUpBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(202, JSON.stringify(registrationAccepted), {
+    headers: { 'Content-Type': 'application/json' },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + signUpPath, signInOptions())
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  await response.arrayBuffer()
+})
+
+const confirmationPath = '/api/v1/account/confirm-email'
+const confirmationCredentials = { email: ' Owner@Example.test ', code: '001234' }
+const emailConfirmed = { status: 'confirmed', message: 'Email confirmed. You can now sign in.' }
+const confirmationBindings = { ACCOUNT_EMAIL_CONFIRMATION_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
+
+function confirmationOptions(headers = {}) {
+  return { ...signInOptions(headers), body: JSON.stringify(confirmationCredentials) }
+}
+
+test('Workers email confirmation preserves email and leading-zero code without signing in or changing cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, confirmationBindings)
+  let sent, deliveredBody
+  mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply((request) => {
+    sent = new Headers(request.headers)
+    deliveredBody = request.body
+    return { statusCode: 200, data: JSON.stringify(emailConfirmed), responseOptions: {
+      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': confirmationBindings.AUTH_PROXY_SHARED_SECRET },
+    } }
+  })
+  const response = await mf.dispatchFetch(site + confirmationPath, confirmationOptions({
+    Cookie: `${name}=${token}; ${guestCookie}=private; __Host-askm6_google=private`,
+    Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
+  }))
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.deepEqual(await response.json(), emailConfirmed)
+  assert.equal(await new Response(deliveredBody).text(), JSON.stringify(confirmationCredentials))
+  assert.equal(sent.get('Origin'), site)
+  assert.equal(sent.get('X-AskM6-Proxy-Secret'), confirmationBindings.AUTH_PROXY_SHARED_SECRET)
+  assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
+  for (const header of ['Cookie', 'Authorization', 'X-Forwarded-For', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+  assert.equal(response.headers.get('Cache-Control'), 'no-store')
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers email confirmation is independently gated and requires trusted ingress', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t, signUpBindings)
+  const response = await closed.mf.dispatchFetch(site + confirmationPath, confirmationOptions())
+  assert.equal(response.status, 404)
+  await response.arrayBuffer()
+  for (const overrides of [{ TEST_CLIENT_IP_MODE: 'missing' }, { TEST_CLIENT_IP_MODE: 'empty' },
+    { AUTH_PROXY_TRUST_ENABLED: 'false' }, { AUTH_PROXY_SHARED_SECRET: '' }]) {
+    const { mf } = await runtime(t, { ...confirmationBindings, ...overrides })
+    const result = await mf.dispatchFetch(site + confirmationPath, confirmationOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
+})
+
+test('Workers email confirmation rejects wrong origins, invalid codes and actual oversized input before fetching', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, confirmationBindings)
+  for (const [url, init, status] of [
+    [site + confirmationPath, confirmationOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + confirmationPath, confirmationOptions(), 403],
+    [site + confirmationPath, { ...confirmationOptions(), body: '{"email":"x","code":123456}' }, 400],
+    [site + confirmationPath, { ...confirmationOptions(), body: '{"email":"x","code":"123456\\n"}' }, 400],
+    [site + confirmationPath, { ...confirmationOptions(), body: ' '.repeat(4097) }, 413],
+    [site + confirmationPath, confirmationOptions({ 'CF-Connecting-IP': '198.51.100.20, 203.0.113.99' }), 503],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers email confirmation masks provider errors, drops unrelated verification headers and preserves bounded retry seconds', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, confirmationBindings)
+  for (const [status, headers] of [[400, {}], [403, { 'X-Account-Verification': 'required' }],
+    [429, { 'Retry-After': '37' }], [429, { 'Retry-After': '86401' }], [503, {}]]) {
+    mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(status, 'private account information', {
+      headers: { ...headers, 'Set-Cookie': clearingCookie, Location: 'https://private.example' },
+    })
+    const response = await mf.dispatchFetch(site + confirmationPath, confirmationOptions())
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('X-Account-Verification'), null)
+    assert.equal(response.headers.get('Retry-After'), headers['Retry-After'] === '37' ? '37' : null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers email confirmation rejects token-bearing success, cookies, redirects and wrong success status', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, confirmationBindings)
+  for (const [status, body, headers] of [[200, { ...emailConfirmed, access_token: 'private' }, {}],
+    [200, emailConfirmed, { 'Set-Cookie': renewal }], [200, emailConfirmed, { 'Set-Cookie': [renewal, guestSetCookie] }],
+    [202, emailConfirmed, {}], [302, emailConfirmed, { Location: 'https://private.example' }]]) {
+    mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(status, JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+    const response = await mf.dispatchFetch(site + confirmationPath, confirmationOptions())
+    assert.equal(response.status, 502)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers email confirmation abort never returns a late success', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...confirmationBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(200, JSON.stringify(emailConfirmed), {
+    headers: { 'Content-Type': 'application/json' },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + confirmationPath, confirmationOptions())
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  await response.arrayBuffer()
+})
+
+const recoveryCredentials = { email: ' Owner@Example.test ', captcha_token: 'synthetic-proof' }
+function recoveryOptions(headers = {}) {
+  return { ...signInOptions(headers), body: JSON.stringify(recoveryCredentials) }
+}
+
+const recoveryPath = '/api/v1/account/password-recovery'
+const recoveryAccepted = { status: 'accepted', message: 'If password recovery can proceed, check your email for the next steps.' }
+const recoveryBindings = { ACCOUNT_PASSWORD_RECOVERY_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
+
+test('Workers password-recovery forwards exact credentials and returns generic acceptance without any browser cookie changes', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, recoveryBindings)
+  let sent, deliveredBody
+  mock.get(backend).intercept({ method: 'POST', path: recoveryPath }).reply((request) => {
+    sent = new Headers(request.headers)
+    deliveredBody = request.body
+    return { statusCode: 202, data: JSON.stringify(recoveryAccepted), responseOptions: {
+      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': recoveryBindings.AUTH_PROXY_SHARED_SECRET },
+    } }
+  })
+  const response = await mf.dispatchFetch(site + recoveryPath, recoveryOptions({
+    Cookie: `${name}=${token}; ${guestCookie}=private; __Host-askm6_google=private`,
+    Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
+  }))
+  assert.equal(response.status, 202, await response.clone().text())
+  assert.deepEqual(await response.json(), recoveryAccepted)
+  assert.equal(await new Response(deliveredBody).text(), JSON.stringify(recoveryCredentials))
+  assert.equal(sent.get('Origin'), site)
+  assert.equal(sent.get('X-AskM6-Proxy-Secret'), recoveryBindings.AUTH_PROXY_SHARED_SECRET)
+  assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
+  for (const header of ['Cookie', 'Authorization', 'X-Forwarded-For', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers password-recovery is independently gated and rejects explicitly missing/empty edge IPs', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t, { ...signUpBindings, ...confirmationBindings })
+  const response = await closed.mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+  assert.equal(response.status, 404)
+  await response.arrayBuffer()
+  for (const mode of ['missing', 'empty']) {
+    const { mf } = await runtime(t, { ...recoveryBindings, TEST_CLIENT_IP_MODE: mode })
+    const result = await mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
+})
+
+test('Workers password-recovery rejects wrong origins and invalid/oversized recovery input before fetching', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, recoveryBindings)
+  for (const [url, init, status] of [
+    [site + recoveryPath, recoveryOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + recoveryPath, recoveryOptions(), 403],
+    [site + recoveryPath, { ...recoveryOptions(), body: '{"email":"x"}' }, 400],
+    [site + recoveryPath, { ...recoveryOptions(), body: '{"email":"x","captcha_token":null}' }, 400],
+    [site + recoveryPath, { ...recoveryOptions(), body: ' '.repeat(16385) }, 413],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers password-recovery errors preserve only CAPTCHA/retry signals and mask provider details', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, recoveryBindings)
+  for (const [status, headers] of [[400, {}], [403, { 'X-Account-Verification': 'required' }], [429, { 'Retry-After': '37' }], [503, {}]]) {
+    mock.get(backend).intercept({ method: 'POST', path: recoveryPath }).reply(status, 'private account information', {
+      headers: { ...headers, 'Set-Cookie': clearingCookie, Location: 'https://private.example' },
+    })
+    const response = await mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('X-Account-Verification'), status === 403 ? 'required' : null)
+    assert.equal(response.headers.get('Retry-After'), status === 429 ? '37' : null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers password-recovery rejects unexpected success identity fields and any success cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, recoveryBindings)
+  // Empty Set-Cookie fields may be discarded by the HTTP mock before the worker;
+  // Node transport tests separately validate rejection when that field is exposed.
+  for (const [body, headers] of [[{ ...recoveryAccepted, user_id: 'private' }, {}],
+    [recoveryAccepted, { 'Set-Cookie': renewal }],
+    [recoveryAccepted, { 'Set-Cookie': [renewal, guestSetCookie] }]]) {
+    mock.get(backend).intercept({ method: 'POST', path: recoveryPath }).reply(202, JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+    const response = await mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+    assert.equal(response.status, 502, JSON.stringify(headers))
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers password-recovery abort never returns a late acceptance', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...recoveryBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'POST', path: recoveryPath }).reply(202, JSON.stringify(recoveryAccepted), {
+    headers: { 'Content-Type': 'application/json' },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  await response.arrayBuffer()
+})
+
+const resetPath = '/api/v1/account/password-reset'
+const resetCredentials = { email: ' Owner@Example.test ', code: '001234', new_password: '  synthetic-new-password-é  ' }
+const passwordCompleted = { status: 'completed', message: 'Password reset completed. Sign in with your new password.' }
+const resetBindings = { ACCOUNT_PASSWORD_RESET_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
+
+function resetOptions(headers = {}) {
+  return { ...signInOptions(headers), body: JSON.stringify(resetCredentials) }
+}
+
+test('Workers password reset preserves email and leading-zero code without signing in or changing cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, resetBindings)
+  let sent, deliveredBody
+  mock.get(backend).intercept({ method: 'POST', path: resetPath }).reply((request) => {
+    sent = new Headers(request.headers)
+    deliveredBody = request.body
+    return { statusCode: 200, data: JSON.stringify(passwordCompleted), responseOptions: {
+      headers: { 'Content-Type': 'application/json', 'X-AskM6-Proxy-Secret': resetBindings.AUTH_PROXY_SHARED_SECRET },
+    } }
+  })
+  const response = await mf.dispatchFetch(site + resetPath, resetOptions({
+    Cookie: `${name}=${token}; ${guestCookie}=private; __Host-askm6_google=private`,
+    Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
+  }))
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.deepEqual(await response.json(), passwordCompleted)
+  assert.equal(await new Response(deliveredBody).text(), JSON.stringify(resetCredentials))
+  assert.equal(sent.get('Origin'), site)
+  assert.equal(sent.get('X-AskM6-Proxy-Secret'), resetBindings.AUTH_PROXY_SHARED_SECRET)
+  assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
+  for (const header of ['Cookie', 'Authorization', 'X-Forwarded-For', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.equal(response.headers.get('X-AskM6-Proxy-Secret'), null)
+  assert.equal(response.headers.get('Cache-Control'), 'no-store')
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers password reset is independently gated and requires trusted ingress', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t, { ...signUpBindings, ...confirmationBindings, ...recoveryBindings })
+  const response = await closed.mf.dispatchFetch(site + resetPath, resetOptions())
+  assert.equal(response.status, 404)
+  await response.arrayBuffer()
+  for (const overrides of [{ TEST_CLIENT_IP_MODE: 'missing' }, { TEST_CLIENT_IP_MODE: 'empty' },
+    { AUTH_PROXY_TRUST_ENABLED: 'false' }, { AUTH_PROXY_SHARED_SECRET: '' }]) {
+    const { mf } = await runtime(t, { ...resetBindings, ...overrides })
+    const result = await mf.dispatchFetch(site + resetPath, resetOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
+})
+
+test('Workers password reset rejects wrong origins, invalid codes and actual oversized input before fetching', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, resetBindings)
+  for (const [url, init, status] of [
+    [site + resetPath, resetOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + resetPath, resetOptions(), 403],
+    [site + resetPath, { ...resetOptions(), body: JSON.stringify({ ...resetCredentials, code: 123456 }) }, 400],
+    [site + resetPath, { ...resetOptions(), body: JSON.stringify({ ...resetCredentials, code: '123456\n' }) }, 400],
+    [site + resetPath, { ...resetOptions(), body: ' '.repeat(16385) }, 413],
+    [site + resetPath, { ...resetOptions(), body: JSON.stringify({ email: 'x', code: '001234' }) }, 400],
+    [site + resetPath, { ...resetOptions(), body: JSON.stringify({ ...resetCredentials, new_password: '' }) }, 400],
+    [site + resetPath, resetOptions({ 'CF-Connecting-IP': '198.51.100.20, 203.0.113.99' }), 503],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers password reset masks provider errors, drops unrelated verification headers and preserves bounded retry seconds', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, resetBindings)
+  for (const [status, headers] of [[400, {}], [403, { 'X-Account-Verification': 'required' }],
+    [429, { 'Retry-After': '37' }], [429, { 'Retry-After': '86401' }], [503, {}]]) {
+    mock.get(backend).intercept({ method: 'POST', path: resetPath }).reply(status, 'private account information', {
+      headers: { ...headers, 'Set-Cookie': clearingCookie, Location: 'https://private.example' },
+    })
+    const response = await mf.dispatchFetch(site + resetPath, resetOptions())
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('X-Account-Verification'), null)
+    assert.equal(response.headers.get('Retry-After'), headers['Retry-After'] === '37' ? '37' : null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers password reset rejects token-bearing success, cookies, redirects and wrong success status', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, resetBindings)
+  for (const [status, body, headers] of [[200, { ...passwordCompleted, access_token: 'private' }, {}],
+    [200, passwordCompleted, { 'Set-Cookie': renewal }], [200, passwordCompleted, { 'Set-Cookie': [renewal, guestSetCookie] }],
+    [202, passwordCompleted, {}], [302, passwordCompleted, { Location: 'https://private.example' }]]) {
+    mock.get(backend).intercept({ method: 'POST', path: resetPath }).reply(status, JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+    const response = await mf.dispatchFetch(site + resetPath, resetOptions())
+    assert.equal(response.status, 502)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers password reset abort never returns a late success', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...resetBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'POST', path: resetPath }).reply(200, JSON.stringify(passwordCompleted), {
+    headers: { 'Content-Type': 'application/json' },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + resetPath, resetOptions())
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  await response.arrayBuffer()
+})
+
+test('Workers password reset leaves cookie clearing to a later backend-confirmed signed-out session check', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...resetBindings, ...recoveryBindings })
+  mock.get(backend).intercept({ method: 'POST', path: recoveryPath }).reply(202, JSON.stringify(recoveryAccepted), {
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const recovery = await mf.dispatchFetch(site + recoveryPath, recoveryOptions())
+  assert.equal(recovery.status, 202, await recovery.clone().text())
+  assert.equal(recovery.headers.get('Set-Cookie'), null)
+  await recovery.arrayBuffer()
+  mock.get(backend).intercept({ method: 'POST', path: resetPath }).reply(200, JSON.stringify(passwordCompleted), {
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const reset = await mf.dispatchFetch(site + resetPath, resetOptions({ Cookie: `${name}=${token}; ${guestCookie}=private` }))
+  assert.equal(reset.status, 200, await reset.clone().text())
+  assert.equal(reset.headers.get('Set-Cookie'), null)
+  assert.deepEqual(await reset.json(), passwordCompleted)
+  mock.get(backend).intercept({ method: 'POST', path: endpoint }).reply(401, '{"detail":"private"}', {
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': clearingCookie },
+  })
+  const session = await mf.dispatchFetch(site + endpoint, options({ Cookie: `${name}=${token}; ${guestCookie}=private`, 'CF-Connecting-IP': '198.51.100.20' }))
+  assert.equal(session.status, 401, await session.clone().text())
+  assert.equal(session.headers.get('Set-Cookie'), canonicalClear)
+  assert.equal((await session.text()).includes('private'), false)
+  mock.assertNoPendingInterceptors()
+})
+
+const googleStartPath = '/api/v1/account/google/start'
+const googleIssuer = 'https://auth.example/auth/v1'
+const googleCookie = '__Host-askm6_oauth'
+const googleToken = 'O'.repeat(43)
+const googlePrevious = 'P'.repeat(43)
+const googleExpiry = new Date(Date.now() + 600_000).toISOString()
+const googleStartMetadata = { authorization_url: googleIssuer + '/authorize?' + new URLSearchParams({
+  provider: 'google', redirect_to: site + '/api/v1/account/google/callback', code_challenge: 'C'.repeat(43), code_challenge_method: 's256',
+}), expires_at: googleExpiry }
+const googleSetCookie = `${googleCookie}=${googleToken}; expires=${new Date(googleExpiry).toUTCString()}; HttpOnly; Path=/; SameSite=lax; Secure`
+const googleClear = clearingCookie.replace(name, googleCookie)
+const googleCanonicalClear = canonicalClear.replace(name, googleCookie)
+const googleStartBindings = { ACCOUNT_GOOGLE_START_PROXY_ENABLED: 'true', SUPABASE_AUTH_ISSUER: googleIssuer,
+  AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: 'ab'.repeat(32) }
+function googleStartOptions(headers = {}) {
+  return { method: 'POST', headers: { Origin: site, 'CF-Connecting-IP': '198.51.100.20', ...headers } }
+}
+
+test('Workers Google start creates/replaces only the OAuth binding and returns validated authorization metadata', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleStartBindings)
+  for (const binding of [null, `${googleCookie}=${googlePrevious}`]) {
+    let sent
+    mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply((request) => {
+      sent = new Headers(request.headers)
+      return { statusCode: 200, data: JSON.stringify(googleStartMetadata), responseOptions: {
+        headers: { 'Content-Type': 'application/json', 'Set-Cookie': googleSetCookie, 'X-Private': 'private' },
+      } }
+    })
+    const response = await mf.dispatchFetch(site + googleStartPath, googleStartOptions({
+      Cookie: `${guestCookie}=private; askm6_oauth=private${binding ? '; ' + binding : ''}`,
+      Authorization: 'Bearer private', 'X-AskM6-Client-IP': '203.0.113.99', 'X-AskM6-Proxy-Secret': 'forged',
+    }))
+    assert.equal(response.status, 200, await response.clone().text())
+    assert.deepEqual(await response.json(), googleStartMetadata)
+    assert.equal(sent.get('Cookie'), binding)
+    assert.equal(sent.get('Origin'), site)
+    assert.equal(sent.get('X-AskM6-Client-IP'), '198.51.100.20')
+    assert.equal(sent.get('X-AskM6-Proxy-Secret'), googleStartBindings.AUTH_PROXY_SHARED_SECRET)
+    for (const header of ['Authorization', 'CF-Connecting-IP', 'X-Forwarded-For']) assert.equal(sent.get(header), null)
+    assert.equal(response.headers.get('Set-Cookie'), `${googleCookie}=${googleToken}; Expires=${new Date(googleExpiry).toUTCString()}; Path=/; Secure; HttpOnly; SameSite=Lax`)
+    assert.equal(response.headers.get('Referrer-Policy'), 'no-referrer')
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal(response.headers.get('X-Private'), null)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers Google start is independently gated and requires configured issuer and trusted ingress', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t, { ...signInBindings, ...signUpBindings })
+  const response = await closed.mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+  assert.equal(response.status, 404)
+  await response.arrayBuffer()
+  for (const overrides of [{ TEST_CLIENT_IP_MODE: 'missing' }, { TEST_CLIENT_IP_MODE: 'empty' },
+    { AUTH_PROXY_TRUST_ENABLED: 'false' }, { SUPABASE_AUTH_ISSUER: '' }]) {
+    const { mf } = await runtime(t, { ...googleStartBindings, ...overrides })
+    const result = await mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('Set-Cookie'), null)
+    await result.arrayBuffer()
+  }
+})
+
+test('Workers Google start enforces origin, empty input and explicit account sign-out without enabling callbacks', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, googleStartBindings)
+  for (const [url, init, status] of [
+    [site + googleStartPath, googleStartOptions({ Origin: 'https://foreign.example' }), 403],
+    ['https://preview.example' + googleStartPath, googleStartOptions(), 403],
+    [site + googleStartPath + '?provider=github', googleStartOptions(), 400],
+    [site + googleStartPath, { ...googleStartOptions(), body: '{}' }, 400],
+    ...['', 'bad', token].map((value) => [site + googleStartPath, googleStartOptions({ Cookie: `${name}=${value}; ${googleCookie}=${googlePrevious}` }), 409]),
+    [site + '/api/v1/account/google/callback?code=synthetic', { method: 'GET' }, 404],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers Google start preserves malformed/duplicate binding evidence and clears only after backend confirmation', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleStartBindings)
+  for (const binding of [`${googleCookie}=bad`, `${googleCookie}=${googlePrevious}; ${googleCookie}=${googlePrevious}`, `${googleCookie}=${googlePrevious} `]) {
+    mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply((request) => {
+      assert.equal(new Headers(request.headers).get('Cookie'), binding.endsWith(' ') ? binding + ';' : binding)
+      return { statusCode: 400, data: 'private', responseOptions: { headers: { 'Set-Cookie': googleClear } } }
+    })
+    const response = await mf.dispatchFetch(site + googleStartPath, googleStartOptions({ Cookie: binding + '; unrelated=private' }))
+    assert.equal(response.status, 400, await response.clone().text())
+    assert.equal(response.headers.get('Set-Cookie'), googleCanonicalClear)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers Google start errors retain only bounded retry seconds and preserve browser cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleStartBindings)
+  for (const [status, retry, expectedRetry] of [[403, undefined, null], [409, undefined, null],
+    [429, '37', '37'], [429, '86401', null], [503, undefined, null]]) {
+    mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply(status, 'private', {
+      headers: { 'Set-Cookie': googleClear, 'X-Account-Verification': 'required', ...(retry ? { 'Retry-After': retry } : {}) },
+    })
+    const response = await mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get('Retry-After'), expectedRetry)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('X-Account-Verification'), null)
+    assert.equal(response.headers.get('Referrer-Policy'), 'no-referrer')
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('Workers Google start rejects unsafe URLs, extra metadata, account cookies and unsafe binding clearing', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleStartBindings)
+  for (const [status, body, selectedCookie] of [
+    [200, { ...googleStartMetadata, authorization_url: googleStartMetadata.authorization_url.replace('auth.example', 'foreign.example') }, googleSetCookie],
+    [200, { ...googleStartMetadata, access_token: 'private' }, googleSetCookie],
+    [200, googleStartMetadata, renewal], [200, googleStartMetadata, [googleSetCookie, guestSetCookie]],
+    [200, googleStartMetadata, googleSetCookie.replace('HttpOnly; ', '')],
+    [400, { detail: 'private' }, clearingCookie], [302, { detail: 'private' }, googleSetCookie],
+  ]) {
+    mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply(status, JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', 'Set-Cookie': selectedCookie, Location: 'https://private.example' },
+    })
+    const response = await mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+    assert.equal(response.status, 502)
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(response.headers.get('Location'), null)
+    assert.equal((await response.text()).includes('private'), false)
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers Google start abort never returns a late URL or OAuth cookie', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...googleStartBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply(200, JSON.stringify(googleStartMetadata), {
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': googleSetCookie },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  assert.equal((await response.text()).includes(googleIssuer), false)
+})
+
+const googleCallbackPath = '/api/v1/account/google/callback'
+const googleCallbackQuery = '?code=synthetic-code'
+const googleCallbackBindings = { ACCOUNT_GOOGLE_CALLBACK_PROXY_ENABLED: 'true' }
+function googleCallbackOptions(headers = {}) {
+  return { method: 'GET', redirect: 'manual', headers: { Cookie: `${googleCookie}=${googleToken}`, ...headers } }
+}
+
+test('Workers Google callback permits cross-site navigation and preserves separate validated account and OAuth cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleCallbackBindings)
+  let sent
+  mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply((request) => {
+    sent = new Headers(request.headers)
+    return { statusCode: 303, data: '', responseOptions: { headers: {
+      Location: site + '/#google-sign-in=success', 'Content-Length': '0', 'Set-Cookie': [renewal, googleClear], 'X-Private': 'private',
+    } } }
+  })
+  const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions({
+    Origin: 'https://accounts.google.com', 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate',
+    Cookie: `${guestCookie}=private; ${googleCookie}=${googleToken}; askm6_account=private`, Authorization: 'Bearer private',
+    'X-AskM6-Proxy-Secret': 'forged', 'X-AskM6-Client-IP': '203.0.113.99',
+  }))
+  assert.equal(response.status, 303, await response.clone().text())
+  assert.equal(response.headers.get('Location'), site + '/#google-sign-in=success')
+  const fields = response.headers.getSetCookie()
+  assert.equal(fields.length, 2)
+  assert.equal(fields[0], googleCanonicalClear)
+  assert.ok(fields[1].startsWith(`${name}=${token}; Expires=`))
+  assert.equal(sent.get('Cookie'), `${googleCookie}=${googleToken}`)
+  for (const header of ['Origin', 'Authorization', 'X-AskM6-Proxy-Secret', 'X-AskM6-Client-IP', 'CF-Connecting-IP']) assert.equal(sent.get(header), null)
+  assert.equal(response.headers.get('Cache-Control'), 'no-store')
+  assert.equal(response.headers.get('Referrer-Policy'), 'no-referrer')
+  assert.equal(response.headers.get('X-Private'), null)
+  assert.equal(await response.text(), '')
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers Google callback is independently gated and rejects preview hosts, malformed queries and missing binding before exchange', { timeout: 30_000 }, async (t) => {
+  const closed = await runtime(t, googleStartBindings)
+  const hidden = await closed.mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions())
+  assert.equal(hidden.status, 404)
+  await hidden.arrayBuffer()
+  const { mf } = await runtime(t, googleCallbackBindings)
+  for (const [url, init, status] of [
+    ['https://preview.example' + googleCallbackPath + googleCallbackQuery, googleCallbackOptions({ Host: 'site.example' }), 403],
+    [site + googleCallbackPath + '?code=a&code=b', googleCallbackOptions(), 303],
+    [site + googleCallbackPath + '?error=private', googleCallbackOptions(), 303],
+    [site + googleCallbackPath + '/extra?code=synthetic', googleCallbackOptions(), 303],
+    [site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions({ Cookie: `${guestCookie}=private` }), 303],
+  ]) {
+    const response = await mf.dispatchFetch(url, init)
+    assert.equal(response.status, status)
+    if (status === 303) assert.equal(response.headers.get('Location'), site + '/#google-sign-in=rejected')
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal((await response.text()).includes('private'), false)
+  }
+})
+
+test('Workers Google callback requires explicit sign-out and preserves existing account and guest cookies', { timeout: 30_000 }, async (t) => {
+  const { mf } = await runtime(t, googleCallbackBindings)
+  for (const value of ['', 'bad', token]) {
+    const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions({
+      Cookie: `${name}=${value}; ${googleCookie}=${googleToken}; ${guestCookie}=private`,
+    }))
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('Location'), site + '/#google-sign-in=sign-out-required')
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    await response.arrayBuffer()
+  }
+})
+
+test('Workers Google callback returns only fixed failure outcomes and backend-confirmed OAuth clearing', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleCallbackBindings)
+  for (const outcome of ['rejected', 'unavailable', 'sign-out-required']) {
+    mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(303, '', {
+      headers: { Location: `${site}/#google-sign-in=${outcome}`, 'Content-Length': '0', 'Set-Cookie': googleClear },
+    })
+    const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions())
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('Location'), `${site}/#google-sign-in=${outcome}`)
+    assert.deepEqual(response.headers.getSetCookie(), [googleCanonicalClear])
+    await response.arrayBuffer()
+    mock.assertNoPendingInterceptors()
+  }
+  mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(503, 'private', { headers: { 'Set-Cookie': googleClear } })
+  const disabled = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions())
+  assert.equal(disabled.status, 503)
+  assert.equal(disabled.headers.get('Set-Cookie'), googleCanonicalClear)
+  assert.equal(disabled.headers.get('Location'), null)
+  assert.equal((await disabled.text()).includes('private'), false)
+  mock.assertNoPendingInterceptors()
+})
+
+test('Workers Google callback rejects unsafe return URLs, wrong cookie sets and unexpected bodies/statuses', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, googleCallbackBindings)
+  for (const [status, location, cookies, body] of [
+    [303, 'https://private.example/#google-sign-in=success', [googleClear, renewal], ''],
+    [303, site + '/#google-sign-in=success', [googleClear], ''],
+    [303, site + '/#google-sign-in=rejected', [googleClear, renewal], ''],
+    [303, site + '/#google-sign-in=success', [googleClear, guestSetCookie], ''],
+    [303, site + '/#google-sign-in=success', [googleClear, renewal], 'private'],
+    [302, site + '/#google-sign-in=success', [googleClear, renewal], ''],
+  ]) {
+    mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(status, body, {
+      headers: { Location: location, 'Content-Length': String(new TextEncoder().encode(body).byteLength), 'Set-Cookie': cookies },
+    })
+    const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions())
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('Location'), site + '/#google-sign-in=unavailable')
+    assert.equal(response.headers.get('Set-Cookie'), null)
+    assert.equal(await response.text(), '')
+    mock.assertNoPendingInterceptors()
+  }
+})
+
+test('an explicit Workers Google callback abort never returns late account or clearing cookies', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...googleCallbackBindings, TEST_ABORT_MS: '30' })
+  mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(303, '', {
+    headers: { Location: site + '/#google-sign-in=success', 'Content-Length': '0', 'Set-Cookie': [googleClear, renewal] },
+  }).delay(300)
+  const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions())
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.get('Location'), site + '/#google-sign-in=unavailable')
+  assert.equal(response.headers.get('Set-Cookie'), null)
+  await response.arrayBuffer()
+})
+
+test('Workers completes a mocked Google start, callback, account-session check and sign-out cycle', { timeout: 30_000 }, async (t) => {
+  const { mf, mock } = await runtime(t, { ...googleStartBindings, ...googleCallbackBindings, ...signOutBindings })
+  mock.get(backend).intercept({ method: 'POST', path: googleStartPath }).reply(200, JSON.stringify(googleStartMetadata), {
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': googleSetCookie },
+  })
+  const start = await mf.dispatchFetch(site + googleStartPath, googleStartOptions())
+  assert.equal(start.status, 200, await start.clone().text())
+  const bindingCookie = start.headers.get('Set-Cookie').split(';', 1)[0]
+  await start.arrayBuffer()
+  mock.get(backend).intercept({ method: 'GET', path: googleCallbackPath + googleCallbackQuery }).reply(303, '', {
+    headers: { Location: site + '/#google-sign-in=success', 'Content-Length': '0', 'Set-Cookie': [googleClear, renewal] },
+  })
+  const callback = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, googleCallbackOptions({ Cookie: bindingCookie }))
+  assert.equal(callback.status, 303)
+  assert.equal(callback.headers.get('Location'), site + '/#google-sign-in=success')
+  const accountCookie = callback.headers.getSetCookie().find((cookie) => cookie.startsWith(name + '=')).split(';', 1)[0]
+  await callback.arrayBuffer()
+  mock.get(backend).intercept({ method: 'POST', path: endpoint }).reply(200, JSON.stringify(metadata), {
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': renewal },
+  })
+  const session = await mf.dispatchFetch(site + endpoint, options({ Cookie: accountCookie, 'CF-Connecting-IP': '198.51.100.20' }))
+  assert.equal(session.status, 200, await session.clone().text())
+  assert.deepEqual(await session.json(), metadata)
+  mock.get(backend).intercept({ method: 'POST', path: signOutPath }).reply(204, '', { headers: { 'Set-Cookie': clearingCookie } })
+  const signOut = await mf.dispatchFetch(site + signOutPath, options({ Cookie: accountCookie, 'CF-Connecting-IP': '198.51.100.20' }))
+  assert.equal(signOut.status, 204)
+  assert.equal(signOut.headers.get('Set-Cookie'), canonicalClear)
+  await signOut.arrayBuffer()
   mock.assertNoPendingInterceptors()
 })
 

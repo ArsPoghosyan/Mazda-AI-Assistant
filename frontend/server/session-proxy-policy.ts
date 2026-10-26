@@ -13,7 +13,7 @@ function reject(message: string, status: number, allow?: string): Response {
   return Response.json({ error: message }, { status, headers })
 }
 
-function httpsOrigin(value: string | undefined): string | null {
+export function httpsOrigin(value: string | undefined): string | null {
   if (!value || value.length > 2048) return null
   try {
     const url = new URL(value)
@@ -25,7 +25,7 @@ function httpsOrigin(value: string | undefined): string | null {
 export function planSessionProxyOrigin(
   request: Request,
   env: SessionProxyEnvironment,
-  endpoint: '/api/v1/account/session' | '/api/v1/guest/session' | '/api/v1/account/sign-in' | '/api/v1/account/sign-out',
+  endpoint: '/api/v1/account/session' | '/api/v1/guest/session' | '/api/v1/account/sign-in' | '/api/v1/account/sign-out' | '/api/v1/account/sign-up' | '/api/v1/account/confirm-email' | '/api/v1/account/password-recovery' | '/api/v1/account/password-reset' | '/api/v1/account/google/start',
   enabled: string | undefined,
 ): SessionProxyPlan | Response {
   const incoming = new URL(request.url)

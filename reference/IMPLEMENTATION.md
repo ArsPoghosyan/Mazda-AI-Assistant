@@ -35,6 +35,12 @@ not a fresh complete-suite run. The README provides the compact entry point.
 - [Trusted proxy client addresses](#trusted-proxy-client-addresses)
 - [Guest-session Pages proxy](#guest-session-pages-proxy)
 - [Email sign-in Pages proxy](#email-sign-in-pages-proxy)
+- [Sign-up Pages proxy](#sign-up-pages-proxy)
+- [Email-confirmation Pages proxy](#email-confirmation-pages-proxy)
+- [Password-recovery request Pages proxy](#password-recovery-request-pages-proxy)
+- [Password-reset Pages proxy](#password-reset-pages-proxy)
+- [Google-start Pages proxy](#google-start-pages-proxy)
+- [Google-callback Pages proxy](#google-callback-pages-proxy)
 - [Account sign-out Pages proxy](#account-sign-out-pages-proxy)
 - [Account-session proxy request policy](#account-session-proxy-request-policy)
 - [Checks](#checks)
@@ -352,7 +358,8 @@ verification, and an uncertain commit does not guarantee that no row was created
 The endpoint defaults to disabled through `GUEST_SESSION_API_ENABLED=false`.
 Keep public guest access disabled until abuse controls and production integration
 are ready.
-The Cloudflare Pages proxy does not forward guest creation or its cookies.
+Cloudflare Pages supports separately gated guest creation/refresh and validated
+guest cookies; public enablement and hosted validation remain pending.
 The frontend guest action is
 enabled only in Vite development and remains disabled in normal production builds.
 
@@ -1097,8 +1104,8 @@ defaults to `false` and is independent of `ACCOUNT_SESSION_API_ENABLED`. Keep
 public sign-in disabled until Supabase CAPTCHA enforcement, additional abuse controls,
 and deployment checks are ready.
 The development frontend calls this route through Vite's same-origin proxy. The
-Pages proxy does not forward password sign-in. Its separate account-session
-check proxy is default-off, and production frontend account controls stay disabled.
+Pages password sign-in and account-session checks use independent default-off
+proxies; production frontend account controls stay disabled.
 
 ```dotenv
 ACCOUNT_SIGN_IN_API_ENABLED=false
@@ -2369,8 +2376,9 @@ destination validation, cancellation, retries, StrictMode and forged return hint
 
 The standard Uvicorn access-log filter removes callback query values, including
 rejected callback subpaths. Hosting, reverse-proxy, custom access/error logging
-need separate review. Pages now has separately gated account-session forwarding,
-but Google start/callback and OAuth cookie/redirect forwarding remain unimplemented.
+need separate review. Pages has separately gated account-session and Google
+start/callback forwarding, including validated OAuth/account cookies and fixed
+return destinations. Hosted flow and logging validation remain outstanding.
 
 Before public Google enablement, verify cleanup scheduling in the target
 environment, complete broader provider/linking checks, upstream provider-method assurance,
@@ -2465,7 +2473,7 @@ Setup references:
 `ACCOUNT_SIGN_OUT_API_ENABLED` defaults to `false` and is independent of the
 sign-in and session-check flags. Keep it disabled until endpoint testing and
 deployment checks are complete. The development frontend calls the route through
-Vite's local API proxy; the Cloudflare Pages proxy does not forward it yet.
+Vite's local API proxy; Cloudflare Pages forwarding has its own default-off gate.
 
 ```dotenv
 ACCOUNT_SIGN_OUT_API_ENABLED=false
@@ -2519,7 +2527,7 @@ uncertain network failures during commit are not simulated.
 it does not sign in or create a session. `ACCOUNT_SESSION_API_ENABLED` defaults
 to `false`. Keep it disabled until abuse controls and deployment checks are ready.
 The existing Bearer-only `GET /api/v1/account/me` contract is unchanged, and the
-Cloudflare Pages proxy does not forward the new endpoint yet.
+Cloudflare Pages account-session forwarding has its own default-off gate.
 
 The endpoint requires exactly one Origin matching `CSRF_TRUSTED_ORIGINS` before
 processing credentials. Missing, null, duplicate, or untrusted origins return 403
@@ -2859,6 +2867,345 @@ limits passed 139 tests. The shared metadata validator also rejects UUID strings
 with trailing newlines. These checks use synthetic credentials/provider mocks;
 they do not establish deployed end-to-end behavior.
 
+## Sign-up Pages proxy
+
+Exact `POST /api/v1/account/sign-up` has an independent server-only
+`ACCOUNT_SIGN_UP_PROXY_ENABLED=true` gate; unset/other values return 404.
+Backend `ACCOUNT_SIGN_UP_API_ENABLED` remains separate. Canonical HTTPS origins,
+matching request URL/Origin, same-origin Fetch Metadata when present and explicit
+trusted-IP mode with a matching private key/verified ingress IP are required.
+No public controls or live settings are enabled by this implementation.
+
+Sign-up and sign-in share `account-credential-proxy-request.ts`: 16 KiB actual
+request limit, JSON only, required email/password bounded at 320/1,024 Unicode
+characters, exact credential preservation and no unknown fields. Sign-up requires
+a 1–2,048-character printable non-space ASCII CAPTCHA proof; sign-in retains its
+optional/null proof contract so the backend can require verification. No email
+normalization, password policy or client-supplied identity/redirect is added.
+Malformed input fails before backend accounting; forwarded requests remain subject
+to backend IP accounting and Supabase verification. Decoded chunked input is
+bounded and rebuilt without forwarding incoming framing headers.
+
+The proxy sends only fixed JSON headers, the configured Origin, authenticated
+visitor-IP assertion and validated credentials. It never forwards browser cookies
+or Authorization. An existing account/guest cookie is preserved; registration
+does not sign in, switch accounts, transfer guest data or create a local session.
+
+Acceptance requires 202, bounded UTF-8 JSON within 4 KiB, exactly `status: accepted`
+and the backend's generic message asking the user to check email for a verification
+code. A success carrying any visible Set-Cookie or identity/provider fields fails
+with 502. The returned acceptance is rebuilt from fixed values, and never confirms
+whether the email already has an account. All responses are no-store and contain
+no Set-Cookie. Backend 400/413/415/503 become fixed safe messages; exact 403
+`X-Account-Verification: required` and bounded 429 Retry-After seconds (1–86,400)
+are preserved. Other statuses, redirects, transport failures and invalid success
+contracts become 502; provider details and unrelated headers are dropped.
+
+A 20-second total deadline includes request/fetch/response consumption, with
+cancellation and stream/timer/listener cleanup. There are no retries or redirect
+following. A failed/cancelled request cannot return late acceptance, but cannot
+undo a registration/email already processed by the provider. Retrying is manual
+with a fresh proof. Tests use synthetic credentials and mocked providers, including
+native Workers streams and explicit post-ingress missing/empty-IP fixtures.
+Email-confirmation forwarding has its own gate below; hosted deployment checks
+remain pending.
+
+Validation: the full Linux Node 24 frontend pipeline passed 942 API/proxy tests,
+36 workerd tests and 356 UI tests, plus lint, strict TypeScript and production
+build. Windows focused sign-up/sign-in tests passed 231 cases and the six new
+Workers cases passed. Existing backend sign-up request/response/provider/route/
+configuration and PostgreSQL limiter contracts passed 224 tests. Tests use mocks
+and synthetic credentials; no live registration/email was sent. No dependency,
+schema, private configuration or live feature-flag changes were introduced.
+
+## Email-confirmation Pages proxy
+
+Exact `POST /api/v1/account/confirm-email` uses the independent server-only
+`ACCOUNT_EMAIL_CONFIRMATION_PROXY_ENABLED=true` gate; unset/other values return
+404. Backend `ACCOUNT_EMAIL_CONFIRMATION_API_ENABLED` remains separate. The
+shared canonical HTTPS origins, matching request URL/Origin and same-origin
+Fetch Metadata rules apply, with mandatory trusted-IP mode, a valid shared
+secret and verified ingress address. Public authentication remains disabled.
+
+`account-email-confirmation-proxy.ts` accepts only JSON with email (1–320 Unicode
+characters) and code (6–10 ASCII digits), bounded to 4 KiB actual UTF-8 input.
+Email case/whitespace/Unicode and leading code zeros are preserved; the backend
+alone verifies the code. Unknown fields, malformed UTF-8, queries, fragments,
+compression, ambiguous framing and mismatched declared lengths are rejected.
+Decoded chunked input is bounded and rebuilt without forwarding browser framing.
+
+The upstream request contains only validated email/code, fixed JSON headers,
+configured Origin and the authenticated visitor-IP assertion. Browser Cookie,
+Authorization, client-supplied identities and unrelated forwarding headers are
+omitted. This confirms email without creating a local login, replacing an
+account, transferring guest data or changing any browser cookies. Sign-in remains
+a separate explicit action.
+
+Success requires HTTP 200 and at most 4 KiB of valid UTF-8 JSON containing exactly
+`status: confirmed` and `message: Email confirmed. You can now sign in.` Any
+visible Set-Cookie, extra identity/provider fields or changed response contract
+fails with 502. Only the fixed success body is returned. Backend 400/403/413/415/
+503 become safe fixed messages; 429 retains only bounded Retry-After seconds
+(1–86,400). CAPTCHA headers are not part of this endpoint. Other statuses,
+redirects, network errors and malformed success become 502. All replies are
+no-store, without cookies, provider details or unrelated headers.
+
+A 20-second total deadline includes body reading, fetch and response consumption.
+Client cancellation and deadline expiry abort upstream work, cancel streams and
+clean up timers/listeners; late success cannot reach the browser. There are no
+automatic retries or redirect following. Cancellation cannot undo confirmation
+already processed by Supabase; a lost reply does not establish that the code
+remains unused. Tests use synthetic codes and mocked providers; no live email,
+account changes, deployment or private configuration changes are made.
+
+Validation: 104 focused Node proxy tests and six native Workers cases passed.
+The complete Linux Node 24 frontend run passed 1,046 API/proxy tests, 42 Workers
+tests and 356 UI tests, with lint, strict TypeScript and production build passing.
+Existing backend confirmation adapter/request/response/configuration/route and
+local PostgreSQL limiter contracts passed 241 tests. Private-file, configured-secret,
+documentation-link and whitespace audits passed. These results validate mocked
+transport contracts; hosted authentication still requires deployment checks.
+
+## Password-recovery request Pages proxy
+
+Exact `POST /api/v1/account/password-recovery` is independently gated by the
+server-only `ACCOUNT_PASSWORD_RECOVERY_PROXY_ENABLED=true`; unset/other values
+return 404. Backend `ACCOUNT_PASSWORD_RECOVERY_API_ENABLED` remains separate.
+Shared canonical HTTPS origins, matching request URL/Origin, same-origin Fetch
+Metadata when present, explicit trusted-IP mode, a valid private shared key and
+verified ingress address are required. No public access or live setting is enabled.
+
+`account-password-recovery-proxy.ts` accepts only email and CAPTCHA proof, bounded
+to 16 KiB actual UTF-8 JSON. Email is 1–320 Unicode characters; the required proof
+is 1–2,048 printable non-space ASCII characters. Case, whitespace and Unicode in
+the email are preserved; only the backend/provider verifies credentials. Unknown
+fields (including passwords, reset codes, identities and redirects), malformed
+UTF-8/JSON, query/fragment, compression, ambiguous framing and mismatched declared
+lengths fail before upstream work. Decoded chunked input is bounded and rebuilt.
+
+The upstream request contains only validated email/proof, fixed JSON headers,
+configured Origin and an authenticated visitor-IP assertion. Browser cookies,
+Authorization and unrelated/forged forwarding headers are omitted. No response
+sets or clears a browser cookie; requesting recovery does not sign in, change a
+password, invalidate application sessions or transfer guest history.
+
+Acceptance requires 202 with at most 4 KiB of valid UTF-8 JSON containing exactly
+`status: accepted` and the fixed message asking the user to check email for the
+next steps if recovery can proceed. This confirms neither account existence nor
+email delivery. Success with any visible Set-Cookie or identity/provider field
+fails with 502. Backend 400/413/415/503 become controlled messages; exact 403
+`X-Account-Verification: required` and bounded 429 Retry-After seconds (1–86,400)
+are preserved. Other statuses, redirects, transport errors and malformed success
+become 502. All replies are no-store and omit private details/unrelated headers.
+
+A 20-second total deadline covers request input, fetch and response reading.
+Cancellation aborts upstream work, cleans up streams/timers/listeners and prevents
+late acceptance; it cannot recall an email already sent. Requests are never
+automatically retried and redirects are not followed. Any retry is a separate
+explicit action with a fresh proof. Tests use synthetic credentials and mocked
+providers. Password-reset forwarding has its own gate below; hosted deployment
+validation remains pending. These tests send no emails and change no live accounts.
+
+Validation: 101 focused proxy tests and six native Workers cases passed. The
+full Linux Node 24 frontend pipeline passed 1,147 API/proxy tests, 48 Workers tests
+and 356 UI tests, plus lint, strict TypeScript and production build. Existing
+backend recovery adapter/request/response/configuration/route and guarded local
+PostgreSQL limiter contracts passed 234 tests. Diff/privacy and documentation-link
+audits passed. This validates mocked transport contracts, not hosted email delivery.
+
+## Password-reset Pages proxy
+
+Exact `POST /api/v1/account/password-reset` uses the independent server-only
+`ACCOUNT_PASSWORD_RESET_PROXY_ENABLED=true` gate; unset/other values return 404.
+Backend `ACCOUNT_PASSWORD_RESET_API_ENABLED` remains separate. Shared canonical
+HTTPS origins, matching request URL/Origin, same-origin Fetch Metadata when
+present and mandatory trusted-IP mode/private shared key/verified ingress apply.
+Public authentication remains disabled.
+
+`account-password-reset-proxy.ts` accepts only email (1–320 Unicode characters),
+code (6–10 ASCII digits) and new_password (1–1,024 Unicode characters), within
+16 KiB actual UTF-8 JSON. It preserves password characters, email case/whitespace
+and code zeros. Backend/provider verification owns code validity and password
+strength; no password normalization or extra CAPTCHA is introduced. Invalid
+UTF-8/JSON, extra fields, queries/fragments, compression, ambiguous framing and
+mismatched lengths fail before upstream work. Decoded chunked input is bounded
+and rebuilt without forwarding incoming framing headers.
+
+Only validated email/code/new password, fixed JSON headers, configured Origin and
+the authenticated visitor-IP assertion reach FastAPI. Browser Cookie,
+Authorization and client-supplied identities are omitted. Completion requires 200
+with at most 4 KiB of valid UTF-8 JSON containing exactly `status: completed` and
+`message: Password reset completed. Sign in with your new password.` Extra
+identity/provider fields, changed messages or any visible Set-Cookie fail with
+502. The backend returns completion only after recovery verification, password
+update, temporary provider-session cleanup and committed account-session
+invalidation; the proxy does not perform those operations independently.
+
+Reset does not create a login or clear/change browser cookies. A later session
+check may clear an invalidated account cookie only after backend confirmation;
+the reset email can belong to a different account than the browser's current
+cookie. Guest/OAuth cookies remain untouched and no history transfer occurs.
+Backend 400/403/413/415/503 become safe fixed messages. 429 preserves only bounded
+Retry-After seconds (1–86,400), without CAPTCHA signals. Unexpected statuses,
+redirects, network failures and malformed success become 502. All replies are
+no-store and omit private credentials/provider details and unrelated headers.
+
+A 20-second total deadline covers request reading, fetch and response consumption.
+Cancellation aborts upstream work, cleans up streams/timers/listeners and prevents
+late success. There are no automatic retries or redirect following. A failure can
+occur after the provider has changed the password; cancellation/rollback cannot
+undo that change or establish whether a recovery code remains usable. Tests use
+synthetic credentials and mocked providers. Google start has its own proxy below;
+callback forwarding is independently gated below; hosted flow validation remains pending.
+No live account is changed by tests.
+
+Validation: 110 focused proxy cases and seven native Workers scenarios passed,
+including mocked recovery/reset followed by backend-confirmed session rejection
+and cookie clearing. The full Linux Node 24 frontend run passed 1,257 API/proxy,
+55 Workers and 356 UI tests; lint, strict TypeScript and production build passed.
+Existing reset/verification/password-update/provider-cleanup/session-invalidation
+contracts and guarded PostgreSQL integration checks passed 562 tests. Diff/privacy
+and documentation audits passed. These mocked transport and local database
+checks do not establish hosted password-reset behavior.
+
+## Google-start Pages proxy
+
+Exact `POST /api/v1/account/google/start` has the independent server-only
+`ACCOUNT_GOOGLE_START_PROXY_ENABLED=true` gate; unset/other values return 404.
+Backend `ACCOUNT_GOOGLE_OAUTH_API_ENABLED` remains separate. Pages additionally
+requires `SUPABASE_AUTH_ISSUER` as a canonical HTTPS URL ending exactly in
+`/auth/v1`, without credentials, trailing slash, query or fragment. This server
+binding is separate from the development UI's `VITE_SUPABASE_AUTH_ISSUER`; no
+provider key belongs in the browser bundle. Existing HTTPS public/backend origin,
+actual URL/Origin, same-origin Fetch Metadata and mandatory trusted-IP assertion
+rules apply. No live flag or public control is enabled by this implementation.
+
+`account-google-start-proxy.ts` accepts only an empty POST without query/fragment,
+compression, nonzero/ambiguous Content-Length or Transfer-Encoding. A declared-zero
+stream must reach actual EOF before forwarding. Presence of any account cookie,
+including stale/empty/malformed values, requires explicit sign-out and returns
+409 before starting/replacing an OAuth attempt. Ambiguous account cookies and
+cookie headers above 8 KiB are rejected.
+
+Only `__Host-askm6_oauth` entries from the browser reach FastAPI, alongside fixed
+Accept/Origin headers and an authenticated visitor-IP assertion. Authorization,
+guest/account/development cookies and unrelated forwarding headers are omitted.
+Duplicate/malformed OAuth bindings are preserved for the backend's strict rejection
+and confirmed clearing rather than silently omitted as a new attempt. Filtering
+preserves value whitespace before cookie separators despite HTTP field trimming.
+
+HTTP 200 requires at most 4 KiB of uncompressed UTF-8 JSON with exactly
+`authorization_url` and a future valid UTC `expires_at`. The destination must
+match the configured issuer's `/auth/v1/authorize`, with four unique parameters:
+`provider=google`, `redirect_to=<AUTH_PUBLIC_ORIGIN>/api/v1/account/google/callback`,
+a 43-character base64url code challenge and `code_challenge_method=s256`.
+Credentials, fragments, alternate providers/callbacks, duplicate/extra parameters
+and identity/provider-token fields fail closed. The validated URL is rebuilt
+from fixed parameters; the proxy neither navigates nor follows redirects.
+
+Success must also carry exactly one secure, HttpOnly, host-only, root-path,
+SameSite=Lax OAuth cookie with a valid opaque token, no Max-Age and an expiry
+matching the metadata to the second. Only that normalized cookie is returned,
+after the backend's pending-attempt transaction has committed. It may replace the
+previous browser binding; it does not create an authenticated account session.
+
+Backend 400 may clear only a validated OAuth cookie with Max-Age=0. Invalid or
+unrelated clearing cookies become 502. Other 403/409/429/503 replies preserve all
+browser cookies and use safe fixed messages; only 429 retains bounded Retry-After
+seconds (1–86,400). Unexpected statuses, redirects, transport errors and malformed
+success become 502. Replies are no-store/no-referrer, without private bodies,
+Location, echoed assertions or unrelated headers. The 20-second total deadline
+covers input EOF, fetch and metadata consumption; cancellation cleans up streams,
+timers/listeners and cannot return a late URL/cookie. There are no retries. A
+failed reply cannot undo an attempt creation/replacement already committed.
+
+Callback forwarding has its own gate below, and public Google controls remain
+disabled. Enabling this start proxy alone does not establish a hosted login flow;
+the callback gate, issuer/callback alignment and ingress/deployment checks must
+be completed first. Tests use synthetic PKCE/binding values and mocked providers;
+no Google/Supabase requests or account changes occur during these checks.
+
+Validation: 124 focused Node proxy tests and seven native Workers scenarios
+passed, including malformed/duplicate binding preservation and backend-confirmed
+clearing. The full Linux Node 24 pipeline passed 1,381 API/proxy, 62 Workers and
+356 UI tests; lint, strict TypeScript and production build passed. Existing
+Google-start, authorization URL, OAuth cookie/material/transaction and guarded
+PostgreSQL attempt/rate-limit contracts passed 219 tests. Diff/private-file,
+configured-secret and documentation-link audits passed. These checks validate
+mocked proxy transport and local persistence, not a hosted Google login flow.
+
+## Google-callback Pages proxy
+
+`GET /api/v1/account/google/callback` uses the independent server-only
+`ACCOUNT_GOOGLE_CALLBACK_PROXY_ENABLED=true` gate; unset/other values return 404.
+Backend `ACCOUNT_GOOGLE_OAUTH_API_ENABLED` remains separate. Canonical distinct
+HTTPS API/public origins are required, and the actual request URL must match the
+public origin. Forwarded Host cannot authorize a preview deployment. A provider
+callback is a cross-site navigation, so it does not require a trusted Origin or
+visitor-IP assertion; FastAPI verifies the browser binding, PKCE and provider
+identity. Origin/Authorization/proxy-secret/IP headers are not forwarded.
+
+`account-google-callback-proxy.ts` accepts one code parameter within 4 KiB of
+printable ASCII query, with strict percent decoding and a 1–1,024-character
+printable ASCII decoded code. Duplicate/unknown fields, malformed encodings,
+fragments, callback suffix paths, body/framing/compression errors and missing
+binding are rejected before exchange. The code is rebuilt as a single encoded
+parameter for the fixed backend callback, never used as a redirect destination.
+Only the bounded `__Host-askm6_oauth` cookie entries reach FastAPI; malformed or
+duplicate bindings retain their evidence for backend rejection. Shared OAuth
+cookie selection/validation now lives in `account-oauth-proxy-cookies.ts`.
+
+Any account-cookie presence returns fixed `sign-out-required` before exchange;
+ambiguous cookie headers return `rejected`. Local rejections preserve all cookies,
+including the pending binding, which a subsequent explicit start can replace or
+have the backend clear. They return only a fixed home-page outcome fragment,
+without echoing callback credentials. Invalid deployment configuration, host or
+method returns controlled no-store errors; other methods receive Allow: GET.
+
+Backend completion requires an empty 303 to exactly
+`<AUTH_PUBLIC_ORIGIN>/#google-sign-in=success|rejected|unavailable|sign-out-required`.
+No alternate host/path/query/fragment spelling, redirect chaining or body is
+accepted. Success requires exactly two separate Set-Cookie fields: validated
+OAuth deletion and one unexpired secure HttpOnly root-path SameSite=Lax host-only
+account cookie, without Max-Age. Other outcomes require exactly OAuth deletion,
+with no account/guest/unrelated cookie. Duplicate or malformed fields reject the
+whole response without changing browser cookies. Each cookie is validated alone
+and appended separately so Expires commas cannot collapse the success pair.
+
+A disabled backend's 503 may clear only a validated OAuth cookie and returns a
+controlled JSON error; its body is discarded. Network failure, unexpected replies
+and cancellation return the fixed `unavailable` fragment without cookie changes.
+The proxy follows no redirects and performs no automatic retry/code replay. Its
+20-second deadline covers input EOF, fetch and redirect-body EOF; streams,
+timers/listeners are cleaned up and late cookies are discarded. Failure cannot
+undo provider operations or a callback transaction already committed. Every
+reply is no-store/no-referrer, without raw codes, provider bodies or echoed headers.
+
+Native runtime tests use an explicit manual-redirect outbound mock adapter:
+Miniflare's default fetchMock Node transport follows redirects even when workerd
+requests manual handling. The adapter exposes the actual 303 and separate cookie
+fields, with network access disabled. Empty redirect fixtures match FastAPI's
+Content-Length: 0 behavior. A mocked start/callback/session-check/sign-out sequence
+exercises the complete proxy boundary; it does not establish live hosted login.
+Public controls remain disabled and deployment/ingress/logging checks are pending.
+
+Validation: focused callback/start Node tests passed 220 cases (96 callback,
+124 start), and seven native callback scenarios passed. The complete Linux Node
+24 pipeline passed 1,477 API/proxy, 69 Workers and 356 UI tests, plus lint, strict
+TypeScript and production build. Existing Google/OAuth callback, exchange,
+single-use attempts, cleanup, logging and guarded PostgreSQL contracts passed
+746 tests. Diff/private-file, configured-secret and documentation audits passed.
+No live provider call, account change, private setting or deployment was made.
+
+Combined checkpoint validation also passed all 4,807 backend tests: 3,751 offline
+cases and 1,056 guarded local PostgreSQL integration cases. Ruff lint/format,
+strict typing of 218 application/test sources and 12 migration sources passed.
+All 108 public frontend files still match the Linux snapshot that passed 1,902
+tests, lint, strict TypeScript and production build. Full diff review corrected
+stale deployment descriptions; private configuration remains ignored and the
+public authentication gates remain disabled by default. Hosted end-to-end and
+logging/ingress validation are still required before public enablement.
+
 ## Account sign-out Pages proxy
 
 Exact `POST /api/v1/account/sign-out` uses an independent server-only
@@ -2947,10 +3294,9 @@ credentials or client-supplied destinations. The policy makes no network calls,
 does not authenticate sessions or set cookies, and issues no CORS permissions.
 
 The forwarding helper below implements cookie filtering and bounded transport.
-The Pages handler dispatches only the exact account-session path to it. Guest
-sessions, email sign-in and sign-out use separate gates above; other account/Google paths
-still return 404. Those gates remain closed when only account-session forwarding
-is enabled.
+The Pages handler dispatches only the exact account-session path to this helper.
+All other auth routes use independent gates above and remain closed when only
+account-session forwarding is enabled.
 Health retains its original method/origin handling and remains independent of
 auth configuration. Live target-runtime and ingress verification remain separate
 work before public authentication can be enabled.
@@ -3028,7 +3374,7 @@ suites were not rerun for this server helper.
 ### Gated Pages handler integration
 
 `frontend/functions/api/[[path]].ts` dispatches the exact account-session path to
-its forwarding helper; guest creation, email sign-in and sign-out have independent gates.
+its forwarding helper; all other auth routes have independent gates.
 It does not reimplement cookie, origin or transport rules.
 The feature flag defaults off; an unset/false flag returns 404 without network
 access or cookie changes. To exercise it in an isolated test environment, both

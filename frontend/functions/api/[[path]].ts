@@ -3,10 +3,16 @@ import type { AccountSessionProxyEnvironment } from '../../server/account-sessio
 import { forwardGuestSession, type GuestSessionProxyEnvironment } from '../../server/guest-session-proxy.ts'
 import { forwardAccountSignIn, type AccountSignInProxyEnvironment } from '../../server/account-sign-in-proxy.ts'
 import { forwardAccountSignOut, type AccountSignOutProxyEnvironment } from '../../server/account-sign-out-proxy.ts'
+import { forwardAccountSignUp, type AccountSignUpProxyEnvironment } from '../../server/account-sign-up-proxy.ts'
+import { forwardAccountEmailConfirmation, type AccountEmailConfirmationProxyEnvironment } from '../../server/account-email-confirmation-proxy.ts'
+import { forwardAccountPasswordRecovery, type AccountPasswordRecoveryProxyEnvironment } from '../../server/account-password-recovery-proxy.ts'
+import { forwardAccountPasswordReset, type AccountPasswordResetProxyEnvironment } from '../../server/account-password-reset-proxy.ts'
+import { forwardAccountGoogleStart, type AccountGoogleStartProxyEnvironment } from '../../server/account-google-start-proxy.ts'
+import { forwardAccountGoogleCallback, type AccountGoogleCallbackProxyEnvironment } from '../../server/account-google-callback-proxy.ts'
 
 type ProxyContext = {
   request: Request
-  env: AccountSessionProxyEnvironment & GuestSessionProxyEnvironment & AccountSignInProxyEnvironment & AccountSignOutProxyEnvironment
+  env: AccountSessionProxyEnvironment & GuestSessionProxyEnvironment & AccountSignInProxyEnvironment & AccountSignOutProxyEnvironment & AccountSignUpProxyEnvironment & AccountEmailConfirmationProxyEnvironment & AccountPasswordRecoveryProxyEnvironment & AccountPasswordResetProxyEnvironment & AccountGoogleStartProxyEnvironment & AccountGoogleCallbackProxyEnvironment
 }
 
 function errorResponse(message: string, status: number): Response {
@@ -33,6 +39,24 @@ export async function onRequest({
   }
   if (pathname === '/api/v1/account/sign-out') {
     return forwardAccountSignOut(request, env)
+  }
+  if (pathname === '/api/v1/account/sign-up') {
+    return forwardAccountSignUp(request, env)
+  }
+  if (pathname === '/api/v1/account/confirm-email') {
+    return forwardAccountEmailConfirmation(request, env)
+  }
+  if (pathname === '/api/v1/account/password-recovery') {
+    return forwardAccountPasswordRecovery(request, env)
+  }
+  if (pathname === '/api/v1/account/password-reset') {
+    return forwardAccountPasswordReset(request, env)
+  }
+  if (pathname === '/api/v1/account/google/start') {
+    return forwardAccountGoogleStart(request, env)
+  }
+  if (pathname === '/api/v1/account/google/callback' || pathname.startsWith('/api/v1/account/google/callback/')) {
+    return forwardAccountGoogleCallback(request, env)
   }
 
   if (pathname !== '/api/v1/health') {

@@ -348,7 +348,18 @@ with bounded JSON, secure guest cookies, verification and retry signals.
 Email sign-in has a [separate default-off proxy](reference/IMPLEMENTATION.md#email-sign-in-pages-proxy)
 that preserves credentials and requires explicit sign-out before another login.
 [Sign-out forwarding](reference/IMPLEMENTATION.md#account-sign-out-pages-proxy) clears only a backend-confirmed account cookie.
-Sign-up, confirmation, recovery/reset and Google redirects are not forwarded.
+[Sign-up forwarding](reference/IMPLEMENTATION.md#sign-up-pages-proxy) has its own default-off gate,
+returns generic email-verification instructions and preserves existing cookies.
+[Email-confirmation forwarding](reference/IMPLEMENTATION.md#email-confirmation-pages-proxy) is independently gated
+and confirms the code without signing in or changing cookies.
+[Recovery-request forwarding](reference/IMPLEMENTATION.md#password-recovery-request-pages-proxy) has its own default-off gate,
+requires CAPTCHA and returns neutral acceptance without changing cookies.
+[Password-reset forwarding](reference/IMPLEMENTATION.md#password-reset-pages-proxy) is independently gated,
+returns only completion metadata and preserves the backend's separate sign-in requirement.
+[Google-start forwarding](reference/IMPLEMENTATION.md#google-start-pages-proxy) has its own default-off gate,
+validating the authorization URL and short-lived OAuth binding cookie.
+[Google-callback forwarding](reference/IMPLEMENTATION.md#google-callback-pages-proxy) is independently gated,
+with fixed return destinations and strict OAuth/account cookie validation.
 Normal production builds still disable development guest/account controls;
 public authentication is not enabled or deployment-validated. A frontend build
 does not provide an API server.
