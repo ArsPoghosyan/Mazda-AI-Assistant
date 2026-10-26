@@ -1271,6 +1271,20 @@ retention choices. The development-stage notice does not establish legal
 clearance or manual-process readiness for activation of hosted authentication;
 those release checks remain separate.
 
+A guarded local PostgreSQL rehearsal exercises manual provider-first deletion
+steps using synthetic records and mocked provider outcomes. It checks committed
+removal of one profile and all its sessions (including expired sessions), exact
+preservation of another account plus guest/OAuth/limiter records, provider failure,
+local rollback and deliberate local repair, absent-profile no-op, and read-back
+of simulated unknown commit outcomes. Each case cleans only its random fixture
+IDs and verifies their absence after cleanup. A separate counterexample calls
+the existing session-creation helper with a mocked previously verified identity:
+it can recreate a profile inside a later transaction unless auth writes have
+been paused and drained. That hypothetical late write is rolled back. This
+supports the manual maintenance requirement; no new deletion endpoint, per-account
+deletion lock or provider administration service is implemented. Mocked provider
+and acknowledgement outcomes are not live-provider or network-fault tests.
+
 The frontend sign-out API helper sends a cookie-authenticated POST without a body
 and accepts only HTTP 204 as confirmed success. It preserves cancellation, masks
 server/transport details, and does not retry automatically; its tests use mocked

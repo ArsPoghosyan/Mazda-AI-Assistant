@@ -50,6 +50,10 @@ account forms. It describes development-stage data flows and approved retention
 choices. Further privacy and operational checks remain before public
 authentication is enabled.
 
+Guarded local database tests rehearse scoped manual account deletion and partial
+failures with a mocked provider. They do not add an account-deletion endpoint or
+establish live provider deletion behavior.
+
 ## Stack and layout
 
 | Layer | Technology / location |
