@@ -8,6 +8,7 @@ import {
 import { useAccountSignUp } from '../hooks/useAccountSignUp'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import GoogleAccessOption from './GoogleAccessOption'
+import PrivacyNoticeLink from './PrivacyNoticeLink'
 import TurnstileChallenge from './TurnstileChallenge'
 
 type AccountSignUpFormProps = {
@@ -149,6 +150,8 @@ export default function AccountSignUpForm({
           ? 'Choose Google or use your email and a password. Email registration requires confirmation.'
           : 'Enter your email and choose a password. Confirm your email before signing in.'}
       </p>
+
+      <p className="mt-2 text-sm text-muted"><PrivacyNoticeLink newTab /></p>
 
       {google.enabled && (
         <GoogleAccessOption

@@ -1258,6 +1258,19 @@ Account-session metadata is held in React memory; the opaque session credential
 remains in an HttpOnly cookie and provider tokens stay on the backend. Session
 restoration and sign-in remain disabled outside development.
 
+The frontend entry point renders a standalone Privacy Notice for `/privacy` and
+`/privacy/` (including query/fragment navigation). It does not mount the App or
+start health/authentication requests on that page. Other paths retain the existing
+landing behavior; no routing dependency was added. The notice uses the existing
+visual tokens, a skip link, semantic headings, a return-home link and the approved
+public contact address. Footer navigation stays in the same tab; sign-in and
+registration links explicitly open a new tab with `noopener noreferrer` to keep
+in-progress credentials in the original form. They neither submit the form nor
+record consent. The copy describes current development status and approved
+retention choices. The development-stage notice does not establish legal
+clearance or manual-process readiness for activation of hosted authentication;
+those release checks remain separate.
+
 The frontend sign-out API helper sends a cookie-authenticated POST without a body
 and accepts only HTTP 204 as confirmed success. It preserves cancellation, masks
 server/transport details, and does not retry automatically; its tests use mocked

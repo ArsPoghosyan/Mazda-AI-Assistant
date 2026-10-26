@@ -9,6 +9,7 @@ import type { AccountSessionResponse } from '../api/account'
 import { useAccountSignIn } from '../hooks/useAccountSignIn'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import GoogleAccessOption from './GoogleAccessOption'
+import PrivacyNoticeLink from './PrivacyNoticeLink'
 import TurnstileChallenge from './TurnstileChallenge'
 
 type AccountSignInFormProps = {
@@ -155,6 +156,8 @@ export default function AccountSignInForm({
           ? 'Choose Google or use your email and password.'
           : 'Use your email and password to sign in.'}
       </p>
+
+      <p className="mt-2 text-sm text-muted"><PrivacyNoticeLink newTab /></p>
 
       {google.enabled && (
         <GoogleAccessOption

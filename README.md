@@ -45,6 +45,11 @@ session restoration starts, allowing an idle backend time to wake. Startup shows
 a waiting message and offers manual retry on failure; it does not send periodic
 keepalive requests. Public authentication remains disabled.
 
+A Privacy Notice page is available at `/privacy`, with links from the footer and
+account forms. It describes development-stage data flows and approved retention
+choices. Further privacy and operational checks remain before public
+authentication is enabled.
+
 ## Stack and layout
 
 | Layer | Technology / location |
