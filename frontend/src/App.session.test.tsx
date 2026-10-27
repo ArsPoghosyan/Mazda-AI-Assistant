@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
@@ -146,6 +147,7 @@ test('Google success waits for backend verification before showing Signed in', a
   mountApp()
 
   await screen.findByText('API connected')
+  await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
   expect(
     screen.getByRole('button', {
@@ -229,6 +231,8 @@ test('blocks access while checking and restores the account once', async () => {
   ).toBe(true)
 
   await screen.findByText('API connected')
+  // Health can render before the session effect's deferred request starts.
+  await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
   expect(
     screen.getByRole('button', { name: 'Checking account…' }).hasAttribute('disabled'),
@@ -412,6 +416,7 @@ test('unmount aborts the pending check and ignores a late response', async () =>
   const { unmount } = mountApp()
 
   await screen.findByText('API connected')
+  await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
   const signal = accountRequests(fetchMock)[0]?.[1]?.signal
 
