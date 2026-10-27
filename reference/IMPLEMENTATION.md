@@ -1436,8 +1436,8 @@ and explicit acceptance flow; ordinary sign-in does not imply acceptance.
 The switch controls browser availability, not backend authorization. Enable the
 matching backend and Pages proxy routes, Terms endpoints and a valid public
 Turnstile site key separately. Rebuild after changing this public variable; to
-close the browser controls, rebuild with it unset or `false`. Registration and
-recovery navigation remains development-only, as do guest controls. Production
+close the browser controls, rebuild with it unset or `false`. Recovery navigation
+remains development-only, as do guest controls. Production
 Google access also requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
 `VITE_SUPABASE_AUTH_ISSUER`; the account flag alone does not enable it.
 No provider secrets belong in `VITE_` variables.
@@ -1445,21 +1445,35 @@ No provider secrets belong in `VITE_` variables.
 Production regression tests cover absent/invalid flags without account or widget
 requests, successful email sign-in, unchecked Terms acceptance, restoration after
 remount, sign-out, safe sign-in rejection and manual retry after sign-out failure.
-All 441 UI/hook tests and 53 Google API validation tests passed. Isolated Edge
-checks exercised default-off, email-only and Google-enabled compiled production
-variants. The Google fixture validates the redirect, simulates return to the
+All 475 UI/hook tests and 86 registration API tests passed; earlier Google API
+validation passed 53 tests. Isolated Edge checks exercised default-off, email-only,
+Google and registration compiled production variants. The registration fixture
+requires unchecked-by-default Terms consent and a verification proof, preserves
+leading zeros in the code, stays signed out after confirmation and waits for a
+separate sign-in. Backend agreement results are mocked; receipt cryptography and
+live registration/email delivery are not tested by this fixture.
+The Google fixture validates the redirect, simulates return to the
 application, verifies the session through the mocked backend and requires explicit
 Terms acceptance when missing. Page reload and sign-out also work in the fixture.
 APIs, providers and Turnstile are mocked and external network is blocked; these
 tests do not establish successful hosted provider authentication, live cookie
 behavior or public-release readiness.
 
-Registration and email-confirmation forms are available only in development.
+Production email registration and code confirmation require the additional
+`VITE_ACCOUNT_REGISTRATION_ENABLED=true` build flag. The shared
+`isAccountRegistrationEnabled` policy requires the account flag too; development
+preserves its existing behavior. One flag keeps both steps available together.
+It exposes Create account navigation without opening password recovery. Backend
+and Pages sign-up/confirmation gates, Terms endpoints and CAPTCHA/email settings
+must be configured separately. Rebuild with the registration flag unset or
+`false` to close these browser controls while keeping sign-in available.
+Confirmation does not create an app session: users continue to a separate sign-in,
+which relies on backend receipt verification before reporting Terms acceptance.
 The Google option appears in both development sign-in and create-account views
 when explicitly configured. Production sign-in requires both the account and Google
 flags plus the valid public issuer. Google return hints are handled through the existing
-backend session check. Local Google sign-in has been manually confirmed;
-production Google deployment remains outstanding. Local password recovery has
+backend session check. Local and hosted Google sign-in have been manually confirmed,
+including new-account setup, refresh, sign-out and returning login. Local password recovery has
 also been manually validated through email delivery, reset and separate sign-in.
 Chat remains in development.
 
@@ -3718,8 +3732,9 @@ and recovery with a fresh proof after rejected or unavailable verification.
 Automated tests do not contact Cloudflare or prove live token replay protection.
 
 Public guest access still requires abuse controls and production guest-route/cookie
-forwarding. Account sign-in, session restoration, sign-out, registration, and
-email-confirmation interfaces are available only in development. Password recovery
+forwarding. Account sign-in, session restoration, sign-out and Google have
+production browser opt-ins; email registration and confirmation use a separate
+default-off registration switch. Password recovery
 has default-disabled backend request/reset endpoints and frontend request/reset
 helpers, hooks and development forms. Recovery email delivery, reset, old-password
 rejection and separate new-password sign-in have been manually validated locally,

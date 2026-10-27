@@ -40,6 +40,8 @@ function deferredConfirmation() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'false')
   vi.mocked(confirmAccountEmail).mockReset()
 })
 
@@ -315,8 +317,10 @@ test('unmount aborts the request and ignores its late result', async () => {
   expect(confirmAccountEmail).toHaveBeenCalledTimes(1)
 })
 
-test('does not submit outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production registration flag %s blocks confirmation', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', flag)
 
   const { result } = renderHook(useAccountEmailConfirmation, {
     wrapper: StrictMode,
@@ -328,5 +332,15 @@ test('does not submit outside development', async () => {
 
   expect(result.current.enabled).toBe(false)
   expect(result.current.status).toBe('idle')
+  expect(confirmAccountEmail).not.toHaveBeenCalled()
+})
+
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('confirmation cannot bypass production account flag %s', async (flag) => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'true')
+  const { result } = renderHook(useAccountEmailConfirmation, { wrapper: StrictMode })
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(result.current.enabled).toBe(false)
   expect(confirmAccountEmail).not.toHaveBeenCalled()
 })

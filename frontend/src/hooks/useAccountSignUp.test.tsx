@@ -44,6 +44,8 @@ function deferredRegistration() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'false')
   vi.mocked(signUpAccount).mockReset()
 })
 
@@ -277,8 +279,10 @@ test('unmount aborts the request and ignores its late result', async () => {
   expect(signUpAccount).toHaveBeenCalledTimes(1)
 })
 
-test('does not submit outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production registration flag %s blocks sign-up', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', flag)
 
   const { result } = renderHook(useAccountSignUp, {
     wrapper: StrictMode,
@@ -290,5 +294,15 @@ test('does not submit outside development', async () => {
 
   expect(result.current.enabled).toBe(false)
   expect(result.current.status).toBe('idle')
+  expect(signUpAccount).not.toHaveBeenCalled()
+})
+
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('registration cannot bypass production account flag %s', async (flag) => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'true')
+  const { result } = renderHook(useAccountSignUp, { wrapper: StrictMode })
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(result.current.enabled).toBe(false)
   expect(signUpAccount).not.toHaveBeenCalled()
 })

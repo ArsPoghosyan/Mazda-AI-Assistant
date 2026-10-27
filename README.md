@@ -240,7 +240,8 @@ privacy/data flows before public use; see the [SMTP reference](reference/IMPLEME
 Google access requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
 `VITE_SUPABASE_AUTH_ISSUER`. In development it appears in both account dialogs;
 production sign-in additionally requires `VITE_ACCOUNT_AUTH_ENABLED=true`.
-These are build-time controls; registration remains development-only.
+These are build-time controls. The account-creation view also requires the
+registration switch described below in production.
 Enable `ACCOUNT_GOOGLE_OAUTH_API_ENABLED`, and set the exact
 `ACCOUNT_GOOGLE_OAUTH_CALLBACK_URL`. Local URLs differ by provider:
 
@@ -408,7 +409,9 @@ Production account controls default to off. Building with
 `VITE_ACCOUNT_AUTH_ENABLED=true` enables email sign-in, session restoration,
 sign-out and the existing Terms setup flow; development keeps its current behavior.
 Google sign-in additionally requires its own flag and public issuer as described
-above. Registration, recovery/reset and guest browser controls remain development-only.
+above. `VITE_ACCOUNT_REGISTRATION_ENABLED=true` additionally enables production
+email sign-up and code confirmation together, with a separate sign-in afterward.
+Recovery/reset and guest browser controls remain development-only.
 The switch is public build configuration, not authorization: matching backend/proxy
 gates, Terms endpoints and a real Turnstile site key must be configured separately.
 Changing it requires a new frontend build; set it to `false` and rebuild to close
@@ -476,15 +479,17 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-The production account controls passed **441 UI/hook tests**, **53 Google API
-validation tests**, frontend lint, strict TypeScript and three production builds
-(default-off, email-only and Google opt-in). Isolated browser checks covered
-validated Google navigation, backend-verified return handling, explicit Terms,
-restoration and sign-out with mocked APIs, providers and Turnstile; they do not
-verify live provider authentication.
-Separate hosted manual email checks confirmed sign-in, Terms setup, persistence
-after refresh, sign-out and repeat sign-in without a repeated agreement prompt.
-Hosted Google sign-in remains pending validation.
+The registration browser checkpoint passed **475 UI/hook tests**, **86 registration
+API tests**, frontend lint, strict TypeScript and four production builds
+(default-off, email-only, Google and registration opt-ins). Isolated browser checks
+covered sign-up consent, code confirmation without automatic login, separate sign-in,
+Terms results, Google navigation, restoration and sign-out. APIs, provider/receipt
+results and Turnstile are mocked; these checks do not verify live authentication
+or receipt cryptography. Earlier Google API validation passed 53 tests.
+Separate hosted manual checks confirmed email sign-in and Google new-account and
+returning login, Terms setup, persistence after refresh, sign-out and repeat login
+without a repeated agreement prompt. Hosted email registration and code confirmation
+remain pending validation.
 
 The earlier backend/transport checkpoint passed **3,929 offline backend tests**, **41 affected
 PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**

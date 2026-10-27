@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { AccountSessionResponse } from '../api/account'
+import { isAccountRegistrationEnabled } from '../lib/accountFeatures'
 import AccountEmailConfirmationForm from './AccountEmailConfirmationForm'
 import AccountPasswordRecoveryForm from './AccountPasswordRecoveryForm'
 import AccountPasswordResetForm from './AccountPasswordResetForm'
@@ -87,7 +88,7 @@ export default function AccountAccessFlow({
       initialEmail={step.email}
       onClose={onClose}
       onSignedIn={onSignedIn}
-      onCreateAccount={import.meta.env.DEV
+      onCreateAccount={isAccountRegistrationEnabled()
         ? () => setStep({ mode: 'sign_up' })
         : undefined}
       onForgotPassword={import.meta.env.DEV

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAccountRegistrationEnabled } from '../lib/accountFeatures'
 import {
   AccountSignUpRateLimitedError,
   AccountSignUpRejectedError,
@@ -18,7 +19,7 @@ type PendingRequest = {
 }
 
 export function useAccountSignUp() {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountRegistrationEnabled()
   const request = useRef<PendingRequest | null>(null)
   const completed = useRef(false)
 

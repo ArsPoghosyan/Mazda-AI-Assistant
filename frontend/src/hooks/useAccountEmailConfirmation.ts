@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAccountRegistrationEnabled } from '../lib/accountFeatures'
 import {
   AccountEmailConfirmationRateLimitedError,
   AccountEmailConfirmationRejectedError,
@@ -17,7 +18,7 @@ type PendingRequest = {
 }
 
 export function useAccountEmailConfirmation() {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountRegistrationEnabled()
   const request = useRef<PendingRequest | null>(null)
   const completed = useRef(false)
 

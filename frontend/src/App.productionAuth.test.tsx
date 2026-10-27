@@ -39,6 +39,7 @@ beforeEach(() => {
   navigate.mockReset()
   vi.stubEnv('DEV', false)
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'false')
   vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')
   vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'false')
   vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', 'https://example.supabase.co/auth/v1')
