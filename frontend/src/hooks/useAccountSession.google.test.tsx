@@ -53,6 +53,7 @@ beforeEach(() => {
   originalUrl = window.location.href
   originalState = window.history.state
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
   vi.mocked(checkAccountSession).mockReset()
 })
 
@@ -96,6 +97,28 @@ test.each(returns)('verified backend session takes priority over %s hint', async
     ? 'You are already signed in. Sign out before choosing another account.'
     : 'Signed in. Chat is still in development.')
   expect(checkAccountSession).toHaveBeenCalledTimes(1)
+})
+
+test.each(returns)('production verifies the backend before trusting the %s return hint', async (outcome, message) => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  setReturn(outcome)
+  const pending = deferredSession()
+  vi.mocked(checkAccountSession).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(session)
+  const { result } = await mountSession()
+  expect(result.current.status).toBe('checking')
+  expect(result.current.session).toBeNull()
+  expect(window.location.hash).toBe('')
+  expect(window.location.search).toBe('?view=account')
+  expect(window.history.state).toEqual({ keep: 'synthetic-entry' })
+  await act(async () => { pending.resolve(null); await pending.promise })
+  expect(result.current.status).toBe('signed_out')
+  expect(result.current.message).toBe(message)
+  expect(checkAccountSession).toHaveBeenCalledTimes(1)
+  await act(async () => { result.current.refresh() })
+  expect(result.current.status).toBe('signed_in')
+  expect(result.current.session).toEqual(session)
+  expect(checkAccountSession).toHaveBeenCalledTimes(2)
 })
 
 test('forged success stays checking until the backend rejects the session', async () => {

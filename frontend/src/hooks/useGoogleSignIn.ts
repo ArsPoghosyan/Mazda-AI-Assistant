@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { GoogleSignInRateLimitedError, startGoogleSignIn } from '../api/google'
+import { isAccountAuthEnabled } from '../lib/accountFeatures'
 
 type GoogleSignInState = {
   status: 'idle' | 'loading' | 'redirecting' | 'error'
@@ -53,7 +54,7 @@ export function useGoogleSignIn(
 ) {
   const issuer = configuredIssuer()
   const enabled =
-    import.meta.env.DEV &&
+    isAccountAuthEnabled() &&
     import.meta.env.VITE_GOOGLE_OAUTH_ENABLED === 'true' &&
     issuer !== null
 

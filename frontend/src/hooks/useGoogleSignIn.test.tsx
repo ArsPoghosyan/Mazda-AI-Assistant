@@ -48,6 +48,7 @@ function mountHook() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
   vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
   vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', ISSUER)
   vi.mocked(startGoogleSignIn).mockReset()
@@ -115,8 +116,59 @@ test.each([undefined, 'false', 'TRUE', '1'])('does not start with flag %s', asyn
   expect(navigate).not.toHaveBeenCalled()
 })
 
-test('stays disabled outside development even with a true flag', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production account flag %s blocks Google even with its flag on', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
+  const { result, navigate } = mountHook()
+  await act(async () => { await result.current.start() })
+  expect(result.current.enabled).toBe(false)
+  expect(startGoogleSignIn).not.toHaveBeenCalled()
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production Google flag %s stays closed with account controls enabled', async (flag) => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', flag)
+  const { result, navigate } = mountHook()
+  await act(async () => { await result.current.start() })
+  expect(result.current.enabled).toBe(false)
+  expect(startGoogleSignIn).not.toHaveBeenCalled()
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test('production opt-in starts once with the same-origin callback and a validated result', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  const pending = deferredStart()
+  vi.mocked(startGoogleSignIn).mockReturnValue(pending.promise)
+  const { result, navigate } = mountHook()
+  expect(result.current.enabled).toBe(true)
+  expect(startGoogleSignIn).not.toHaveBeenCalled()
+  let first!: Promise<void>
+  let duplicate!: Promise<void>
+  act(() => {
+    first = result.current.start()
+    duplicate = result.current.start()
+  })
+  expect(startGoogleSignIn).toHaveBeenCalledExactlyOnceWith(
+    ISSUER, `${window.location.origin}/api/v1/account/google/callback`, expect.any(AbortSignal),
+  )
+  expect(navigate).not.toHaveBeenCalled()
+  await act(async () => {
+    await duplicate
+    pending.resolve(validStart())
+    await first
+  })
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(DESTINATION)
+  await act(async () => { await result.current.start() })
+  expect(startGoogleSignIn).toHaveBeenCalledTimes(1)
+})
+
+test.each([undefined, '', 'http://auth.example.test/auth/v1', `${ISSUER}?next=untrusted`])('production rejects an absent or invalid issuer %s', async (issuer) => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', issuer)
   const { result, navigate } = mountHook()
   await act(async () => { await result.current.start() })
   expect(result.current.enabled).toBe(false)

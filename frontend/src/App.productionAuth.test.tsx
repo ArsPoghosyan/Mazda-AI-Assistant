@@ -7,6 +7,11 @@ import App from './App'
 import { loadTurnstile, type TurnstileApi } from './lib/turnstile'
 
 vi.mock('./lib/turnstile', () => ({ loadTurnstile: vi.fn() }))
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn<(url: string) => void>() }))
+vi.mock('./hooks/useGoogleSignIn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hooks/useGoogleSignIn')>()
+  return { useGoogleSignIn: function useTestGoogleSignIn() { return actual.useGoogleSignIn(navigate) } }
+})
 
 const session = {
   user_id: '563128d6-22fd-464f-a3bd-31018fdf1b3c',
@@ -17,13 +22,25 @@ const prototype = HTMLDialogElement.prototype
 const originalShow = Object.getOwnPropertyDescriptor(prototype, 'showModal')
 const originalClose = Object.getOwnPropertyDescriptor(prototype, 'close')
 let api: TurnstileApi
+let originalUrl: string
+let originalHistoryState: unknown
+
+function googleDestination(): string {
+  const url = new URL('https://example.supabase.co/auth/v1/authorize')
+  url.search = new URLSearchParams({ provider: 'google',
+    redirect_to: `${window.location.origin}/api/v1/account/google/callback`,
+    code_challenge: 'a'.repeat(43), code_challenge_method: 's256' }).toString()
+  return url.href
+}
 
 beforeEach(() => {
+  originalUrl = window.location.href
+  originalHistoryState = window.history.state
+  navigate.mockReset()
   vi.stubEnv('DEV', false)
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
   vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')
-  // This separate flag must not open Google during the email-only rollout.
-  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'false')
   vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', 'https://example.supabase.co/auth/v1')
   Object.defineProperty(prototype, 'showModal', {
     configurable: true,
@@ -53,12 +70,14 @@ afterEach(() => {
   }
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
+  window.history.replaceState(originalHistoryState, '', originalUrl)
 })
 
-function mockNetwork(options: { signedIn?: boolean; accepted?: boolean; rejectSignIn?: boolean; failSignOut?: boolean } = {}) {
+function mockNetwork(options: { signedIn?: boolean; accepted?: boolean; rejectSignIn?: boolean; failSignOut?: boolean; failGoogleStart?: boolean } = {}) {
   let signedIn = options.signedIn ?? false
   let acceptedAt = options.accepted ? new Date(Date.now() - 1000).toISOString() : null
   let signOutFailed = false
+  let googleStartFailed = false
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
     if (url === '/api/v1/health') {
       return Response.json({ status: 'ok', service: 'mazda6-assistant-api' })
@@ -70,6 +89,13 @@ function mockNetwork(options: { signedIn?: boolean; accepted?: boolean; rejectSi
       if (options.rejectSignIn) return Response.json({ detail: 'private-provider-detail' }, { status: 401 })
       signedIn = true
       return Response.json(session)
+    }
+    if (url === '/api/v1/account/google/start') {
+      if (options.failGoogleStart && !googleStartFailed) {
+        googleStartFailed = true
+        return Response.json({ detail: 'private-provider-detail' }, { status: 503 })
+      }
+      return Response.json({ authorization_url: googleDestination(), expires_at: new Date(Date.now() + 600_000).toISOString() })
     }
     if (url === '/api/v1/account/terms/status' || url === '/api/v1/account/terms/accept') {
       expect(signedIn).toBe(true)
@@ -116,6 +142,7 @@ async function enterCredentials(user: ReturnType<typeof userEvent.setup>) {
 
 test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production flag %s leaves the App closed without account or widget requests', async (flag) => {
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
   const fetchMock = mockNetwork()
   render(<StrictMode><App /></StrictMode>)
   await screen.findByText('API connected')
@@ -195,4 +222,62 @@ test('production rejected sign-in stays signed out and consumes the proof withou
   expect(document.body.textContent).not.toContain('private-provider-detail')
   expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/sign-in')).toHaveLength(1)
   expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/account/terms/'))).toHaveLength(0)
+})
+
+test('production Google opt-in starts once without credentials or proof and navigates only to the validated URL', async () => {
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
+  const user = userEvent.setup()
+  const fetchMock = mockNetwork()
+  render(<StrictMode><App /></StrictMode>)
+  await user.click(await screen.findByRole('button', { name: 'Sign In' }))
+  const dialog = screen.getByRole('dialog', { name: 'Sign in' })
+  await user.dblClick(within(dialog).getByRole('button', { name: 'Continue with Google' }))
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(googleDestination())
+  const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/google/start')
+  expect(calls).toHaveLength(1)
+  expect(calls[0]?.[1]?.body).toBeUndefined()
+  expect(calls[0]?.[1]?.credentials).toBe('same-origin')
+  expect((within(dialog).getByLabelText('Email') as HTMLInputElement).closest('fieldset')?.disabled).toBe(true)
+  expect(within(dialog).queryByRole('button', { name: 'Create account' })).toBeNull()
+  expect(within(dialog).queryByRole('button', { name: 'Forgot password?' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Signed in' })).toBeNull()
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/sign-in')).toHaveLength(0)
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/account/terms/'))).toHaveLength(0)
+})
+
+test('production Google start failure stays signed out with a safe message until manual retry', async () => {
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
+  const user = userEvent.setup()
+  const fetchMock = mockNetwork({ failGoogleStart: true })
+  render(<StrictMode><App /></StrictMode>)
+  await user.click(await screen.findByRole('button', { name: 'Sign In' }))
+  await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
+  await screen.findByText('Google sign-in is temporarily unavailable.')
+  expect(document.body.textContent).not.toContain('private-provider-detail')
+  expect(navigate).not.toHaveBeenCalled()
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/google/start')).toHaveLength(1)
+  await user.click(screen.getByRole('button', { name: 'Continue with Google' }))
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(googleDestination())
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/google/start')).toHaveLength(2)
+})
+
+test.each([false, true])('production Google return restores only the verified session; Terms already accepted: %s', async (accepted) => {
+  vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
+  window.history.replaceState(null, '', '/#google-sign-in=success')
+  const fetchMock = mockNetwork({ signedIn: true, accepted })
+  render(<StrictMode><App /></StrictMode>)
+  await screen.findByRole('button', { name: 'Signed in' })
+  if (accepted) {
+    await screen.findByText('Account setup complete.')
+    expect(screen.queryByRole('dialog')).toBeNull()
+  } else {
+    const setup = await screen.findByRole('dialog', { name: 'Finish account setup' })
+    expect((within(setup).getByRole('checkbox') as HTMLInputElement).checked).toBe(false)
+  }
+  expect(window.location.hash).toBe('')
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/session')).toHaveLength(1)
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/terms/status')).toHaveLength(1)
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/terms/accept')).toHaveLength(0)
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/account/google/start')).toHaveLength(0)
+  expect(navigate).not.toHaveBeenCalled()
 })

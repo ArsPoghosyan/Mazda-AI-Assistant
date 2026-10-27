@@ -1437,20 +1437,27 @@ The switch controls browser availability, not backend authorization. Enable the
 matching backend and Pages proxy routes, Terms endpoints and a valid public
 Turnstile site key separately. Rebuild after changing this public variable; to
 close the browser controls, rebuild with it unset or `false`. Registration and
-recovery navigation remains development-only, as do guest and Google controls.
+recovery navigation remains development-only, as do guest controls. Production
+Google access also requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
+`VITE_SUPABASE_AUTH_ISSUER`; the account flag alone does not enable it.
 No provider secrets belong in `VITE_` variables.
 
 Production regression tests cover absent/invalid flags without account or widget
 requests, successful email sign-in, unchecked Terms acceptance, restoration after
 remount, sign-out, safe sign-in rejection and manual retry after sign-out failure.
-All 417 UI/hook tests passed. Isolated Edge checks also exercised both compiled
-production variants, including real page reloads, with mocked APIs/Turnstile and
-external network blocked. These tests do not establish successful hosted provider
-authentication, live cookie behavior or public-release readiness.
+All 441 UI/hook tests and 53 Google API validation tests passed. Isolated Edge
+checks exercised default-off, email-only and Google-enabled compiled production
+variants. The Google fixture validates the redirect, simulates return to the
+application, verifies the session through the mocked backend and requires explicit
+Terms acceptance when missing. Page reload and sign-out also work in the fixture.
+APIs, providers and Turnstile are mocked and external network is blocked; these
+tests do not establish successful hosted provider authentication, live cookie
+behavior or public-release readiness.
 
 Registration and email-confirmation forms are available only in development.
-The development-only Google option appears in both the sign-in and create-account
-views when explicitly configured. Google return hints are handled through the existing
+The Google option appears in both development sign-in and create-account views
+when explicitly configured. Production sign-in requires both the account and Google
+flags plus the valid public issuer. Google return hints are handled through the existing
 backend session check. Local Google sign-in has been manually confirmed;
 production Google deployment remains outstanding. Local password recovery has
 also been manually validated through email delivery, reset and separate sign-in.
@@ -2379,7 +2386,7 @@ session/sign-out configuration, plus:
 | `ACCOUNT_GOOGLE_OAUTH_CALLBACK_URL` | Unset; exact externally visible application callback |
 | `ACCOUNT_GOOGLE_OAUTH_TIMEOUT_SECONDS` | `15`, allowed range 1–30; backend work only |
 | `ACCOUNT_GOOGLE_OAUTH_ATTEMPT_LIFETIME_SECONDS` | `600`, allowed range 60–900; includes time on Google |
-| `VITE_GOOGLE_OAUTH_ENABLED` | `false`; the button also requires Vite development mode |
+| `VITE_GOOGLE_OAUTH_ENABLED` | `false`; production also requires `VITE_ACCOUNT_AUTH_ENABLED=true`; a valid public issuer is required in either mode |
 | `VITE_SUPABASE_AUTH_ISSUER` | Public `https://YOUR_PROJECT_REF.supabase.co/auth/v1` |
 
 The application callback is

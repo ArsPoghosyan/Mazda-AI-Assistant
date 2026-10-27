@@ -47,6 +47,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
   vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
   vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', 'https://auth.example.test/auth/v1')
   vi.mocked(startGoogleSignIn).mockReset()
@@ -91,10 +92,10 @@ async function mountForm() {
   }
 }
 
-test.each(['disabled', 'production', 'missing-issuer'])(
+test.each(['disabled', 'production-without-account-opt-in', 'missing-issuer'])(
   'does not show Google or change the email flow when %s', async (reason) => {
     if (reason === 'disabled') vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'false')
-    if (reason === 'production') vi.stubEnv('DEV', false)
+    if (reason === 'production-without-account-opt-in') vi.stubEnv('DEV', false)
     if (reason === 'missing-issuer') vi.stubEnv('VITE_SUPABASE_AUTH_ISSUER', '')
     render(<AccountSignInForm siteKey="public-test-key" onClose={vi.fn()} />)
     expect(screen.queryByRole('button', { name: 'Continue with Google' })).toBeNull()

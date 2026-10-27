@@ -237,8 +237,10 @@ Supabase's SMTP settings. Resend processes recipient/email data; its documented
 US storage location is not changed by choosing an EU sending region. Review
 privacy/data flows before public use; see the [SMTP reference](reference/IMPLEMENTATION.md#frontend-registration-api-foundation).
 
-Google access appears in both account dialogs only in development with
-`VITE_GOOGLE_OAUTH_ENABLED=true` and public `VITE_SUPABASE_AUTH_ISSUER` configured.
+Google access requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
+`VITE_SUPABASE_AUTH_ISSUER`. In development it appears in both account dialogs;
+production sign-in additionally requires `VITE_ACCOUNT_AUTH_ENABLED=true`.
+These are build-time controls; registration remains development-only.
 Enable `ACCOUNT_GOOGLE_OAUTH_API_ENABLED`, and set the exact
 `ACCOUNT_GOOGLE_OAUTH_CALLBACK_URL`. Local URLs differ by provider:
 
@@ -405,7 +407,8 @@ with fixed return destinations and strict OAuth/account cookie validation.
 Production account controls default to off. Building with
 `VITE_ACCOUNT_AUTH_ENABLED=true` enables email sign-in, session restoration,
 sign-out and the existing Terms setup flow; development keeps its current behavior.
-Registration, recovery/reset, Google and guest browser controls remain development-only.
+Google sign-in additionally requires its own flag and public issuer as described
+above. Registration, recovery/reset and guest browser controls remain development-only.
 The switch is public build configuration, not authorization: matching backend/proxy
 gates, Terms endpoints and a real Turnstile site key must be configured separately.
 Changing it requires a new frontend build; set it to `false` and rebuild to close
@@ -473,10 +476,15 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-The production UI switch passed **417 UI/hook tests**, frontend lint, strict
-TypeScript and both off/on production builds. Isolated browser checks of those
-compiled builds covered disabled controls and sign-in/Terms/restoration/sign-out
-with mocked APIs and Turnstile; they do not verify live provider authentication.
+The production account controls passed **441 UI/hook tests**, **53 Google API
+validation tests**, frontend lint, strict TypeScript and three production builds
+(default-off, email-only and Google opt-in). Isolated browser checks covered
+validated Google navigation, backend-verified return handling, explicit Terms,
+restoration and sign-out with mocked APIs, providers and Turnstile; they do not
+verify live provider authentication.
+Separate hosted manual email checks confirmed sign-in, Terms setup, persistence
+after refresh, sign-out and repeat sign-in without a repeated agreement prompt.
+Hosted Google sign-in remains pending validation.
 
 The earlier backend/transport checkpoint passed **3,929 offline backend tests**, **41 affected
 PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**
