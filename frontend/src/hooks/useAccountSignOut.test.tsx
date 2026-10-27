@@ -217,8 +217,9 @@ test('unmount aborts the request and ignores its late result', async () => {
   expect(signOutAccount).toHaveBeenCalledTimes(1)
 })
 
-test('does not send requests outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production flag %s cannot sign out', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
 
   const { result } = mountSignOut()
 

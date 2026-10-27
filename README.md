@@ -43,7 +43,7 @@ is present; a blocked attempt preserves the current session.
 On page load, access controls wait for a bounded health check before account
 session restoration starts, allowing an idle backend time to wake. Startup shows
 a waiting message and offers manual retry on failure; it does not send periodic
-keepalive requests. Public authentication remains disabled.
+keepalive requests. Public account browser controls remain disabled by default.
 
 A Privacy Notice page is available at `/privacy`, with links from the footer and
 account-creation form. It describes development-stage data flows and approved retention
@@ -402,9 +402,15 @@ returns only completion metadata and preserves the backend's separate sign-in re
 validating the authorization URL and short-lived OAuth binding cookie.
 [Google-callback forwarding](reference/IMPLEMENTATION.md#google-callback-pages-proxy) is independently gated,
 with fixed return destinations and strict OAuth/account cookie validation.
-Normal production builds still disable development guest/account controls;
-public authentication is not enabled or deployment-validated. A frontend build
-does not provide an API server.
+Production account controls default to off. Building with
+`VITE_ACCOUNT_AUTH_ENABLED=true` enables email sign-in, session restoration,
+sign-out and the existing Terms setup flow; development keeps its current behavior.
+Registration, recovery/reset, Google and guest browser controls remain development-only.
+The switch is public build configuration, not authorization: matching backend/proxy
+gates, Terms endpoints and a real Turnstile site key must be configured separately.
+Changing it requires a new frontend build; set it to `false` and rebuild to close
+these browser controls. Hosted authenticated flows still need validation.
+A frontend build does not provide an API server.
 
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
 and start command `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-proxy-headers`.
@@ -467,7 +473,12 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-Latest checkpoint validation passed **3,929 offline backend tests**, **41 affected
+The production UI switch passed **417 UI/hook tests**, frontend lint, strict
+TypeScript and both off/on production builds. Isolated browser checks of those
+compiled builds covered disabled controls and sign-in/Terms/restoration/sign-out
+with mocked APIs and Turnstile; they do not verify live provider authentication.
+
+The earlier backend/transport checkpoint passed **3,929 offline backend tests**, **41 affected
 PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**
 and **393 UI/hook tests**. Backend lint, formatting (242 files), typing (229 app/test
 files) and migration typing (13 files) passed, along with frontend lint, strict

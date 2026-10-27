@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAccountAuthEnabled } from '../lib/accountFeatures'
 import {
   checkAccountSession,
   type AccountSessionResponse,
@@ -23,7 +24,7 @@ const GOOGLE_RETURN_MESSAGES: Record<GoogleReturnOutcome, string> = {
 }
 
 export function useAccountSession(backendReady = true) {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountAuthEnabled()
   const request = useRef<AbortController | null>(null)
   const googleReturn = useRef<GoogleReturnOutcome | null | undefined>(undefined)
   const [attempt, setAttempt] = useState(0)

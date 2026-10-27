@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAccountAuthEnabled } from '../lib/accountFeatures'
 import {
   AccountSignInRateLimitedError,
   AccountSignInRejectedError,
@@ -20,7 +21,7 @@ type PendingRequest = {
 }
 
 export function useAccountSignIn() {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountAuthEnabled()
   const request = useRef<PendingRequest | null>(null)
 
   const [state, setState] = useState<SignInState>({

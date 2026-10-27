@@ -1114,7 +1114,8 @@ public sign-in disabled until Supabase CAPTCHA enforcement, additional abuse con
 and deployment checks are ready.
 The development frontend calls this route through Vite's same-origin proxy. The
 Pages password sign-in and account-session checks use independent default-off
-proxies; production frontend account controls stay disabled.
+proxies; production frontend account controls default to disabled and require
+the explicit build-time opt-in described below.
 
 ```dotenv
 ACCOUNT_SIGN_IN_API_ENABLED=false
@@ -1245,7 +1246,7 @@ production defaults disabled until the remaining release checks are complete.
 API tests mock fetch and cover request allowlists, metadata-only responses,
 controlled failures, malformed responses, and cancellation. Controller/form tests
 cover duplicate submissions, deadlines, cleanup, proof expiration, fresh retries,
-password clearing, and development-only availability. App tests cover opening and
+password clearing, and default-disabled production availability. App tests cover opening and
 closing, native cancel handling, focus restoration/guards, and pending-request
 cancellation. Integration tests use the real account hooks and API helpers with
 mocked network responses to cover successful sign-in updating the landing page
@@ -1422,7 +1423,30 @@ pending, success, failure/retry, timeout, cancellation, and repeat sign-in/sign-
 cycles using mocked network responses. Separate local browser checks confirmed
 successful sign-in, automatic dialog dismissal, account restoration after a page
 refresh, and successful sign-out. These checks validate the local development
-flow; production account access remains disabled and is not validated by them.
+flow; they do not validate hosted account access.
+
+### Production email account controls
+
+`VITE_ACCOUNT_AUTH_ENABLED` defaults to `false`. Only the exact string `true`
+enables production email sign-in, session restoration and sign-out through the
+shared `isAccountAuthEnabled` policy. Development retains its existing behavior
+regardless of this flag. Signed-in accounts also use the existing Terms status
+and explicit acceptance flow; ordinary sign-in does not imply acceptance.
+
+The switch controls browser availability, not backend authorization. Enable the
+matching backend and Pages proxy routes, Terms endpoints and a valid public
+Turnstile site key separately. Rebuild after changing this public variable; to
+close the browser controls, rebuild with it unset or `false`. Registration and
+recovery navigation remains development-only, as do guest and Google controls.
+No provider secrets belong in `VITE_` variables.
+
+Production regression tests cover absent/invalid flags without account or widget
+requests, successful email sign-in, unchecked Terms acceptance, restoration after
+remount, sign-out, safe sign-in rejection and manual retry after sign-out failure.
+All 417 UI/hook tests passed. Isolated Edge checks also exercised both compiled
+production variants, including real page reloads, with mocked APIs/Turnstile and
+external network blocked. These tests do not establish successful hosted provider
+authentication, live cookie behavior or public-release readiness.
 
 Registration and email-confirmation forms are available only in development.
 The development-only Google option appears in both the sign-in and create-account

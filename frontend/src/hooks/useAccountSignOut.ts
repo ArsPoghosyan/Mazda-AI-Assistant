@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { signOutAccount } from '../api/account'
+import { isAccountAuthEnabled } from '../lib/accountFeatures'
 
 type SignOutState = {
   status: 'idle' | 'loading' | 'ready' | 'error'
@@ -12,7 +13,7 @@ type PendingRequest = {
 }
 
 export function useAccountSignOut() {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountAuthEnabled()
   const request = useRef<PendingRequest | null>(null)
 
   const [state, setState] = useState<SignOutState>({

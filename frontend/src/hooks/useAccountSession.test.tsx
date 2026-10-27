@@ -239,8 +239,9 @@ test('a new mount checks again rather than reusing an old identity', async () =>
   expect(checkAccountSession).toHaveBeenCalledTimes(2)
 })
 
-test('does not check or refresh outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production flag %s cannot restore or refresh a session', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', flag)
 
   const { result } = await mountSession()
 

@@ -87,8 +87,12 @@ export default function AccountAccessFlow({
       initialEmail={step.email}
       onClose={onClose}
       onSignedIn={onSignedIn}
-      onCreateAccount={() => setStep({ mode: 'sign_up' })}
-      onForgotPassword={(email) => setStep({ mode: 'recover_password', email })}
+      onCreateAccount={import.meta.env.DEV
+        ? () => setStep({ mode: 'sign_up' })
+        : undefined}
+      onForgotPassword={import.meta.env.DEV
+        ? (email) => setStep({ mode: 'recover_password', email })
+        : undefined}
     />
   )
 }
