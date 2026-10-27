@@ -1399,22 +1399,29 @@ test('the real Workers deadline stops a stalled upstream without cookies', { tim
 })
 
 
-test('Workers carries only the Terms receipt through confirmation and clears it with committed signin', { timeout: 30_000 }, async t => {
-  const { mf, mock } = await runtime(t, { ...signInBindings, ...confirmationBindings })
+test('Workers carries a quoted signup Terms receipt through confirmation and clears it with committed signin', { timeout: 30_000 }, async t => {
+  const { mf, mock } = await runtime(t, { ...signUpBindings, ...signInBindings, ...confirmationBindings })
   const name = '__Host-askm6_signup_terms'
-  const pending = 'A'.repeat(120)
-  const confirmed = 'B'.repeat(120)
+  const pending = 'A'.repeat(120) + '=='
+  const confirmed = 'B'.repeat(120) + '='
+  mock.get(backend).intercept({ method: 'POST', path: signUpPath }).reply(202, JSON.stringify(registrationAccepted), { headers: {
+    'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace('A'.repeat(120), `"${pending}"`),
+  } })
+  const signup = await mf.dispatchFetch(site + signUpPath, signUpOptions())
+  assert.equal(signup.status, 202, await signup.clone().text())
+  assert.equal(signup.headers.getSetCookie().length, 1)
+  assert.ok(signup.headers.getSetCookie()[0].startsWith(`${name}=${pending};`))
   let confirmationHeaders, signinHeaders
   mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(request => {
     confirmationHeaders = new Headers(request.headers)
     return { statusCode: 200, data: JSON.stringify({ status: 'confirmed', message: 'Email confirmed. You can now sign in.' }), responseOptions: { headers: {
-      'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace(pending, confirmed),
+      'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace('A'.repeat(120), `"${confirmed}"`),
     } } }
   })
   const confirmation = await mf.dispatchFetch(site + confirmationPath, { method: 'POST',
     body: JSON.stringify({ email: signInCredentials.email, code: '001234' }), headers: {
       Origin: site, 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.20',
-      Cookie: `${name}=${pending}; __Host-askm6_guest=private; __Host-askm6_google=private`,
+      Cookie: `${name}="${pending}"; __Host-askm6_guest=private; __Host-askm6_google=private`,
     } })
   assert.equal(confirmation.status, 200, await confirmation.clone().text())
   assert.equal(confirmationHeaders.get('Cookie'), `${name}=${pending}`)
@@ -1428,7 +1435,7 @@ test('Workers carries only the Terms receipt through confirmation and clears it 
         `${name}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`],
     } } }
   })
-  const signedIn = await mf.dispatchFetch(site + signInPath, signInOptions({ Cookie: `${name}=${confirmed}; __Host-askm6_guest=private` }))
+  const signedIn = await mf.dispatchFetch(site + signInPath, signInOptions({ Cookie: `${name}="${confirmed}"; __Host-askm6_guest=private` }))
   assert.equal(signedIn.status, 200, await signedIn.clone().text())
   assert.deepEqual(await signedIn.json(), metadata)
   assert.equal(signinHeaders.get('Cookie'), `${name}=${confirmed}`)
@@ -1445,10 +1452,10 @@ test('Workers email-confirmed signup can complete Google first with three isolat
   const { mf, mock } = await runtime(t, { ...confirmationBindings, ...googleCallbackBindings })
   const receipt = '__Host-askm6_signup_terms'
   const pending = 'A'.repeat(120)
-  const confirmed = 'B'.repeat(120)
+  const confirmed = 'B'.repeat(120) + '=='
   let forwarded
   mock.get(backend).intercept({ method: 'POST', path: confirmationPath }).reply(200, JSON.stringify(emailConfirmed), { headers: {
-    'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace(pending, confirmed),
+    'Content-Type': 'application/json', 'Set-Cookie': signupReceiptCookie().replace(pending, `"${confirmed}"`),
   } })
   const verified = await mf.dispatchFetch(site + confirmationPath, confirmationOptions({ Cookie: `${receipt}=${pending}` }))
   assert.equal(verified.status, 200, await verified.clone().text())
@@ -1461,7 +1468,7 @@ test('Workers email-confirmed signup can complete Google first with three isolat
     } } }
   })
   const response = await mf.dispatchFetch(site + googleCallbackPath + googleCallbackQuery, { redirect: 'manual', headers: {
-    Cookie: `${googleCookie}=${googleToken}; ${receipt}=${confirmed}; ${guestCookie}=private`,
+    Cookie: `${googleCookie}=${googleToken}; ${receipt}="${confirmed}"; ${guestCookie}=private`,
     Authorization: 'Bearer private', Origin: 'https://accounts.google.com',
   } })
   assert.equal(response.status, 303)

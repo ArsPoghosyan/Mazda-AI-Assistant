@@ -5,9 +5,16 @@ import { parseProxyCookie, PROXY_COOKIE_SCOPE, readProxyCookieValue } from './se
 export const SIGNUP_TERMS_COOKIE = '__Host-askm6_signup_terms'
 const RECEIPT = /^[A-Za-z0-9_-]{100,1534}={0,2}$/
 
+function normalizedReceipt(raw: string | null): string | null {
+  if (raw === null || raw.length > 1538) return null
+  // Python's cookie serializer quotes Fernet values containing Base64 padding.
+  const value = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw
+  return value.length <= 1536 && RECEIPT.test(value) ? value : null
+}
+
 export function readSignupTermsProxyCookie(request: Request): string | null {
-  const value = readProxyCookieValue(request, SIGNUP_TERMS_COOKIE)
-  return value !== null && value.length <= 1536 && RECEIPT.test(value) ? `${SIGNUP_TERMS_COOKIE}=${value}` : null
+  const value = normalizedReceipt(readProxyCookieValue(request, SIGNUP_TERMS_COOKIE))
+  return value !== null ? `${SIGNUP_TERMS_COOKIE}=${value}` : null
 }
 
 export function validatedSignupTermsCookie(headers: Headers, allowClear = false): string {
@@ -16,10 +23,11 @@ export function validatedSignupTermsCookie(headers: Headers, allowClear = false)
     return `${SIGNUP_TERMS_COOKIE}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; ${PROXY_COOKIE_SCOPE}`
   }
   const age = cookie.attributes.get('max-age')
-  if (!RECEIPT.test(cookie.value) || cookie.value.length > 1536 || typeof age !== 'string' ||
+  const value = normalizedReceipt(cookie.value)
+  if (value === null || typeof age !== 'string' ||
       !/^[1-9][0-9]{0,3}$/.test(age) || Number(age) > 3600 ||
       cookie.expiry <= Date.now() || cookie.expiry > Date.now() + 3_605_000) throw new Error('Invalid registration agreement cookie')
-  return `${SIGNUP_TERMS_COOKIE}=${cookie.value}; Expires=${cookie.rawExpiry}; Max-Age=${age}; ${PROXY_COOKIE_SCOPE}`
+  return `${SIGNUP_TERMS_COOKIE}=${value}; Expires=${cookie.rawExpiry}; Max-Age=${age}; ${PROXY_COOKIE_SCOPE}`
 }
 
 export function validatedSigninTermsCookies(headers: Headers, expiry: number, hadReceipt: boolean): string[] {

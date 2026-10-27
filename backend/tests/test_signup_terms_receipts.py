@@ -83,6 +83,30 @@ def test_confirmation_preserves_original_agreement_time_and_expiry(settings: Set
     assert decoded.expires_at == pending.expires_at
 
 
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("quoted", [False, True])
+def test_receipt_roundtrip_preserves_python_and_proxy_cookie_values(
+    settings: Settings, confirmed: bool, quoted: bool
+) -> None:
+    settings.account_cookie_secure = True
+    receipt = make_signup_terms_receipt(EMAIL)
+    if confirmed:
+        receipt = receipt.model_copy(update={"confirmed_user_id": uuid4()})
+    response = Response()
+    set_signup_terms_cookie(response, receipt, settings)
+    field = response.headers["set-cookie"]
+    cookies: SimpleCookie = SimpleCookie()
+    cookies.load(field)
+    cookie = cookies[signup_terms_cookie_name(settings)]
+    # Exercise the actual Python wire format and the proxy's canonical form.
+    pair = field.split(";", 1)[0] if quoted else f"{cookie.key}={cookie.value}"
+    request = Request({"type": "http", "headers": [(b"cookie", pair.encode("ascii"))]})
+    value = read_signup_terms_cookie(request, settings)
+    assert value is not None
+    assert value.get_secret_value() == cookie.value
+    assert decode_signup_terms_receipt(value, EMAIL, settings) == receipt
+
+
 @pytest.mark.parametrize(
     "change", ["old-version", "expired", "future", "extended", "wrong-purpose", "missing-fields"]
 )

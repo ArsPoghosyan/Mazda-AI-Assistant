@@ -3783,7 +3783,10 @@ Proxies forward only the bounded receipt on confirmation/password sign-in, and
 only OAuth binding plus that receipt on Google callback. They reject duplicate
 receipt names, validate its one-hour lifetime/security scope, preserve other
 browser cookies and require its deletion alongside the newly created account
-cookie on successful sign-in. Google success requires exactly three cookies when
+cookie on successful sign-in. Receipt values accept Python's Base64url form with
+one pair of double quotes and the unquoted form; forwarding removes only the outer quotes,
+preserving padding and the 1536-character value limit. Embedded/escaped quotes
+and malformed values are rejected. Google success requires exactly three cookies when
 a receipt was forwarded: OAuth deletion, new account session and receipt deletion;
 ordinary callback cookie validation remains unchanged. Failures preserve the
 receipt while retaining the existing backend-confirmed OAuth deletion contract.

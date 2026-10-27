@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { onRequest } from '../functions/api/[[path]].ts'
+import { readSignupTermsProxyCookie } from '../server/signup-terms-proxy-cookies.ts'
 
 const site = 'https://site.example'
 const path = '/api/v1/account/sign-up'
@@ -22,6 +23,50 @@ function dispatch(options = {}, configuration = env, url) {
 
 const receiptCookie = () => `__Host-askm6_signup_terms=${'A'.repeat(120)}; Max-Age=3000; Expires=${new Date(Date.now() + 3_000_000).toUTCString()}; Path=/; Secure; HttpOnly; SameSite=Lax`
 function upstream(body = accepted, options = {}) { return Response.json(body, { status: 202, ...options, headers: { 'Set-Cookie': receiptCookie(), ...options.headers } }) }
+
+for (const padding of ['=', '==']) {
+  test(`accepts Python's quoted receipt with ${padding.length} padding characters`, async t => {
+    const value = 'A'.repeat(120) + padding
+    const cookie = receiptCookie().replace('A'.repeat(120), `"${value}"`)
+    const fetch = t.mock.method(globalThis, 'fetch', async () => upstream(accepted, { headers: { 'Set-Cookie': cookie } }))
+    const response = await dispatch()
+    assert.equal(response.status, 202)
+    assert.deepEqual(await response.json(), accepted)
+    assert.equal(response.headers.get('Set-Cookie'), `__Host-askm6_signup_terms=${value}; Expires=${/Expires=([^;]+)/.exec(cookie)[1]}; Max-Age=3000; Path=/; Secure; HttpOnly; SameSite=Lax`)
+    assert.equal(fetch.mock.callCount(), 1)
+  })
+}
+
+for (const [label, value, expected] of [
+  ['unquoted', 'A'.repeat(120), 'A'.repeat(120)],
+  ['quoted with padding', `"${'A'.repeat(120)}=="`, 'A'.repeat(120) + '=='],
+  ['maximum quoted length', `"${'A'.repeat(1534)}=="`, 'A'.repeat(1534) + '=='],
+  ['excess length', `"${'A'.repeat(1535)}=="`, null],
+  ['missing closing quote', `"${'A'.repeat(120)}==`, null],
+  ['missing opening quote', `${'A'.repeat(120)}=="`, null],
+  ['double quote pairs', `""${'A'.repeat(120)}==""`, null],
+  ['embedded quote', `"${'A'.repeat(120)}"=="`, null],
+  ['escaped quote', `"${'A'.repeat(120)}\\"=="`, null],
+  ['extra padding', `"${'A'.repeat(120)}==="`, null],
+  ['short value', `"${'A'.repeat(99)}=="`, null],
+  ['empty value', '""', null],
+]) {
+  test(`reads only a valid signup receipt: ${label}`, () => {
+    const name = '__Host-askm6_signup_terms'
+    const request = new Request(site, { headers: { Cookie: `other=private; ${name}=${value}` } })
+    assert.equal(readSignupTermsProxyCookie(request), expected === null ? null : `${name}=${expected}`)
+  })
+  test(`validates backend signup receipt: ${label}`, async t => {
+    const cookie = receiptCookie().replace('A'.repeat(120), value)
+    t.mock.method(globalThis, 'fetch', async () => upstream(accepted, { headers: { 'Set-Cookie': cookie } }))
+    const response = await dispatch()
+    if (expected === null) await failure(response)
+    else {
+      assert.equal(response.status, 202)
+      assert.equal(response.headers.get('Set-Cookie'), `__Host-askm6_signup_terms=${expected}; Expires=${/Expires=([^;]+)/.exec(cookie)[1]}; Max-Age=3000; Path=/; Secure; HttpOnly; SameSite=Lax`)
+    }
+  })
+}
 
 async function failure(response, status = 502) {
   assert.equal(response.status, status)
