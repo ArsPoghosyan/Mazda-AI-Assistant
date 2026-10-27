@@ -37,6 +37,8 @@ function mountHook() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'false')
   vi.mocked(resetAccountPassword).mockReset()
 })
 
@@ -226,12 +228,36 @@ test('completion clears the deadline without aborting its finished signal', asyn
   expect(vi.getTimerCount()).toBe(0)
 })
 
-test('does not attempt a password reset outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('does not change a password in production with flag %s', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', flag)
   const { result } = mountHook()
   await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
   expect(result.current.enabled).toBe(false)
   expect(result.current.status).toBe('idle')
   expect(result.current.message).toBe('')
   expect(resetAccountPassword).not.toHaveBeenCalled()
+})
+
+test('reset opt-in cannot change a password when production accounts are disabled', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'true')
+  const { result } = mountHook()
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(result.current.enabled).toBe(false)
+  expect(resetAccountPassword).not.toHaveBeenCalled()
+})
+
+test('production reset opt-in changes the password once on explicit submission', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'true')
+  vi.mocked(resetAccountPassword).mockResolvedValue(completion)
+  const { result } = mountHook()
+  expect(result.current.enabled).toBe(true)
+  expect(resetAccountPassword).not.toHaveBeenCalled()
+  await act(async () => { expect(await result.current.start(credentials)).toBe(true) })
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(resetAccountPassword).toHaveBeenCalledExactlyOnceWith(credentials, expect.any(AbortSignal))
 })

@@ -36,6 +36,8 @@ function mountHook() {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'false')
   vi.mocked(requestAccountPasswordRecovery).mockReset()
 })
 
@@ -205,12 +207,36 @@ test('a finished request leaves no timer that could abort its signal later', asy
   expect(vi.getTimerCount()).toBe(0)
 })
 
-test('does not start recovery outside development', async () => {
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('does not send recovery in production with flag %s', async (flag) => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', flag)
   const { result } = mountHook()
   await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
   expect(result.current.enabled).toBe(false)
   expect(result.current.status).toBe('idle')
   expect(result.current.message).toBe('')
   expect(requestAccountPasswordRecovery).not.toHaveBeenCalled()
+})
+
+test('recovery opt-in cannot send email when production accounts are disabled', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'true')
+  const { result } = mountHook()
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(result.current.enabled).toBe(false)
+  expect(requestAccountPasswordRecovery).not.toHaveBeenCalled()
+})
+
+test('production recovery opt-in sends once on explicit submission', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'true')
+  vi.mocked(requestAccountPasswordRecovery).mockResolvedValue(acknowledgement)
+  const { result } = mountHook()
+  expect(result.current.enabled).toBe(true)
+  expect(requestAccountPasswordRecovery).not.toHaveBeenCalled()
+  await act(async () => { expect(await result.current.start(credentials)).toBe(true) })
+  await act(async () => { expect(await result.current.start(credentials)).toBe(false) })
+  expect(requestAccountPasswordRecovery).toHaveBeenCalledExactlyOnceWith(credentials, expect.any(AbortSignal))
 })

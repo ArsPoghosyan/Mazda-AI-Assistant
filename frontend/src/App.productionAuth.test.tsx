@@ -38,6 +38,7 @@ beforeEach(() => {
   originalHistoryState = window.history.state
   navigate.mockReset()
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'false')
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
   vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'false')
   vi.stubEnv('VITE_TURNSTILE_SITE_KEY', 'public-test-site-key')

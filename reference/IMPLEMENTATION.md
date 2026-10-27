@@ -1437,7 +1437,7 @@ The switch controls browser availability, not backend authorization. Enable the
 matching backend and Pages proxy routes, Terms endpoints and a valid public
 Turnstile site key separately. Rebuild after changing this public variable; to
 close the browser controls, rebuild with it unset or `false`. Recovery navigation
-remains development-only, as do guest controls. Production
+requires its own production switch described below; guest controls remain development-only. Production
 Google access also requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
 `VITE_SUPABASE_AUTH_ISSUER`; the account flag alone does not enable it.
 No provider secrets belong in `VITE_` variables.
@@ -1469,6 +1469,29 @@ must be configured separately. Rebuild with the registration flag unset or
 `false` to close these browser controls while keeping sign-in available.
 Confirmation does not create an app session: users continue to a separate sign-in,
 which relies on backend receipt verification before reporting Terms acceptance.
+
+Production password recovery and code-based reset share the default-off
+`VITE_ACCOUNT_RECOVERY_ENABLED=true` build flag. The shared
+`isAccountRecoveryEnabled` policy also requires the account flag; development
+remains available even when both public flags are false. It gates Forgot password
+navigation and both hooks, without depending on registration or Google flags.
+Opening a form or using an existing recovery code does not send an email.
+Recovery requires a fresh Turnstile proof; reset preserves leading code zeros,
+clears the code/password fields on submission and requires separate sign-in.
+Backend `ACCOUNT_PASSWORD_RECOVERY_API_ENABLED` and
+`ACCOUNT_PASSWORD_RESET_API_ENABLED`, Pages `ACCOUNT_PASSWORD_RECOVERY_PROXY_ENABLED`
+and `ACCOUNT_PASSWORD_RESET_PROXY_ENABLED`, the recovery code email template and
+provider CAPTCHA configuration remain separate deployment prerequisites.
+Changing the public flag requires a rebuild; unset it or use `false` and rebuild
+to close the browser flow while keeping account sign-in available. Automated
+production-flow tests mock provider/email transport; hosted recovery/reset still
+requires a controlled deployment and a human-owned account test.
+The checkpoint passed all 500 UI/hook tests (including 67 focused recovery tests),
+lint, strict TypeScript and four production builds. Three isolated compiled-browser
+variants verified recovery closed/open and account access off; the open variant
+covered recovery, reset, separate sign-in, refresh and sign-out with external
+network blocked and APIs/verification mocked.
+
 The Google option appears in both development sign-in and create-account views
 when explicitly configured. Production sign-in requires both the account and Google
 flags plus the valid public issuer. Google return hints are handled through the existing
@@ -3734,9 +3757,9 @@ Automated tests do not contact Cloudflare or prove live token replay protection.
 Public guest access still requires abuse controls and production guest-route/cookie
 forwarding. Account sign-in, session restoration, sign-out and Google have
 production browser opt-ins; email registration and confirmation use a separate
-default-off registration switch. Password recovery
-has default-disabled backend request/reset endpoints and frontend request/reset
-helpers, hooks and development forms. Recovery email delivery, reset, old-password
+default-off registration switch. Password recovery and reset share a separate
+default-off production browser switch, with default-disabled backend and proxy
+request/reset endpoints. Recovery email delivery, reset, old-password
 rejection and separate new-password sign-in have been manually validated locally,
 alongside registration and confirmation. Public deployment remains a separate step.
 

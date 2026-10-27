@@ -8,3 +8,9 @@ export function isAccountRegistrationEnabled(): boolean {
   return isAccountAuthEnabled() &&
     (import.meta.env.DEV || import.meta.env.VITE_ACCOUNT_REGISTRATION_ENABLED === 'true')
 }
+
+/** Recovery email and code-based reset must be available in the same rollout. */
+export function isAccountRecoveryEnabled(): boolean {
+  return isAccountAuthEnabled() &&
+    (import.meta.env.DEV || import.meta.env.VITE_ACCOUNT_RECOVERY_ENABLED === 'true')
+}

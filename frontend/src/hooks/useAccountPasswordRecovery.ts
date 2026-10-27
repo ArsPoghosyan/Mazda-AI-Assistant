@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAccountRecoveryEnabled } from '../lib/accountFeatures'
 import {
   AccountPasswordRecoveryRateLimitedError,
   AccountPasswordRecoveryRejectedError,
@@ -18,7 +19,7 @@ type PendingRequest = {
 }
 
 export function useAccountPasswordRecovery() {
-  const enabled = import.meta.env.DEV
+  const enabled = isAccountRecoveryEnabled()
   const active = useRef(false)
   const request = useRef<PendingRequest | null>(null)
   const completed = useRef(false)

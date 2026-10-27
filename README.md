@@ -411,7 +411,12 @@ sign-out and the existing Terms setup flow; development keeps its current behavi
 Google sign-in additionally requires its own flag and public issuer as described
 above. `VITE_ACCOUNT_REGISTRATION_ENABLED=true` additionally enables production
 email sign-up and code confirmation together, with a separate sign-in afterward.
-Recovery/reset and guest browser controls remain development-only.
+`VITE_ACCOUNT_RECOVERY_ENABLED=true` additionally enables Forgot password and
+code-based password reset together, requiring the account flag too. Backend
+`ACCOUNT_PASSWORD_RECOVERY_API_ENABLED` / `ACCOUNT_PASSWORD_RESET_API_ENABLED`
+and Pages `ACCOUNT_PASSWORD_RECOVERY_PROXY_ENABLED` /
+`ACCOUNT_PASSWORD_RESET_PROXY_ENABLED` must be enabled separately. Reset ends
+with a separate sign-in. Guest browser controls remain development-only.
 The switch is public build configuration, not authorization: matching backend/proxy
 gates, Terms endpoints and a real Turnstile site key must be configured separately.
 Changing it requires a new frontend build; set it to `false` and rebuild to close
@@ -479,7 +484,12 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-The registration browser checkpoint passed **475 UI/hook tests**, **86 registration
+The recovery browser checkpoint passed **500 UI/hook tests**, frontend lint,
+strict TypeScript and four production builds. Three isolated browser variants
+verified recovery off/on and account access off, including reset followed by
+separate sign-in, refresh and sign-out. Provider and verification calls were mocked.
+
+The earlier registration browser checkpoint passed **475 UI/hook tests**, **86 registration
 API tests**, frontend lint, strict TypeScript and four production builds
 (default-off, email-only, Google and registration opt-ins). Isolated browser checks
 covered sign-up consent, code confirmation without automatic login, separate sign-in,
@@ -488,8 +498,10 @@ results and Turnstile are mocked; these checks do not verify live authentication
 or receipt cryptography. Earlier Google API validation passed 53 tests.
 Separate hosted manual checks confirmed email sign-in and Google new-account and
 returning login, Terms setup, persistence after refresh, sign-out and repeat login
-without a repeated agreement prompt. Hosted email registration and code confirmation
-remain pending validation.
+without a repeated agreement prompt. Hosted email registration, code confirmation,
+separate sign-in, refresh, sign-out and returning sign-in were also manually confirmed
+after correcting quoted Terms-receipt cookie forwarding. Hosted recovery/reset
+validation remains pending.
 
 The earlier backend/transport checkpoint passed **3,929 offline backend tests**, **41 affected
 PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**

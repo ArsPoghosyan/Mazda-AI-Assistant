@@ -19,6 +19,7 @@ let api: TurnstileApi
 
 beforeEach(() => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_ACCOUNT_RECOVERY_ENABLED', 'false')
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'true')
   vi.stubEnv('VITE_ACCOUNT_REGISTRATION_ENABLED', 'true')
   vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
