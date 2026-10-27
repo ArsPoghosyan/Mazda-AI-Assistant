@@ -450,10 +450,31 @@ Widget cleanup ignores late callbacks after retry or unmount. Loading and
 challenge failures offer an explicit retry; a failed proof submission stops and
 requires a new attempt rather than automatically reusing the token.
 
-Success confirms a guest session, not a working chat. The guest action remains
-disabled in `npm run preview`, which serves the production build. The development
-UI gate is not an authorization control; the backend's independent checks still
-apply. Keep insecure cookies and this local endpoint configuration out of production.
+Success confirms a guest session, not a working chat. Production builds keep the
+guest action disabled unless `VITE_GUEST_ACCESS_ENABLED=true` at build time;
+only that exact value enables it. Development retains its existing behavior even
+with the flag false. Guest access is independent of `VITE_ACCOUNT_AUTH_ENABLED`.
+The existing guest hook owns this gate for both the button and submissions.
+When accounts are enabled, guest access waits for a confirmed signed-out state
+and stays blocked while signed in, while session checks fail, or while the account
+dialog is open. No automatic guest-data transfer is added.
+
+Enable backend `GUEST_SESSION_API_ENABLED` and Pages `GUEST_SESSION_PROXY_ENABLED`
+separately, with secure production cookies, trusted ingress/origins, the guest
+creation limiter and real Turnstile hostname/action configuration. Changing the
+browser flag requires a new build; unset it or use `false` and rebuild to close
+guest browser access. No guest-session request is made on page load or reload.
+This UI gate is not authorization; backend checks still apply. Keep insecure
+cookies and the local endpoint configuration out of production. Guest chats,
+conversation persistence and ownership transfer remain separate unfinished work.
+
+The guest browser checkpoint passed 523 UI/hook tests, including 44 focused guest
+tests, plus lint, strict TypeScript and four production builds. Three isolated
+compiled-browser variants cover guest closed/open and account access off, one
+proof submission, no automatic requests, and returning-session reuse after reload.
+The cookie is a synthetic local HTTP HttpOnly fixture; this does not validate
+production Secure/`__Host-` scope, real Siteverify or backend cookie ownership.
+All API/verification responses are mocked and external network is blocked.
 
 ## Internal Turnstile verification
 
@@ -1437,7 +1458,7 @@ The switch controls browser availability, not backend authorization. Enable the
 matching backend and Pages proxy routes, Terms endpoints and a valid public
 Turnstile site key separately. Rebuild after changing this public variable; to
 close the browser controls, rebuild with it unset or `false`. Recovery navigation
-requires its own production switch described below; guest controls remain development-only. Production
+requires its own production switch described below; guest access has its independent switch described earlier. Production
 Google access also requires `VITE_GOOGLE_OAUTH_ENABLED=true` and a valid public
 `VITE_SUPABASE_AUTH_ISSUER`; the account flag alone does not enable it.
 No provider secrets belong in `VITE_` variables.
@@ -3741,8 +3762,10 @@ the disabled loading state, prevention of repeat requests while pending, success
 and recovery after a failed request. A fake-clock test checks that a stalled
 request is still pending at 14,999 ms, aborts at 15,000 ms, and enables retry.
 An unmount test verifies that leaving the page aborts a pending guest request
-and clears its timeout. Another test simulates development being disabled and
-verifies that the guest button stays disabled without sending a session request.
+and clears its timeout. Production tests verify that the default-off guest flag
+blocks both the button and direct hook calls without session/proof submissions.
+Opt-in tests cover first-use verification, duplicate callbacks, returning-session
+reuse, rejected proofs, private errors/rate limits and account-mode isolation.
 Requests are mocked; the backend and database are not needed. These jsdom tests
 do not replace browser checks of cookies, layout, or the built production bundle.
 
@@ -3754,14 +3777,16 @@ loading. App tests cover the initial verification request, one proof submission,
 and recovery with a fresh proof after rejected or unavailable verification.
 Automated tests do not contact Cloudflare or prove live token replay protection.
 
-Public guest access still requires abuse controls and production guest-route/cookie
-forwarding. Account sign-in, session restoration, sign-out and Google have
+Public guest access has a default-off browser opt-in and still requires controlled
+deployment of the existing abuse controls and guest-route/cookie forwarding.
+Account sign-in, session restoration, sign-out and Google have
 production browser opt-ins; email registration and confirmation use a separate
 default-off registration switch. Password recovery and reset share a separate
 default-off production browser switch, with default-disabled backend and proxy
 request/reset endpoints. Recovery email delivery, reset, old-password
-rejection and separate new-password sign-in have been manually validated locally,
-alongside registration and confirmation. Public deployment remains a separate step.
+rejection and separate new-password sign-in have been manually validated locally
+and on the hosted site, alongside registration and confirmation. Hosted recovery
+also invalidated existing application sessions. Hosted guest rollout remains pending.
 
 ## License
 

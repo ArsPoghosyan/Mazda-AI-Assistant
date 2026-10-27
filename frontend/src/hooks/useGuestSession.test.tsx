@@ -11,7 +11,35 @@ vi.mock('../api/guest', async (importOriginal) => {
 
 beforeEach(() => {
   vi.stubEnv('DEV', true)
+  vi.stubEnv('VITE_GUEST_ACCESS_ENABLED', 'false')
   vi.mocked(ensureGuestSession).mockReset()
+})
+
+test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production flag %s blocks guest requests and unsolicited proofs', async flag => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_GUEST_ACCESS_ENABLED', flag)
+  const { result } = renderHook(useGuestSession, { wrapper: StrictMode })
+  await act(async () => { await result.current.start() })
+  await act(async () => { await result.current.start('unsolicited-proof') })
+  expect(result.current.enabled).toBe(false)
+  expect(result.current.status).toBe('idle')
+  expect(ensureGuestSession).not.toHaveBeenCalled()
+})
+
+test('production guest access works independently of the account switch and only after a click', async () => {
+  vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_GUEST_ACCESS_ENABLED', 'true')
+  vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+  vi.mocked(ensureGuestSession).mockResolvedValue({ status: 'ok', expires_at: '2030-01-01T12:00:00Z' })
+  const { result } = renderHook(useGuestSession, { wrapper: StrictMode })
+  expect(result.current.enabled).toBe(true)
+  expect(ensureGuestSession).not.toHaveBeenCalled()
+  await act(async () => { await result.current.start('unsolicited-proof') })
+  expect(ensureGuestSession).not.toHaveBeenCalled()
+  await act(async () => { await result.current.start() })
+  await act(async () => { await result.current.start() })
+  expect(ensureGuestSession).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal), undefined)
+  expect(result.current.status).toBe('ready')
 })
 
 afterEach(() => {

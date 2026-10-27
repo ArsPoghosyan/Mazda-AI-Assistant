@@ -11,7 +11,7 @@ type GuestState = {
 }
 
 export function useGuestSession() {
-  const enabled = import.meta.env.DEV
+  const enabled = import.meta.env.DEV || import.meta.env.VITE_GUEST_ACCESS_ENABLED === 'true'
   const request = useRef<AbortController | null>(null)
 
   const [state, setState] = useState<GuestState>({

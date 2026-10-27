@@ -416,11 +416,16 @@ code-based password reset together, requiring the account flag too. Backend
 `ACCOUNT_PASSWORD_RECOVERY_API_ENABLED` / `ACCOUNT_PASSWORD_RESET_API_ENABLED`
 and Pages `ACCOUNT_PASSWORD_RECOVERY_PROXY_ENABLED` /
 `ACCOUNT_PASSWORD_RESET_PROXY_ENABLED` must be enabled separately. Reset ends
-with a separate sign-in. Guest browser controls remain development-only.
-The switch is public build configuration, not authorization: matching backend/proxy
-gates, Terms endpoints and a real Turnstile site key must be configured separately.
+with a separate sign-in. `VITE_GUEST_ACCESS_ENABLED=true` independently enables
+guest-session access. It also requires backend `GUEST_SESSION_API_ENABLED=true`,
+Pages `GUEST_SESSION_PROXY_ENABLED=true` and real Turnstile configuration.
+Guest sessions start only on a click; reloading and clicking again can reuse a
+valid HttpOnly cookie without a fresh challenge. Chat remains in development.
+These switches are public build configuration, not authorization: matching backend/proxy
+gates and a real Turnstile site key must be configured separately. Account flows
+also require the Terms endpoints.
 Changing it requires a new frontend build; set it to `false` and rebuild to close
-these browser controls. Hosted authenticated flows still need validation.
+these browser controls. Hosted guest validation remains a separate rollout step.
 A frontend build does not provide an API server.
 
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
@@ -484,7 +489,13 @@ schema drift and all seven migration files typed. The sign-in constraint upgrade
 preserved recovery data and permissions; rollback refused while sign-in records
 existed and succeeded after removing only the synthetic sign-in test record.
 
-The recovery browser checkpoint passed **500 UI/hook tests**, frontend lint,
+The guest browser checkpoint passed **523 UI/hook tests**, frontend lint,
+strict TypeScript and four production builds. Three isolated browser variants
+checked guest off/on and independent guest access with accounts off, including
+one verification proof and reuse of a synthetic local HttpOnly cookie after reload.
+APIs and verification were mocked; production cookie/Turnstile validation is pending.
+
+The earlier recovery browser checkpoint passed **500 UI/hook tests**, frontend lint,
 strict TypeScript and four production builds. Three isolated browser variants
 verified recovery off/on and account access off, including reset followed by
 separate sign-in, refresh and sign-out. Provider and verification calls were mocked.
@@ -501,7 +512,8 @@ returning login, Terms setup, persistence after refresh, sign-out and repeat log
 without a repeated agreement prompt. Hosted email registration, code confirmation,
 separate sign-in, refresh, sign-out and returning sign-in were also manually confirmed
 after correcting quoted Terms-receipt cookie forwarding. Hosted recovery/reset
-validation remains pending.
+was also confirmed: new-password sign-in works, the old password fails, existing
+application sessions are invalidated, and refresh/sign-out behavior is preserved.
 
 The earlier backend/transport checkpoint passed **3,929 offline backend tests**, **41 affected
 PostgreSQL integration tests**, **1,622 API/proxy tests**, **75 Workers runtime tests**

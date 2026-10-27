@@ -425,8 +425,9 @@ test('aborts a pending guest request when the app unmounts', async () => {
   ).toHaveLength(1)
 })
 
-test('keeps guest access disabled outside development', async () => {
+test('keeps production guest access disabled without opt-in', async () => {
   vi.stubEnv('DEV', false)
+  vi.stubEnv('VITE_GUEST_ACCESS_ENABLED', 'false')
   vi.stubEnv('PROD', true)
 
   const user = userEvent.setup()
