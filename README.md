@@ -27,6 +27,7 @@ for new deployments.
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
 | Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
+| Vehicle catalogue | Read-only database table of the ten US Mazda 6 configurations (2018–2021) listed in US EPA fueleconomy.gov data; not yet exposed through the API |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,

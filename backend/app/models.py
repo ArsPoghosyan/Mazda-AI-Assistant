@@ -7,9 +7,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     String,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -285,3 +288,72 @@ class AuthRateLimit(Base):
         DateTime(timezone=True),
         index=True,
     )
+
+
+class VehicleVariant(Base):
+    """Verified Mazda 6 configuration; shared catalogue data, read-only at runtime."""
+
+    __tablename__ = "vehicle_variants"
+    __table_args__ = (
+        # Allowed values mirror the verified data only; widening scope is a migration.
+        CheckConstraint(
+            "model_year BETWEEN 2018 AND 2021",
+            name="model_year_supported",
+        ),
+        CheckConstraint(
+            "market = 'US'",
+            name="market_supported",
+        ),
+        CheckConstraint(
+            "engine = '2.5L_I4_SKYACTIV_G'",
+            name="engine_supported",
+        ),
+        CheckConstraint(
+            "aspiration IN ('naturally_aspirated', 'turbo')",
+            name="aspiration_supported",
+        ),
+        CheckConstraint(
+            "transmission IN ('6AT', '6MT')",
+            name="transmission_supported",
+        ),
+        CheckConstraint(
+            "drive = 'FWD'",
+            name="drive_supported",
+        ),
+        CheckConstraint(
+            "trim_level IS NULL OR trim_level ~ '^[A-Za-z0-9][A-Za-z0-9 .-]{0,63}$'",
+            name="trim_level_format",
+        ),
+        CheckConstraint(
+            "epa_vehicle_id IS NULL OR epa_vehicle_id > 0",
+            name="epa_vehicle_id_positive",
+        ),
+        CheckConstraint(
+            "char_length(source_note) BETWEEN 1 AND 200 AND source_note !~ '[[:cntrl:]]'",
+            name="source_note_format",
+        ),
+        # NULLS NOT DISTINCT: two rows with no trim still count as duplicates.
+        UniqueConstraint(
+            "model_year",
+            "market",
+            "engine",
+            "aspiration",
+            "transmission",
+            "drive",
+            "trim_level",
+            name="uq_vehicle_variants_configuration",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    # Explicit IDs keep references stable across every environment.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    model_year: Mapped[int] = mapped_column(SmallInteger)
+    market: Mapped[str] = mapped_column(String(8))
+    engine: Mapped[str] = mapped_column(String(32))
+    aspiration: Mapped[str] = mapped_column(String(32))
+    transmission: Mapped[str] = mapped_column(String(8))
+    drive: Mapped[str] = mapped_column(String(8))
+    trim_level: Mapped[str | None] = mapped_column(String(64))
+    epa_vehicle_id: Mapped[int | None] = mapped_column(Integer, unique=True)
+    source_note: Mapped[str] = mapped_column(String(200))
