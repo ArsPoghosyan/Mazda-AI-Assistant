@@ -316,6 +316,12 @@ class VehicleVariant(Base):
             "transmission IN ('6AT', '6MT')",
             name="transmission_supported",
         ),
+        # EPA lists the manual only for non-turbo 2018-2019 cars.
+        CheckConstraint(
+            "transmission <> '6MT' OR "
+            "(aspiration = 'naturally_aspirated' AND model_year IN (2018, 2019))",
+            name="manual_configuration_supported",
+        ),
         CheckConstraint(
             "drive = 'FWD'",
             name="drive_supported",

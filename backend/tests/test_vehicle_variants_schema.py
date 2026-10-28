@@ -61,3 +61,7 @@ def test_allowed_values_are_enforced_by_the_database() -> None:
     assert "CHECK (aspiration IN ('naturally_aspirated', 'turbo'))" in ddl
     assert "CHECK (transmission IN ('6AT', '6MT'))" in ddl
     assert "CHECK (drive = 'FWD')" in ddl
+    assert (
+        "CHECK (transmission <> '6MT' OR "
+        "(aspiration = 'naturally_aspirated' AND model_year IN (2018, 2019)))"
+    ) in ddl

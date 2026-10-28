@@ -134,6 +134,48 @@ def test_unsupported_values_are_rejected(
     assert caught.value.orig.diag.constraint_name == f"ck_vehicle_variants_{constraint}"
 
 
+@pytest.mark.parametrize(
+    ("model_year", "aspiration"),
+    [
+        (2020, "naturally_aspirated"),
+        (2021, "naturally_aspirated"),
+        (2018, "turbo"),
+        (2019, "turbo"),
+        (2021, "turbo"),
+    ],
+)
+def test_unlisted_manual_combinations_are_rejected(
+    owner_connection: Connection, model_year: int, aspiration: str
+) -> None:
+    manual = {**VALID, "model_year": model_year, "aspiration": aspiration, "transmission": "6MT"}
+    with pytest.raises(IntegrityError) as caught:
+        owner_connection.execute(insert(VehicleVariant).values(**manual))
+    assert isinstance(caught.value.orig, CheckViolation)
+    assert (
+        caught.value.orig.diag.constraint_name
+        == "ck_vehicle_variants_manual_configuration_supported"
+    )
+
+
+@pytest.mark.parametrize("model_year", [2018, 2019])
+def test_listed_manual_combination_is_accepted(
+    owner_connection: Connection, model_year: int
+) -> None:
+    manual = {
+        **VALID,
+        "model_year": model_year,
+        "aspiration": "naturally_aspirated",
+        "transmission": "6MT",
+    }
+    owner_connection.execute(insert(VehicleVariant).values(**manual))
+    assert (
+        owner_connection.scalar(
+            select(VehicleVariant.transmission).where(VehicleVariant.id == 9999)
+        )
+        == "6MT"
+    )
+
+
 def test_duplicate_configuration_without_trim_is_rejected(owner_connection: Connection) -> None:
     # Same configuration as seeded variant 10; both have no trim.
     duplicate = {**VALID, "trim_level": None}
