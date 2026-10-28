@@ -20,12 +20,12 @@ export default function PrivacyNotice() {
       </header>
       <main id="privacy-content" tabIndex={-1} className="mx-auto max-w-3xl px-6 py-10 leading-7">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Privacy Notice</h1>
-        <p className="mt-3 text-sm text-muted">Last updated: <time dateTime="2026-10-26">26 October 2026</time></p>
+        <p className="mt-3 text-sm text-muted">Last updated: <time dateTime="2026-10-28">28 October 2026</time></p>
         <p className="mt-6 rounded-panel border border-divider bg-surface p-4">
-          This website is in development. Public account and guest access are not
-          enabled. AI chat and conversation storage are not active; the chat
-          preview is illustrative. Authentication details below describe the
-          implemented development and testing flows.
+          This website is in development. Guest sessions and optional account
+          registration, sign-in and password recovery are supported. AI chat,
+          conversation storage and vehicle guidance are not active; the chat
+          preview is illustrative.
         </p>
 
         <section aria-labelledby="privacy-operator" className="mt-8 space-y-3">
@@ -163,7 +163,7 @@ export default function PrivacyNotice() {
         <section aria-labelledby="privacy-changes" className="mt-8 space-y-3">
           <h2 id="privacy-changes" className="text-xl font-semibold">Changes and further information</h2>
           <p>
-            This notice will be reviewed before public authentication or AI chat
+            This notice will be reviewed before AI chat
             is introduced, including information about conversation storage and
             AI-provider processing when those features are added.
           </p>

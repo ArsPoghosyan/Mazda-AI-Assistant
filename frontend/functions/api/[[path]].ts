@@ -27,6 +27,18 @@ export async function onRequest({
   request,
   env,
 }: ProxyContext): Promise<Response> {
+  const response = await routeRequest({ request, env })
+  response.headers.set('X-Content-Type-Options', 'nosniff')
+  response.headers.set('X-Frame-Options', 'DENY')
+  response.headers.set('Referrer-Policy', 'no-referrer')
+  response.headers.set('Content-Security-Policy', "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'")
+  return response
+}
+
+async function routeRequest({
+  request,
+  env,
+}: ProxyContext): Promise<Response> {
   const pathname = new URL(request.url).pathname
 
   if (pathname === '/api/v1/account/terms/status' || pathname === '/api/v1/account/terms/accept') {

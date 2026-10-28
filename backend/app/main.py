@@ -26,6 +26,7 @@ from app.auth_rate_limit_scheduler import auth_rate_limit_cleanup_lifespan
 from app.config import Settings
 from app.database import create_database_engine, database_is_ready
 from app.guest_routes import router as guest_router
+from app.security_headers import SecurityHeadersMiddleware
 
 
 class HealthResponse(BaseModel):
@@ -117,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.add_middleware(SecurityHeadersMiddleware)
 
     application.include_router(guest_router)
     application.include_router(account_router)

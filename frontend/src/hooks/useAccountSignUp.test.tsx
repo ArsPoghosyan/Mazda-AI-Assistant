@@ -25,7 +25,7 @@ const credentials = {
   password: 'synthetic-password',
   captcha_token: 'synthetic-proof',
   accepted: true,
-  terms_version: '2026-10-26',
+  terms_version: '2026-10-28',
 }
 
 const acknowledgement: AccountSignUpResponse = {

@@ -57,8 +57,8 @@ function mockNetwork(signInResponse: () => Response | Promise<Response>, needsSe
     if (url === '/api/v1/health') {
       return Response.json({ status: 'ok', service: 'mazda6-assistant-api' })
     }
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: needsSetup ? null : new Date(Date.now() - 1000).toISOString(), acceptance_required: needsSetup })
-    if (url === '/api/v1/account/terms/accept') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString() })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: needsSetup ? null : new Date(Date.now() - 1000).toISOString(), acceptance_required: needsSetup })
+    if (url === '/api/v1/account/terms/accept') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString() })
     if (url === '/api/v1/account/session') {
       return new Response(null, { status: 401 })
     }

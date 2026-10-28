@@ -371,6 +371,24 @@ def test_header_rejects_oversized_token() -> None:
         get_account_token_key_id(SecretStr(token))
 
 
+def test_deeply_nested_untrusted_token_cannot_authenticate(
+    signing_key: ec.EllipticCurvePrivateKey,
+) -> None:
+    # Stay under the input cap. A parsed header is only a key-selection hint,
+    # never authentication, even if the decoder accepts its nested metadata.
+    header = b'{"alg":"ES256","kid":"synthetic","extra":' + b"[" * 1100 + b"0"
+    header += b"]" * 1100 + b"}"
+    encoded = urlsafe_b64encode(header).rstrip(b"=").decode("ascii")
+    token = f"{encoded}.e30.AA"
+    assert len(token) < 8192
+    try:
+        assert get_account_token_key_id(SecretStr(token)) == "synthetic"
+    except InvalidAccountToken:
+        pass
+    with pytest.raises(InvalidAccountToken, match="^Invalid account token\\.$"):
+        verify_for_test(token, signing_key.public_key())
+
+
 def test_header_extraction_does_not_establish_authenticity(
     signing_key: ec.EllipticCurvePrivateKey,
     claims: dict[str, object],

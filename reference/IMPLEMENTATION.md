@@ -11,6 +11,23 @@ Website metadata, policy-page titles/navigation, API documentation and the READM
 use that name. The original `a6` favicon uses the site palette; Mazda 6 remains
 vehicle coverage. Repository/package names and runtime identifiers remain stable.
 
+## Website not-found routing
+
+The Vite multi-page build emits `index.html` and `404.html`. The latter mounts
+only the branded NotFound component, supplies a no-JavaScript home link, and
+does not start account, guest, health or Turnstile requests. Unknown website
+paths return the static 404; exact `_redirects` rules rewrite `/privacy`,
+`/privacy/`, `/terms` and `/terms/` to `/` with status 200. No wildcard SPA
+rewrite is installed, and the existing `/api/*` Functions manifest is unchanged.
+Local Miniflare tests exercise real built assets plus the API handler; a hosted
+Pages deployment still needs its own post-deployment status check.
+
+The 28 October availability correction describes supported guest/account access
+and inactive AI chat. Both Terms constants now identify revision `2026-10-28`;
+old acceptance is retained as historical evidence and does not satisfy the new
+revision. Old signup receipts cannot silently accept revised Terms. Coordinate
+backend and frontend deployment; a version mismatch fails closed during rollout.
+
 ## Contents
 
 - [Engineering workflow](#engineering-workflow)
@@ -475,6 +492,10 @@ proof submission, no automatic requests, and returning-session reuse after reloa
 The cookie is a synthetic local HTTP HttpOnly fixture; this does not validate
 production Secure/`__Host-` scope, real Siteverify or backend cookie ownership.
 All API/verification responses are mocked and external network is blocked.
+Separate hosted manual checks confirmed first-use verification and guest readiness,
+then reload in the same browser followed by the guest action reached readiness
+without a new challenge. This confirms the tested guest access flow, not chat
+persistence, ownership transfer or resistance to every abuse case.
 
 ## Internal Turnstile verification
 
@@ -1323,7 +1344,7 @@ prevents downgrade rather than silently discarding acceptance records.
 `POST /api/v1/account/terms/accept` is independently disabled by default through
 `ACCOUNT_TERMS_API_ENABLED=false`. It requires a trusted Origin, opaque account
 cookie and live session verification. The 1 KiB JSON body accepts only literal
-boolean `accepted: true` and the exact current `terms_version` (`2026-10-26`);
+boolean `accepted: true` and the exact current `terms_version` (`2026-10-28`);
 client account IDs, timestamps, privacy-consent fields and query options are
 rejected. Parsing, verification and commit share the existing account-session
 deadline. The response contains only revision and acceptance time, renews the
@@ -1373,7 +1394,7 @@ session change/unmount, duplicate-submit protection and stale-response guards.
 Timeout or unconfirmed acceptance stays blocked and offers manual retry; there
 are no automatic retries or localStorage agreement records. A verified 401
 offers a return to sign-in. Shared frontend/proxy validation pins revision
-`2026-10-26`, exact fields, consistent required/accepted state and UTC timestamps;
+`2026-10-28`, exact fields, consistent required/accepted state and UTC timestamps;
 changing the Terms requires coordinated revision updates, never relabeling old
 acceptance records. The Privacy Notice now describes the agreement record and
 its removal with the application profile, separately from privacy consent.
@@ -3777,8 +3798,8 @@ loading. App tests cover the initial verification request, one proof submission,
 and recovery with a fresh proof after rejected or unavailable verification.
 Automated tests do not contact Cloudflare or prove live token replay protection.
 
-Public guest access has a default-off browser opt-in and still requires controlled
-deployment of the existing abuse controls and guest-route/cookie forwarding.
+Public guest access has a default-off browser opt-in. Its backend/proxy/browser
+rollout was manually checked with real verification and cookie reuse after reload.
 Account sign-in, session restoration, sign-out and Google have
 production browser opt-ins; email registration and confirmation use a separate
 default-off registration switch. Password recovery and reset share a separate
@@ -3786,7 +3807,17 @@ default-off production browser switch, with default-disabled backend and proxy
 request/reset endpoints. Recovery email delivery, reset, old-password
 rejection and separate new-password sign-in have been manually validated locally
 and on the hosted site, alongside registration and confirmation. Hosted recovery
-also invalidated existing application sessions. Hosted guest rollout remains pending.
+also invalidated existing application sessions. Chat and ownership features remain
+separate unfinished work.
+
+The authentication close-out review passed 345 focused offline regressions for
+CSRF/origins, trusted-client-IP boundaries, guest/account/OAuth cookies, JWTs,
+callback consumption, callback log redaction and signup Terms receipts. Together
+with the hosted manual paths above, this covers the implemented core access flows;
+it does not establish every live failure, concurrency or provider-linking case.
+Ordinary sign-out invalidates the application session. General provider-session
+revocation, self-service account deletion and future conversation authorization
+are separate from the implemented flows.
 
 ## License
 

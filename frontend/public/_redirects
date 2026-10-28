@@ -1,0 +1,5 @@
+# Preserve the two existing client-rendered policy routes.
+/privacy / 200
+/privacy/ / 200
+/terms / 200
+/terms/ / 200

@@ -351,6 +351,18 @@ def test_interruption_after_delete_rolls_back_before_connection_release(
             before = await state(case)
             entered = asyncio.Event()
             original = cleanup.delete_expired_oauth_login_attempts
+            deadlines: list[asyncio.Timeout] = []
+
+            def controlled_timeout(seconds: float) -> asyncio.Timeout:
+                deadline = asyncio.timeout(seconds)
+                deadlines.append(deadline)
+                return deadline
+
+            if outcome == "timeout":
+                # Expire the real context only after DELETE has completed.
+                # A 100 ms wall-clock race could time out opening a connection,
+                # never exercising the post-delete rollback this test promises.
+                monkeypatch.setattr(cleanup, "asyncio", SimpleNamespace(timeout=controlled_timeout))
 
             async def pending(connection: AsyncConnection, *, batch_size: int) -> int:
                 deleted = await original(connection, batch_size=batch_size)
@@ -360,9 +372,7 @@ def test_interruption_after_delete_rolls_back_before_connection_release(
 
             monkeypatch.setattr(cleanup, "delete_expired_oauth_login_attempts", pending)
             task = asyncio.create_task(
-                cleanup.commit_expired_oauth_login_attempt_cleanup(
-                    case.engine, timeout_seconds=0.1 if outcome == "timeout" else 30
-                )
+                cleanup.commit_expired_oauth_login_attempt_cleanup(case.engine, timeout_seconds=30)
             )
             try:
                 async with asyncio.timeout(3):
@@ -370,6 +380,9 @@ def test_interruption_after_delete_rolls_back_before_connection_release(
                     assert await state(case) == before
                     if outcome == "cancel":
                         task.cancel()
+                    else:
+                        assert len(deadlines) == 1
+                        deadlines[0].reschedule(asyncio.get_running_loop().time())
                     error = asyncio.CancelledError if outcome == "cancel" else TimeoutError
                     with pytest.raises(error):
                         await task

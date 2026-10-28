@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.account_sign_up_requests import SignUpCredentials, read_sign_up_credentials
 
-EMAIL = "owner@example.test"
+EMAIL = "owner@example.org"
 PASSWORD = "  synthetic-password-é  "
 CAPTCHA = "synthetic-captcha-proof"
 
@@ -22,7 +22,7 @@ def valid_payload() -> dict[str, object]:
         "password": PASSWORD,
         "captcha_token": CAPTCHA,
         "accepted": True,
-        "terms_version": "2026-10-26",
+        "terms_version": "2026-10-28",
     }
 
 
@@ -85,6 +85,60 @@ def test_preserves_credentials_and_masks_their_representation(
         assert secret not in repr(credentials)
         assert secret not in credentials.model_dump_json()
         assert secret not in response.text
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "Owner+maintenance@Example.ORG",
+        "élève@example.org",
+        "owner@xn--bcher-kva.de",
+        "owner@unfamiliar.engineering",
+        "owner@gmai.com",
+    ],
+)
+def test_email_syntax_does_not_guess_identity_or_domain_ownership(
+    harness: ParserHarness, email: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_dns(*args: object, **kwargs: object) -> None:
+        pytest.fail("Signup syntax checks must not query DNS.")
+
+    monkeypatch.setattr("dns.resolver.get_default_resolver", unexpected_dns)
+    payload = valid_payload()
+    payload["email"] = email
+    response = harness.client.post("/parse", json=payload)
+    assert response.status_code == 200
+    assert harness.parsed[0].email.get_secret_value() == email
+    assert email not in response.text
+    assert email not in repr(harness.parsed[0])
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "not-an-email",
+        "owner@@example.org",
+        "owner@",
+        "@example.org",
+        "owner@example..org",
+        "owner@-example.org",
+        "a..b@example.org",
+        "owner@example.org\r\nBcc:other@example.org",
+        "owner\x00@example.org",
+        " owner@example.org ",
+        "a" * 65 + "@example.org",
+        "owner@localhost",
+        "owner@example.test",
+    ],
+)
+def test_rejects_invalid_email_syntax_with_generic_masked_error(
+    harness: ParserHarness, email: str
+) -> None:
+    payload = valid_payload()
+    payload["email"] = email
+    response = harness.client.post("/parse", json=payload)
+    assert_error(response, harness, 400, "Invalid registration request.")
+    assert email not in response.text
 
 
 @pytest.mark.parametrize(
@@ -235,17 +289,17 @@ def test_accepts_structurally_valid_maximum_field_lengths(
     response = harness.client.post(
         "/parse",
         json={
-            "email": "a" * 307 + "@example.test",
+            "email": "a" * 64 + "@" + "b" * 63 + "." + "c" * 63 + ".example.org",
             "password": "p" * 1024,
             "captcha_token": "x" * 2048,
             "accepted": True,
-            "terms_version": "2026-10-26",
+            "terms_version": "2026-10-28",
         },
     )
 
     assert response.status_code == 200
     assert len(harness.parsed) == 1
-    assert len(harness.parsed[0].email.get_secret_value()) == 320
+    assert len(harness.parsed[0].email.get_secret_value()) == 204
     assert len(harness.parsed[0].password.get_secret_value()) == 1024
     assert len(harness.parsed[0].captcha_token.get_secret_value()) == 2048
 

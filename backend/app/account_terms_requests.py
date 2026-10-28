@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError, field_v
 
 # This revision identifies the development-stage Terms served at /terms.
 # Change it when publishing materially changed Terms; never relabel old records.
-CURRENT_TERMS_VERSION = "2026-10-26"
+CURRENT_TERMS_VERSION = "2026-10-28"
 _MAX_BODY_BYTES = 1024
 
 

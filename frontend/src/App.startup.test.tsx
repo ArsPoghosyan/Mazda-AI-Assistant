@@ -38,7 +38,7 @@ test('a minute-long cold start precedes the full session deadline and preserves 
   const restoring = deferredResponse()
   window.history.replaceState(null, '', '/#google-sign-in=success')
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url) => {
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
     if (url === '/api/v1/health') return (await waking.promise).clone()
     if (url === '/api/v1/account/session') return restoring.promise
     throw new Error('Unexpected request')
@@ -81,7 +81,7 @@ test('startup timeout ignores late success and waits for a manual retry before r
   const waking = deferredResponse()
   let ready = false
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url) => {
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
     if (url === '/api/v1/health') return ready ? health() : (await waking.promise).clone()
     if (url === '/api/v1/account/session') return new Response(null, { status: 401 })
     throw new Error('Unexpected request')
@@ -120,7 +120,7 @@ test.each([
   ['network failure', () => Promise.reject(new Error('private-hosting-details'))],
 ] as const)('%s keeps account and guest actions closed without session requests', async (_name, response) => {
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url) => {
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
     if (url === '/api/v1/health') return response()
     throw new Error('Unexpected request')
   })
@@ -151,7 +151,7 @@ test('successful health does not activate production account or guest access', a
   vi.stubEnv('DEV', false)
   vi.stubEnv('PROD', true)
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (url) => {
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
     if (url === '/api/v1/health') return health()
     throw new Error('Unexpected request')
   })

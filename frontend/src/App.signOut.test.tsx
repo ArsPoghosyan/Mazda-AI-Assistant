@@ -26,7 +26,7 @@ function mockNetwork(
     if (url === '/api/v1/health') {
       return Response.json({ status: 'ok', service: 'mazda6-assistant-api' })
     }
-    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-26', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
+    if (url === '/api/v1/account/terms/status') return Response.json({ terms_version: '2026-10-28', accepted_at: new Date(Date.now() - 1000).toISOString(), acceptance_required: false })
     if (url === '/api/v1/account/session') {
       return signedIn ? Response.json(session) : new Response(null, { status: 401 })
     }

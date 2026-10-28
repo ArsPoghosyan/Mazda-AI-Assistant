@@ -27,7 +27,7 @@ from app.main import create_app
 PATH = "/api/v1/account/sign-up"
 ORIGIN = "https://app.example.test"
 ISSUER = "https://auth.example.test/auth/v1"
-EMAIL = "owner@example.test"
+EMAIL = "owner@example.org"
 PASSWORD = "  synthetic-password-é  "
 CAPTCHA = "synthetic-captcha-proof"
 USER_ID = "563128d6-22fd-464f-a3bd-31018fdf1b3c"
@@ -137,7 +137,7 @@ def post_credentials(material: RouteMaterial) -> httpx2.Response:
             "password": PASSWORD,
             "captcha_token": CAPTCHA,
             "accepted": True,
-            "terms_version": "2026-10-26",
+            "terms_version": "2026-10-28",
         },
         headers={
             "Origin": ORIGIN,
@@ -212,6 +212,27 @@ def test_existing_account_has_the_same_public_acknowledgement(
     assert response.json() == ACKNOWLEDGEMENT
     assert_private_response(response)
     assert len(route_material.requests) == 1
+
+
+@pytest.mark.parametrize("email", ["no-at-sign", "owner@@example.org", "owner@localhost"])
+def test_invalid_email_is_rejected_before_provider_or_agreement_cookie(
+    route_material: RouteMaterial, email: str
+) -> None:
+    response = route_material.client.post(
+        PATH,
+        json={
+            "email": email,
+            "password": PASSWORD,
+            "captcha_token": CAPTCHA,
+            "accepted": True,
+            "terms_version": "2026-10-28",
+        },
+        headers={"Origin": ORIGIN},
+    )
+    assert_failure(response, 400, "Invalid registration request.")
+    assert route_material.requests == []
+    assert "set-cookie" not in response.headers
+    route_material.counter.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -493,7 +514,7 @@ def test_invalid_terms_never_reach_provider(
         "password": PASSWORD,
         "captcha_token": CAPTCHA,
         "accepted": True,
-        "terms_version": "2026-10-26",
+        "terms_version": "2026-10-28",
     }
     payload.update(patch)
     response = route_material.client.post(PATH, json=payload, headers={"Origin": ORIGIN})

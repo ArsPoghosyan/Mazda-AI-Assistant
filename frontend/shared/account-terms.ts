@@ -1,5 +1,5 @@
 // Keep this revision aligned with the published Terms and backend contract.
-export const CURRENT_TERMS_VERSION = '2026-10-26'
+export const CURRENT_TERMS_VERSION = '2026-10-28'
 
 export type TermsStatus = {
   terms_version: string

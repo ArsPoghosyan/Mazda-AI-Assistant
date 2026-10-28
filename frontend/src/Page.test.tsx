@@ -63,16 +63,19 @@ test('the notice has keyboard navigation, confirmed expiry and approved retentio
   expect(screen.getByText(/Pending Google sign-in attempts: expire after 10 minutes/)).toBeTruthy()
   expect(screen.getByText(/emails and attachments: kept for up to 90 days after resolution/)).toBeTruthy()
   expect(screen.getByText(/completion records: kept for up to 12 months after resolution/)).toBeTruthy()
-  expect(screen.getByText(/Public account and guest access are not enabled/)).toBeTruthy()
+  expect(screen.getByText(/Guest sessions and optional account registration, sign-in and password recovery are supported/)).toBeTruthy()
+  expect(screen.queryByText(/Public account and guest access are not enabled/)).toBeNull()
   expect(screen.getByText(/Session expiry does not delete an account/)).toBeTruthy()
   expect(screen.getByText(/no self-service account-deletion control/)).toBeTruthy()
 })
 
-test.each(['/', '/privacy-other', '/terms-other'])(
+test.each(['/', '/index.html'])(
   '%s preserves the landing page and footer notice link without activating production authentication',
   async (url) => {
     vi.stubEnv('DEV', false)
     vi.stubEnv('PROD', true)
+    vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
+    vi.stubEnv('VITE_GUEST_ACCESS_ENABLED', 'false')
     window.history.replaceState(null, '', url)
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       if (input !== '/api/v1/health') throw new Error('Unexpected request')
@@ -90,6 +93,35 @@ test.each(['/', '/privacy-other', '/terms-other'])(
     expect(fetchMock.mock.calls.every(([input]) => input === '/api/v1/health')).toBe(true)
   },
 )
+
+test.each(['/missing', '/privacy-other', '/terms-other', '/nested/missing', '/missing?code=synthetic-private#secret'])(
+  '%s shows the branded not-found page without auth or health requests', async url => {
+    window.history.replaceState(null, '', url)
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<StrictMode><Page /></StrictMode>)
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'Page not found', level: 1 })).toBeDefined()
+    expect(document.title).toBe('Page not found | askm6')
+    expect(screen.getByRole('link', { name: 'Back to home' }).getAttribute('href')).toBe('/')
+    expect(screen.getByRole('link', { name: 'Privacy Notice' }).getAttribute('href')).toBe('/privacy')
+    expect(screen.getByRole('link', { name: 'Terms of Service' }).getAttribute('href')).toBe('/terms')
+    expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull()
+    expect(document.body.textContent).not.toContain('synthetic-private')
+    await act(async () => { await Promise.resolve() })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test('not-found recovery uses keyboard-accessible navigation links', async () => {
+  window.history.replaceState(null, '', '/missing')
+  render(<Page />)
+  const user = userEvent.setup()
+  await user.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'askm6 home' }))
+  await user.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Back to home' }))
+})
 
 test(
   'registration opens safe new-tab policy links near submission without clearing credentials',
@@ -166,7 +198,9 @@ test('Terms have keyboard access and describe current availability without claim
   expect(screen.getByRole('main').getAttribute('tabindex')).toBe('-1')
   await user.tab()
   expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Back to askm6' }))
-  expect(screen.getByText(/Public account and guest access are not enabled/)).toBeTruthy()
+  expect(screen.getByText(/Guest sessions and optional account registration, sign-in and password recovery are supported/)).toBeTruthy()
+  expect(screen.getByText('28 October 2026')).toBeTruthy()
+  expect(screen.queryByText(/Public account and guest access are not enabled/)).toBeNull()
   expect(screen.getByText(/current website does not generate automotive advice/)).toBeTruthy()
   expect(screen.getByText(/independent, unofficial and unaffiliated with Mazda/)).toBeTruthy()
   expect(screen.getByText(/Signing out ends the local session; it does not delete the account/)).toBeTruthy()

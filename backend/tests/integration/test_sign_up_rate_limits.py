@@ -33,7 +33,7 @@ PATH = "/api/v1/account/sign-up"
 ORIGIN = "https://app.example.test"
 PEER = "192.0.2.12"
 OTHER_PEER = "198.51.100.20"
-EMAIL = "owner@example.test"
+EMAIL = "owner@example.org"
 PASSWORD = "  synthetic-password-é  "
 CAPTCHA = "synthetic-sign-up-proof"
 USER_ID = "563128d6-22fd-464f-a3bd-31018fdf1b3c"
@@ -193,7 +193,7 @@ def post(case: SignUpCase, **headers: str) -> httpx2.Response:
             "password": PASSWORD,
             "captcha_token": CAPTCHA,
             "accepted": True,
-            "terms_version": "2026-10-26",
+            "terms_version": "2026-10-28",
         },
         headers={"Origin": ORIGIN, **headers},
     )
@@ -257,11 +257,11 @@ def test_local_cap_prevents_body_parsing_and_cannot_be_bypassed_by_email_or_head
         sign_up_case.client.post(
             PATH,
             json={
-                "email": "another@example.test",
+                "email": "another@example.org",
                 "password": PASSWORD,
                 "captcha_token": CAPTCHA,
                 "accepted": True,
-                "terms_version": "2026-10-26",
+                "terms_version": "2026-10-28",
             },
             headers={"Origin": ORIGIN},
         ).status_code
@@ -411,7 +411,7 @@ def test_concurrent_registrations_cannot_exceed_cap(sign_up_case: SignUpCase) ->
                                     "password": PASSWORD,
                                     "captcha_token": CAPTCHA,
                                     "accepted": True,
-                                    "terms_version": "2026-10-26",
+                                    "terms_version": "2026-10-28",
                                 },
                                 headers={"Origin": ORIGIN},
                             )
@@ -481,7 +481,7 @@ def test_mapped_peer_cannot_split_budget_and_distinct_peer_is_independent(
                     "password": PASSWORD,
                     "captcha_token": CAPTCHA,
                     "accepted": True,
-                    "terms_version": "2026-10-26",
+                    "terms_version": "2026-10-28",
                 },
                 headers={"Origin": ORIGIN},
             )

@@ -1,5 +1,6 @@
 """Bounded registration parsing without exposing credential details."""
 
+from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException, Request, status
 from pydantic import (
     ConfigDict,
@@ -24,6 +25,18 @@ class SignUpCredentials(TermsAcceptanceRequest):
     email: SecretStr = Field(min_length=1, max_length=320)
     password: SecretStr = Field(min_length=1, max_length=1024)
     captcha_token: SecretStr = Field(min_length=1, max_length=2048)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_syntax(cls, value: SecretStr) -> SecretStr:
+        # Syntax is not ownership. Do not perform DNS queries, guess aliases,
+        # or change the credential/receipt matching used by existing flows.
+        # Supabase remains responsible for canonical identity and confirmation.
+        try:
+            validate_email(value.get_secret_value(), check_deliverability=False, strict=True)
+        except EmailNotValidError:
+            raise ValueError("Invalid email address.") from None
+        return value
 
     @field_validator("captcha_token")
     @classmethod

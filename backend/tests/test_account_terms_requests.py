@@ -60,7 +60,9 @@ def test_truthy_values_and_non_acceptance_are_rejected(accepted: object) -> None
     assert caught.value.headers == {"Cache-Control": "no-store"}
 
 
-@pytest.mark.parametrize("version", ["", "2020-01-01", "2099-01-01", " 2026-10-26", None, 1])
+@pytest.mark.parametrize(
+    "version", ["", "2020-01-01", "2026-10-26", "2099-01-01", " 2026-10-28", None, 1]
+)
 def test_only_the_exact_current_revision_is_accepted(version: object) -> None:
     with pytest.raises(HTTPException) as caught:
         asyncio.run(

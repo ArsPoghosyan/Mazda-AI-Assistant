@@ -6,7 +6,7 @@ import { readSignupTermsProxyCookie } from '../server/signup-terms-proxy-cookies
 const site = 'https://site.example'
 const path = '/api/v1/account/sign-up'
 const secret = 'ab'.repeat(32) // Public synthetic fixture.
-const credentials = { email: ' Owner@Example.test ', password: '  synthetic-password-é  ', captcha_token: 'synthetic-proof', accepted: true, terms_version: '2026-10-26' }
+const credentials = { email: ' Owner@Example.test ', password: '  synthetic-password-é  ', captcha_token: 'synthetic-proof', accepted: true, terms_version: '2026-10-28' }
 const accepted = { status: 'accepted', message: 'If registration can proceed, check your email for a verification code.' }
 const env = { API_ORIGIN: 'https://backend.example', AUTH_PUBLIC_ORIGIN: site,
   ACCOUNT_SIGN_UP_PROXY_ENABLED: 'true', AUTH_PROXY_TRUST_ENABLED: 'true', AUTH_PROXY_SHARED_SECRET: secret }
@@ -79,7 +79,7 @@ async function failure(response, status = 502) {
 }
 
 for (const [label, input] of [['exact credentials', credentials],
-  ['Unicode and maximum lengths', { email: '\ufeff' + 'é'.repeat(319), password: '😀'.repeat(1024), captcha_token: 'x'.repeat(2048), accepted: true, terms_version: '2026-10-26' }]]) {
+  ['Unicode and maximum lengths', { email: '\ufeff' + 'é'.repeat(319), password: '😀'.repeat(1024), captcha_token: 'x'.repeat(2048), accepted: true, terms_version: '2026-10-28' }]]) {
   test(`forwards ${label} once without browser credentials, returns only the generic acceptance`, async (t) => {
     const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
       assert.equal(url.href, env.API_ORIGIN + path)

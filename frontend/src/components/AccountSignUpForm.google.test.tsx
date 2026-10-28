@@ -215,7 +215,7 @@ test.each([
   act(() => widgetOptions(1).callback('fresh-proof'))
   await user.click(screen.getByRole('button', { name: 'Create account' }))
   expect(vi.mocked(signUpAccount).mock.calls[0]?.[0]).toEqual({
-    email: 'owner@example.test', password: 'fresh-password', captcha_token: 'fresh-proof', accepted: true, terms_version: '2026-10-26',
+    email: 'owner@example.test', password: 'fresh-password', captcha_token: 'fresh-proof', accepted: true, terms_version: '2026-10-28',
   })
   expect(onAccepted).toHaveBeenCalledExactlyOnceWith('owner@example.test')
   expect(navigate).not.toHaveBeenCalled()

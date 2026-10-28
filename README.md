@@ -7,8 +7,10 @@ The first version targets Mazda 6, starting with verified 2020 information;
 support for other Mazda models is a future possibility.
 
 **Early development:** [askm6.com](https://askm6.com) hosts the landing page and API
-health check. The full assistant is not available. Authentication works in local
-development; public guest/account access remains gated.
+health check, guest sessions and optional account access. Email registration,
+confirmation, Google sign-in and password recovery have been exercised on the
+hosted site. The AI assistant is not available; feature gates remain default-off
+for new deployments.
 
 [Local setup](#local-setup) · [API](#api-overview) · [Checks](#checks) ·
 [Full technical reference](reference/IMPLEMENTATION.md)
@@ -17,26 +19,27 @@ development; public guest/account access remains gated.
 
 | Area | Implemented |
 | --- | --- |
-| Web/API | React landing page, live connectivity feedback, FastAPI health and database readiness endpoints |
+| Web/API | React landing page, branded 404, live connectivity feedback, FastAPI health and database readiness endpoints |
 | Persistence | PostgreSQL/pgvector in Docker, SQLAlchemy pooling/TLS, Alembic, separate runtime/migration roles |
 | Guests | Opaque HttpOnly sessions, hashed tokens, expiry-safe refresh, Turnstile, IP limits and manual retry guidance for new-session attempts |
 | Accounts | Supabase email/password registration, email-code confirmation, sign-in, session restoration and current-session sign-out |
 | Google | Browser-bound PKCE flow for new and returning accounts, IP limits with manual retry guidance, verified callback, encrypted session storage |
 | Password recovery | CAPTCHA-protected email request, recovery-code/password reset, temporary provider-session cleanup and application-session invalidation |
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
-| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup; public deployment pending |
+| Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
-AI calls, message quotas, automated guest-history cleanup and public
-authentication deployment. Expired guest sessions are rejected before refresh.
+AI calls, message quotas and automated guest-history cleanup. Expired guest
+sessions are rejected before refresh.
 Planned embeddings use OpenAI `text-embedding-3-small` (1536 dimensions); answer
 generation is planned with Groq.
 
 Sign-in failures now have secret-free stage diagnostics and tested
 [commit-uncertainty/identity boundaries](reference/IMPLEMENTATION.md#provider-success-and-local-failure).
 Local rollback does not revoke a provider session; automatic provider logout
-remains unimplemented, and broader hosted linking/method behavior needs release validation.
+remains unimplemented; broader hosted abuse, failure and linking matrices have
+not been exhaustively tested.
 Both Google and password sign-in require explicit sign-out when an account cookie
 is present; a blocked attempt preserves the current session.
 
@@ -46,16 +49,15 @@ a waiting message and offers manual retry on failure; it does not send periodic
 keepalive requests. Public account browser controls remain disabled by default.
 
 A Privacy Notice page is available at `/privacy`, with links from the footer and
-account-creation form. It describes development-stage data flows and approved retention
-choices. Further privacy and operational checks remain before public
-authentication is enabled.
+account-creation form. It describes current authentication data flows and
+approved retention choices. The notices require another review before AI chat.
 
 Development-stage Terms of Service are prepared at `/terms`, cross-linked with
 the Privacy Notice and account-creation form. They describe current availability and
 responsible use; these pages do not enable public sign-in.
-The default-disabled Terms acceptance backend records a verified account's Terms
+The default-off Terms acceptance backend records a verified account's Terms
 revision and server timestamp, exposes authenticated setup status, and provides
-a tested access dependency for account resources. In development, verified
+a tested access dependency for account resources. Verified
 sign-in/restoration now checks setup status: missing agreement opens a modal
 with an unchecked Terms checkbox and separate Privacy Notice link. Returning
 accounts with recorded acceptance skip it. Email signup requires an unchecked
@@ -68,6 +70,14 @@ Escape dismisses without accepting;
 setup can be reopened and sign-out remains available. Hosted Terms forwarding
 is independently default-off through `ACCOUNT_TERMS_PROXY_ENABLED`.
 
+Website URLs outside the home and policy routes show a branded 404 with a home
+link. The build emits `404.html`; exact policy rewrites preserve `/privacy` and
+`/terms`, while `/api/*` keeps its JSON routing. Local static-runtime and browser
+checks cover these paths; hosted status codes must be checked after deployment.
+The policy availability correction advances the Terms revision to `2026-10-28`.
+Deploy matching backend/frontend revisions together; existing accounts explicitly
+accept the new revision, and historical agreement records are not relabelled.
+
 Guarded local database tests rehearse scoped manual account deletion and partial
 failures with a mocked provider. They do not add an account-deletion endpoint or
 establish live provider deletion behavior.
@@ -75,6 +85,11 @@ establish live provider deletion behavior.
 The public product name is **askm6**. The tab icon is an original `a6` monogram
 in the website palette. Mazda 6 describes initial vehicle coverage; existing
 repository, package, service and database identifiers retain their current names.
+
+Security review: [findings, fixes, validation and remaining operational checks](SECURITY_AUDIT.md).
+Signup syntax validation runs on FastAPI without DNS lookups; Supabase still
+owns email confirmation and identity uniqueness. Static pages, API proxies and
+FastAPI responses carry a tested framing/MIME/referrer header baseline.
 
 ## Stack and layout
 
@@ -84,7 +99,7 @@ repository, package, service and database identifiers retain their current names
 | Backend | Python 3.12, FastAPI, Pydantic, SQLAlchemy, Alembic — `backend/` |
 | Database | PostgreSQL with pgvector — Docker Compose locally |
 | Identity | Supabase Auth; Cloudflare Turnstile |
-| Deployment | Cloudflare Pages with health and default-off session proxy; FastAPI on Render |
+| Deployment | Cloudflare Pages with independently gated authentication proxies; FastAPI on Render |
 | Dependencies | Locked in `backend/uv.lock` and `frontend/package-lock.json` |
 
 This is a personal project developed in small, testable changes; external
@@ -425,7 +440,8 @@ These switches are public build configuration, not authorization: matching backe
 gates and a real Turnstile site key must be configured separately. Account flows
 also require the Terms endpoints.
 Changing it requires a new frontend build; set it to `false` and rebuild to close
-these browser controls. Hosted guest validation remains a separate rollout step.
+these browser controls. Hosted guest first-use verification and cookie reuse
+after reload have been manually confirmed.
 A frontend build does not provide an API server.
 
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
@@ -493,7 +509,9 @@ The guest browser checkpoint passed **523 UI/hook tests**, frontend lint,
 strict TypeScript and four production builds. Three isolated browser variants
 checked guest off/on and independent guest access with accounts off, including
 one verification proof and reuse of a synthetic local HttpOnly cookie after reload.
-APIs and verification were mocked; production cookie/Turnstile validation is pending.
+APIs and verification were mocked. Separate hosted manual checks confirmed real
+first-use verification, guest readiness and reuse after reload without another
+challenge. Reloading alone does not send a guest-session request.
 
 The earlier recovery browser checkpoint passed **500 UI/hook tests**, frontend lint,
 strict TypeScript and four production builds. Three isolated browser variants
@@ -536,9 +554,12 @@ failure, concurrency, every identity-linking case or public-deployment behavior.
 
 ## Remaining work and detailed reference
 
-Public authentication still needs deployment validation of abuse controls and
-cleanup, provider/linking/method-assurance and partial-session failure review, production
-proxy/cookie/redirect integration, and security/privacy/provider data-flow review.
+Core guest/account authentication has passed the hosted checks above. A focused
+close-out run also passed **345 offline security regressions** covering origins,
+trusted client IPs, cookies, JWT validation, OAuth callbacks/log redaction and Terms
+receipts. Hosted failure, load and identity-linking cases have not been exhaustively
+tested. Global provider-session revocation and self-service account deletion are
+not implemented; privacy-request handling and retention remain operational work.
 Conversation ownership, vehicle context, persistence, message quotas, retrieval
 and AI functionality remain separate unfinished work. Turnstile does not prove
 a unique person or replace rate limiting; conversation isolation is not covered

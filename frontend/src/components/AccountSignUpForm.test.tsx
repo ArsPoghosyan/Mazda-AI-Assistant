@@ -167,7 +167,7 @@ test('submits once, clears the password, and passes only email to confirmation',
     email: 'owner@example.test',
     password: passwordValue,
     captcha_token: 'synthetic-registration-proof',
-    accepted: true, terms_version: '2026-10-26',
+    accepted: true, terms_version: '2026-10-28',
   })
   expect(vi.mocked(signUpAccount).mock.calls[0]?.[1]).toBeInstanceOf(
     AbortSignal,

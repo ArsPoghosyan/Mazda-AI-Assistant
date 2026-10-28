@@ -11,9 +11,9 @@
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:api && npm run test:runtime && npm run test:ui",
-    "test:api": "node --test tests/health-proxy.test.mjs tests/account-session-proxy-policy.test.mjs tests/account-session-proxy.test.mjs tests/account-session-proxy-handler.test.mjs tests/guest-session-proxy.test.mjs tests/account-sign-in-proxy.test.mjs tests/account-sign-out-proxy.test.mjs tests/account-sign-up-proxy.test.mjs tests/account-email-confirmation-proxy.test.mjs tests/account-password-recovery-proxy.test.mjs tests/account-password-reset-proxy.test.mjs tests/account-google-start-proxy.test.mjs tests/account-google-callback-proxy.test.mjs tests/guest-api.test.mjs tests/account-api.test.mjs tests/account-registration-api.test.mjs tests/google-api.test.mjs tests/account-password-recovery-api.test.mjs tests/account-password-reset-api.test.mjs tests/account-terms-api.test.mjs tests/account-terms-proxy.test.mjs",
+    "test:api": "node --test tests/security-headers.test.mjs tests/health-proxy.test.mjs tests/account-session-proxy-policy.test.mjs tests/account-session-proxy.test.mjs tests/account-session-proxy-handler.test.mjs tests/guest-session-proxy.test.mjs tests/account-sign-in-proxy.test.mjs tests/account-sign-out-proxy.test.mjs tests/account-sign-up-proxy.test.mjs tests/account-email-confirmation-proxy.test.mjs tests/account-password-recovery-proxy.test.mjs tests/account-password-reset-proxy.test.mjs tests/account-google-start-proxy.test.mjs tests/account-google-callback-proxy.test.mjs tests/guest-api.test.mjs tests/account-api.test.mjs tests/account-registration-api.test.mjs tests/google-api.test.mjs tests/account-password-recovery-api.test.mjs tests/account-password-reset-api.test.mjs tests/account-terms-api.test.mjs tests/account-terms-proxy.test.mjs",
     "test:ui": "vitest run",
-    "test:runtime": "node --test tests/account-session-proxy-runtime.test.mjs",
+    "test:runtime": "node --test tests/account-session-proxy-runtime.test.mjs tests/page-routing-runtime.test.mjs",
     "lint": "eslint . --max-warnings 0",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview --host 127.0.0.1"
@@ -21,6 +21,12 @@
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "undici": "7.30.1",
+      "sharp": "0.35.5"
+    }
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
