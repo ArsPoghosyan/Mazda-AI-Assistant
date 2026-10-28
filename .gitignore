@@ -1,13 +1,7 @@
 .idea/
-# Local agent guidance and implementation prompts are not public project docs.
-/AGENTS.md
-/CODEX_FIRST_PROMPT.md
-/codexfirstpromt.md
-/skills-lock.json
+# Local planning notes are not public project docs.
 /SECURITY_AUDIT.md
 /docs/
-.agents/
-.codex/
 .tools/
 .venv/
 __pycache__/
