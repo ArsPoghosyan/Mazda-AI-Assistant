@@ -86,7 +86,6 @@ The public product name is **askm6**. The tab icon is an original `a6` monogram
 in the website palette. Mazda 6 describes initial vehicle coverage; existing
 repository, package, service and database identifiers retain their current names.
 
-Security review: [findings, fixes, validation and remaining operational checks](SECURITY_AUDIT.md).
 Signup syntax validation runs on FastAPI without DNS lookups; Supabase still
 owns email confirmation and identity uniqueness. Static pages, API proxies and
 FastAPI responses carry a tested framing/MIME/referrer header baseline.
