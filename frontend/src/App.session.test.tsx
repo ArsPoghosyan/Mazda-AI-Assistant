@@ -146,7 +146,7 @@ test('Google success waits for backend verification before showing Signed in', a
 
   mountApp()
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
   expect(
@@ -230,7 +230,7 @@ test('blocks access while checking and restores the account once', async () => {
       .hasAttribute('disabled'),
   ).toBe(true)
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   // Health can render before the session effect's deferred request starts.
   await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
@@ -415,7 +415,7 @@ test('unmount aborts the pending check and ignores a late response', async () =>
 
   const { unmount } = mountApp()
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   await waitFor(() => expect(accountRequests(fetchMock)).toHaveLength(1))
 
   const signal = accountRequests(fetchMock)[0]?.[1]?.signal
@@ -447,7 +447,7 @@ test('does not restore accounts outside development', async () => {
 
   mountApp()
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   expect(
     screen

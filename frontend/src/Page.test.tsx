@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import Page from './Page'
@@ -83,7 +83,7 @@ test.each(['/', '/index.html'])(
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<StrictMode><Page /></StrictMode>)
-    await screen.findByText('API connected')
+    await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
     const link = screen.getByRole('link', { name: 'Privacy Notice' })
     expect(link.getAttribute('href')).toBe('/privacy')
     expect(link.hasAttribute('target')).toBe(false)
@@ -118,9 +118,9 @@ test('not-found recovery uses keyboard-accessible navigation links', async () =>
   render(<Page />)
   const user = userEvent.setup()
   await user.tab()
-  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'askm6 home' }))
-  await user.tab()
   expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Back to home' }))
+  await user.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Privacy Notice' }))
 })
 
 test(

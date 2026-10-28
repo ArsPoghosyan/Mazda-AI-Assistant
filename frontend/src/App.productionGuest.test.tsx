@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { CURRENT_TERMS_VERSION } from '../shared/account-terms'
@@ -84,7 +84,7 @@ function guestRequests(fetchMock: ReturnType<typeof mockNetwork>) {
 }
 
 async function readyForAccess() {
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   await screen.findByRole('button', { name: 'Sign In' })
 }
 
@@ -179,7 +179,7 @@ test('production guest access waits for the account session check', async () => 
   const sessionResponse = new Promise<Response>(resolve => { complete = resolve })
   const fetchMock = mockNetwork({ sessionResponse })
   render(<StrictMode><App /></StrictMode>)
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   const button = screen.getByRole('button', { name: 'Try as Guest' })
   expect(button.hasAttribute('disabled')).toBe(true)
   fireEvent.click(button)

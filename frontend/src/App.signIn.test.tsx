@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
@@ -68,7 +68,7 @@ afterEach(() => {
 async function mountApp() {
   const user = userEvent.setup()
   const view = render(<StrictMode><App /></StrictMode>)
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   const trigger = screen.getByRole('button', { name: 'Sign In' })
   return { user, view, trigger }
 }

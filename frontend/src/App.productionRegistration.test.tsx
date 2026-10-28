@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { CURRENT_TERMS_VERSION } from '../shared/account-terms'
@@ -125,7 +125,7 @@ test('registration opt-in cannot open the production account dialog when the acc
   vi.stubEnv('VITE_ACCOUNT_AUTH_ENABLED', 'false')
   const fetchMock = mockNetwork()
   render(<StrictMode><App /></StrictMode>)
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   expect(screen.getByRole('button', { name: 'Sign In' }).hasAttribute('disabled')).toBe(true)
   expect(fetchMock.mock.calls.every(([url]) => url === '/api/v1/health')).toBe(true)
   expect(loadTurnstile).not.toHaveBeenCalled()

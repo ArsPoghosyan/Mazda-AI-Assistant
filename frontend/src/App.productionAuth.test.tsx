@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, render, screen, within } from '@testing-library/react'
+import { act, cleanup, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { CURRENT_TERMS_VERSION } from '../shared/account-terms'
@@ -148,7 +148,7 @@ test.each([undefined, '', 'false', 'TRUE', '1', 'true '])('production flag %s le
   vi.stubEnv('VITE_GOOGLE_OAUTH_ENABLED', 'true')
   const fetchMock = mockNetwork()
   render(<StrictMode><App /></StrictMode>)
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   const trigger = screen.getByRole('button', { name: 'Sign In' })
   expect(trigger.hasAttribute('disabled')).toBe(true)
   await userEvent.setup().click(trigger)

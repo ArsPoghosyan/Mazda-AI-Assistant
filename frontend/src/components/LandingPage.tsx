@@ -6,7 +6,6 @@ type LandingPageProps = {
   guestAction: ReactNode
   accountAction: ReactNode
   accountPanel: ReactNode
-  serviceStatus: ReactNode
 }
 
 const capabilities = [
@@ -28,7 +27,6 @@ export default function LandingPage({
   guestAction,
   accountAction,
   accountPanel,
-  serviceStatus,
 }: LandingPageProps) {
   return (
     <div className="flex min-h-dvh flex-col bg-background text-foreground">
@@ -40,7 +38,7 @@ export default function LandingPage({
       </a>
 
       <header className="mx-auto flex w-full max-w-7xl items-center justify-between border-b border-divider px-6 py-6 lg:px-10">
-        <a href="/" aria-label="askm6 home" className="text-2xl font-semibold">
+        <a href="/" aria-label="askm6 home" className="text-2xl font-semibold text-accent hover:text-accent-hover">
           askm6
         </a>
 
@@ -160,11 +158,10 @@ export default function LandingPage({
 
       <footer className="mx-auto flex w-full max-w-7xl flex-col gap-4 border-t border-divider px-6 py-6 text-sm text-muted sm:flex-row sm:items-center sm:justify-between lg:px-10">
         <p>Independent, unofficial and unaffiliated with Mazda.</p>
-        <nav aria-label="Site policies" className="flex flex-wrap items-center gap-x-6">
+        <nav aria-label="Site policies" className="flex flex-wrap items-center gap-x-6 self-end sm:self-auto">
           <PrivacyNoticeLink />
           <TermsOfServiceLink />
         </nav>
-        {serviceStatus}
       </footer>
 
       {accountPanel}

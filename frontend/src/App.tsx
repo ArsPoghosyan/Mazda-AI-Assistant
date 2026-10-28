@@ -5,14 +5,8 @@ import LandingPage from './components/LandingPage'
 import TurnstileChallenge from './components/TurnstileChallenge'
 import { useAccountSession } from './hooks/useAccountSession'
 import { useAccountSignOut } from './hooks/useAccountSignOut'
-import { useApiHealth, type ApiStatus } from './hooks/useApiHealth'
+import { useApiHealth } from './hooks/useApiHealth'
 import { useGuestSession } from './hooks/useGuestSession'
-
-const statusMessages: Record<ApiStatus, string> = {
-  checking: 'Checking API connection…',
-  connected: 'API connected',
-  unavailable: 'API unavailable',
-}
 
 export default function App() {
   const { status, retry } = useApiHealth()
@@ -132,6 +126,15 @@ export default function App() {
           >
             {accessMessage}
           </p>
+          {status === 'unavailable' && (
+            <button
+              type="button"
+              onClick={retry}
+              className="order-last inline-flex min-h-11 items-center px-2 text-accent hover:text-accent-hover"
+            >
+              Try again
+            </button>
+          )}
         </>
       }
       accountAction={
@@ -201,21 +204,6 @@ export default function App() {
           }}
           onClose={() => setSignInOpen(false)}
         />
-      }
-      serviceStatus={
-        <div className="flex flex-wrap items-center gap-3">
-          <p role="status">{statusMessages[status]}</p>
-
-          {status === 'unavailable' && (
-            <button
-              type="button"
-              onClick={retry}
-              className="inline-flex min-h-11 items-center px-2 text-accent hover:text-accent-hover"
-            >
-              Try again
-            </button>
-          )}
-        </div>
       }
     />
   )

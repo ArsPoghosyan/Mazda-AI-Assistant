@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import App from './App'
@@ -52,7 +52,7 @@ test('loading the page does not create a guest session', async () => {
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   expect(fetchMock).toHaveBeenCalled()
 
@@ -92,7 +92,7 @@ test.each([
   })
   vi.stubGlobal('fetch', fetchMock)
   render(<StrictMode><App /></StrictMode>)
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
   await user.click(screen.getByRole('button', { name: 'Try as Guest' }))
   const feedback = await screen.findByText(message)
   expect(feedback.getAttribute('role')).toBe('status')
@@ -147,7 +147,7 @@ test('starts one guest request and shows loading then success', async () => {
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   const guestRequests = () =>
     fetchMock.mock.calls.filter(
@@ -231,7 +231,7 @@ test('allows retry after a failed guest request', async () => {
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   await user.click(
     screen.getByRole('button', { name: 'Try as Guest' }),
@@ -313,7 +313,7 @@ test('aborts a stalled guest request after 15 seconds', async () => {
     )
   })
 
-  expect(screen.getByText('API connected')).toBeDefined()
+  expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull()
 
   fireEvent.click(
     screen.getByRole('button', { name: 'Try as Guest' }),
@@ -399,7 +399,7 @@ test('aborts a pending guest request when the app unmounts', async () => {
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   vi.useFakeTimers()
 
@@ -451,7 +451,7 @@ test('keeps production guest access disabled without opt-in', async () => {
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   const guestButton = screen.getByRole('button', {
     name: 'Try as Guest',
@@ -534,7 +534,7 @@ test('requests verification and submits one proof before starting guest access',
     </StrictMode>,
   )
 
-  await screen.findByText('API connected')
+  await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
   expect(loadTurnstile).not.toHaveBeenCalled()
   expect(guestRequests).toBe(0)
@@ -673,7 +673,7 @@ test.each([
       </StrictMode>,
     )
 
-    await screen.findByText('API connected')
+    await waitFor(() => expect(screen.queryByText('Starting the service… This may take about a minute.')).toBeNull())
 
     await user.click(
       screen.getByRole('button', { name: 'Try as Guest' }),
