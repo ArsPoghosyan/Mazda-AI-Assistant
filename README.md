@@ -3,7 +3,7 @@
 [![Checks](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArsPoghosyan/Mazda-AI-Assistant/actions/workflows/ci.yml)
 
 An independent, unofficial vehicle information assistant, unaffiliated with Mazda.
-The first version targets Mazda 6, starting with verified 2020 information;
+The first version targets Mazda 6, starting with verified 2021 model-year information;
 support for other Mazda models is a future possibility.
 
 **Early development:** [askm6.com](https://askm6.com) hosts the landing page and API

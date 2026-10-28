@@ -76,7 +76,7 @@ An independent, unofficial Mazda information assistant in early development.
 Unaffiliated with Mazda.
 
 The first version will support Mazda 6, starting with verified information for
-the 2020 model. Additional Mazda models may be added later.
+the 2021 model year. Additional Mazda models may be added later.
 
 **Status: early development.** The frontend and API health-check foundation
 are deployed at [askm6.com](https://askm6.com). The full assistant is not available yet.
