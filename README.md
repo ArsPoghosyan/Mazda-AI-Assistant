@@ -28,7 +28,7 @@ for new deployments.
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
 | Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
 | Vehicle catalogue | Read-only database table of the ten US Mazda 6 configurations (2018–2021) listed in US EPA fueleconomy.gov data; not yet exposed through the API |
-| Recall evidence schema | Read-only database tables for evidence sources, NHTSA recall campaigns and the model years they list; no recall data is loaded yet and nothing is exposed through the API or chat |
+| Recall evidence | Read-only database tables for evidence sources, NHTSA recall campaigns and the model years they list, plus a manual, local-only import command for Mazda 6 model years 2018–2021 (dry run by default); not yet exposed through the API or chat |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
@@ -204,7 +204,25 @@ on both local databases with unchanged grants. Google initiation throttling requ
 `b4d7e2806a12`, verified on both local website and test databases; integration tests
 require this head. The local website now has Terms setup enabled for controlled
 manual flow checks. The hosted database has not received this Terms migration;
-hosted authentication remains disabled.
+hosted authentication remains disabled. The vehicle catalogue and recall evidence
+migrations (`c3f1a9d2e7b4`, `d8e2b6c4a1f9`, `f4a7c2d9b351`) are verified on both
+local databases only.
+
+To load NHTSA recall listings into a local database, run from `backend` with
+`MIGRATION_DATABASE_URL` set to the local `mazda6` database and the `askm6_migrator`
+role (for example in an ignored `.env.migrations.dev`):
+
+```powershell
+uv run --env-file .env.migrations.dev python -m app.nhtsa_recall_import
+uv run --env-file .env.migrations.dev python -m app.nhtsa_recall_import --write
+```
+
+The command makes one request per model year to `api.nhtsa.gov`, validates every
+record, prints a summary and saves nothing without `--write`. It refuses any
+target other than `mazda6` on `127.0.0.1:15432`, so integration data stays clean.
+Repeating it is safe: unchanged campaigns only update their last-seen time, and
+campaigns that disappear upstream are kept and reported. An empty model year is
+not proof that no recalls exist; recalls apply per VIN at nhtsa.gov/recalls.
 
 Remote URLs require `sslmode=verify-full` and `sslrootcert` pointing to the CA
 certificate. Keep ordinary development on Docker. For an explicit Supabase
