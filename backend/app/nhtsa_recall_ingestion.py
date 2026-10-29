@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -13,15 +13,20 @@ from app.nhtsa_recalls import MAKE, MODEL, RecallBatch, RecallRecord
 SOURCE_SLUG = "nhtsa_recalls"
 
 
+class StaleBatchError(RuntimeError):
+    """A newer import already stored evidence; applying this batch would undo it."""
+
+
 @dataclass(frozen=True)
 class IngestionReport:
     added: int
     changed: int
     unchanged: int
     listings_added: int
-    # Stored campaigns for the requested years that NHTSA did not list this run.
-    # They are kept: disappearing from one response is not proof of withdrawal.
-    not_seen: tuple[str, ...]
+    # Stored (campaign, model year) listings for the requested years that NHTSA
+    # did not list this run. They are kept: one missing response is not proof
+    # of withdrawal.
+    not_seen: tuple[tuple[str, int], ...]
 
 
 def _content(record: RecallRecord) -> dict[str, object]:
@@ -46,7 +51,10 @@ def apply_recall_batch(
     *,
     seen_at: datetime,
 ) -> IngestionReport:
-    """Insert new campaigns, update changed ones and mark every listed one as seen."""
+    """Insert new campaigns, update changed ones and mark every listed one as seen.
+
+    seen_at is when the batch was fetched, so evidence time never moves backward.
+    """
     if seen_at.tzinfo is None:
         raise ValueError("seen_at must be timezone-aware.")
 
@@ -59,6 +67,14 @@ def apply_recall_batch(
     source_id = connection.execute(
         select(EvidenceSource.id).where(EvidenceSource.slug == SOURCE_SLUG)
     ).scalar_one()
+
+    # Under the lock: refuse a batch fetched before the newest stored evidence,
+    # so a slow import cannot overwrite newer content or safety flags.
+    newest = connection.scalar(
+        select(func.max(RecallCampaign.last_seen_at)).where(RecallCampaign.source_id == source_id)
+    )
+    if newest is not None and newest > seen_at:
+        raise StaleBatchError("A newer import already ran; this batch is out of date.")
 
     stored = {
         number: (campaign_id, digest)
@@ -122,18 +138,17 @@ def apply_recall_batch(
             ).all()
         )
 
-    not_seen = connection.scalars(
-        select(RecallCampaign.campaign_number)
-        .distinct()
+    listed_now = {(number, year) for number, years in batch.listings.items() for year in years}
+    stored_listings = connection.execute(
+        select(RecallCampaign.campaign_number, RecallApplicability.model_year)
         .join(RecallApplicability)
         .where(
             RecallCampaign.source_id == source_id,
             RecallApplicability.make == MAKE,
             RecallApplicability.model == MODEL,
             RecallApplicability.model_year.in_(batch.model_years),
-            RecallCampaign.campaign_number.not_in(batch.campaigns),
         )
-        .order_by(RecallCampaign.campaign_number)
+        .order_by(RecallCampaign.campaign_number, RecallApplicability.model_year)
     ).all()
 
     return IngestionReport(
@@ -141,5 +156,7 @@ def apply_recall_batch(
         changed=changed,
         unchanged=unchanged,
         listings_added=listings_added,
-        not_seen=tuple(not_seen),
+        not_seen=tuple(
+            (number, year) for number, year in stored_listings if (number, year) not in listed_now
+        ),
     )

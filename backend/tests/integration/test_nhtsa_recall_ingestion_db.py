@@ -14,7 +14,7 @@ from sqlalchemy.pool import NullPool
 
 from app.models import RecallApplicability, RecallCampaign
 from app.nhtsa_recall_import import ImportTargetError, apply_in_transaction
-from app.nhtsa_recall_ingestion import IngestionReport, apply_recall_batch
+from app.nhtsa_recall_ingestion import IngestionReport, StaleBatchError, apply_recall_batch
 from app.nhtsa_recalls import RecallBatch, fingerprint, merge_model_years, parse_model_year_response
 
 pytestmark = pytest.mark.integration
@@ -112,8 +112,44 @@ def test_campaign_missing_upstream_is_kept_and_reported(owner_connection: Connec
     del batch.listings["21V875000"]
 
     report = apply_recall_batch(owner_connection, batch, seen_at=LATER_RUN)
-    assert report.not_seen == ("21V875000",)
+    assert report.not_seen == (("21V875000", 2018),)
     assert campaign_times(owner_connection, "21V875000") == (FIRST_RUN,) * 3
+
+
+def test_model_year_missing_upstream_is_kept_and_reported(owner_connection: Connection) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    batch = recorded_batch()
+    # 19V497000 is still listed for 2018 but no longer for 2019.
+    batch.listings["19V497000"] = frozenset({2018})
+
+    report = apply_recall_batch(owner_connection, batch, seen_at=LATER_RUN)
+    assert report.not_seen == (("19V497000", 2019),)
+    years = owner_connection.scalars(
+        select(RecallApplicability.model_year)
+        .join(RecallCampaign)
+        .where(RecallCampaign.campaign_number == "19V497000")
+        .order_by(RecallApplicability.model_year)
+    ).all()
+    assert years == [2018, 2019]
+
+
+def test_older_batch_cannot_overwrite_newer_evidence(owner_connection: Connection) -> None:
+    newer = recorded_batch()
+    original = newer.campaigns["19V497000"]
+    urgent = replace(original, park_it=True)
+    newer.campaigns["19V497000"] = replace(urgent, record_sha256=fingerprint(urgent))
+    apply_recall_batch(owner_connection, newer, seen_at=LATER_RUN)
+
+    # A slower import fetched before LATER_RUN finishes afterwards.
+    with pytest.raises(StaleBatchError):
+        apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+
+    stored = owner_connection.execute(
+        select(RecallCampaign.park_it, RecallCampaign.last_seen_at).where(
+            RecallCampaign.campaign_number == "19V497000"
+        )
+    ).one()
+    assert tuple(stored) == (True, LATER_RUN)
 
 
 def test_years_outside_the_run_are_not_reported_missing(owner_connection: Connection) -> None:
@@ -158,7 +194,11 @@ def run_dry_import(
                     await connection.execute(text(f"SET ROLE {role}"))
                     await connection.commit()
                 return await apply_in_transaction(
-                    connection, recorded_batch(), database=database, write=False
+                    connection,
+                    recorded_batch(),
+                    fetched_at=datetime.now(UTC),
+                    database=database,
+                    write=False,
                 )
         finally:
             await engine.dispose()

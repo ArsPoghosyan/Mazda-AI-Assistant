@@ -119,10 +119,29 @@ def test_summary_flags_urgent_campaigns_and_never_claims_no_recalls() -> None:
         campaigns={"19V000001": make_record("19V000001", park_it=True)},
         listings={"19V000001": frozenset({2018})},
     )
-    report = IngestionReport(added=1, changed=0, unchanged=0, listings_added=1, not_seen=())
+    report = IngestionReport(
+        added=1, changed=0, unchanged=0, listings_added=1, not_seen=(("19V000002", 2019),)
+    )
     summary = describe(batch, report, database="mazda6", write=False)
     assert "2018: 1, 2021: 0" in summary
+    assert "Stored listings not seen this run (kept): 19V000002 (2019)." in summary
     assert "Park-it / park-outside campaigns: 19V000001." in summary
     assert "not proof that no recalls exist" in summary
     assert "nothing saved" in summary
     assert "no recalls." not in summary.lower()
+
+
+def test_failure_during_commit_is_reported_as_uncertain(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MIGRATION_DATABASE_URL", LOCAL)
+    monkeypatch.setattr("sys.argv", ["nhtsa_recall_import", "--write"])
+
+    async def lost_connection(*args: object, **kwargs: object) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr("app.nhtsa_recall_import.run_import", lost_connection)
+    assert main() == 1
+    error = capsys.readouterr().err
+    assert "may or may not have been saved" in error
+    assert "Re-run the import to check" in error

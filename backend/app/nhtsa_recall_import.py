@@ -15,7 +15,7 @@ from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.nhtsa_recall_ingestion import IngestionReport, apply_recall_batch
+from app.nhtsa_recall_ingestion import IngestionReport, StaleBatchError, apply_recall_batch
 from app.nhtsa_recalls import SUPPORTED_YEARS, NhtsaRecallError, RecallBatch, fetch_recalls
 
 _DATABASE_TIMEOUT_SECONDS = 30
@@ -69,6 +69,7 @@ async def apply_in_transaction(
     connection: AsyncConnection,
     batch: RecallBatch,
     *,
+    fetched_at: datetime,
     database: str,
     write: bool,
 ) -> IngestionReport:
@@ -79,7 +80,7 @@ async def apply_in_transaction(
         if tuple(identity) != (database, "askm6_migrator"):
             raise ImportTargetError("Unexpected database identity.")
 
-        report = await connection.run_sync(apply_recall_batch, batch, seen_at=datetime.now(UTC))
+        report = await connection.run_sync(apply_recall_batch, batch, seen_at=fetched_at)
         if write:
             await transaction.commit()
     finally:
@@ -99,6 +100,8 @@ async def run_import(
     """Fetch everything first, then apply it in one transaction that commits only on --write."""
     url = local_import_target(database_url)
 
+    # Evidence is dated by when it was fetched, not when it is saved.
+    fetched_at = datetime.now(UTC)
     async with httpx2.AsyncClient(
         transport=transport, trust_env=False, follow_redirects=False
     ) as client:
@@ -116,7 +119,11 @@ async def run_import(
         async with asyncio.timeout(_DATABASE_TIMEOUT_SECONDS):
             async with engine.connect() as connection:
                 report = await apply_in_transaction(
-                    connection, batch, database=url.database or "", write=write
+                    connection,
+                    batch,
+                    fetched_at=fetched_at,
+                    database=url.database or "",
+                    write=write,
                 )
     finally:
         await engine.dispose()
@@ -141,7 +148,9 @@ def describe(batch: RecallBatch, report: IngestionReport, *, database: str, writ
         f"Campaigns: {report.added} added, {report.changed} changed, "
         f"{report.unchanged} unchanged; {report.listings_added} model-year listings added.",
         f"Park-it / park-outside campaigns: {', '.join(urgent) or 'none'}.",
-        "Stored but not listed this run (kept): " + (", ".join(report.not_seen) or "none") + ".",
+        "Stored listings not seen this run (kept): "
+        + (", ".join(f"{number} ({year})" for number, year in report.not_seen) or "none")
+        + ".",
     ]
     if batch.empty_years:
         years = ", ".join(map(str, batch.empty_years))
@@ -186,14 +195,15 @@ def main() -> int:
             run_import(database_url, model_years, write=arguments.write),
             loop_factory=asyncio.SelectorEventLoop,
         )
-    except (NhtsaRecallError, ImportTargetError) as error:
+    except (NhtsaRecallError, ImportTargetError, StaleBatchError) as error:
         print(f"Import stopped, nothing saved: {error}", file=sys.stderr)
         return 1
     except (SQLAlchemyError, TimeoutError, ValueError, OSError):
-        # A failure during the final commit has an uncertain outcome; re-running is safe.
+        # A connection lost during the final commit leaves the outcome unknown.
         print(
-            "Import stopped by a database or network failure. Changes are saved only "
-            "when 'Committed.' is printed; re-run to confirm (repeating is safe).",
+            "Import stopped by a database or network failure. If it happened while "
+            "committing, the changes may or may not have been saved. Re-run the import "
+            "to check; repeating it is safe.",
             file=sys.stderr,
         )
         return 1
