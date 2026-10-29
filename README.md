@@ -28,6 +28,7 @@ for new deployments.
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
 | Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
 | Vehicle catalogue | Read-only database table of the ten US Mazda 6 configurations (2018–2021) listed in US EPA fueleconomy.gov data; not yet exposed through the API |
+| Recall evidence schema | Read-only database tables for evidence sources, NHTSA recall campaigns and the model years they list; no recall data is loaded yet and nothing is exposed through the API or chat |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,

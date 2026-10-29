@@ -1,12 +1,15 @@
 """Shared SQLAlchemy model foundation."""
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
+    Identity,
     Integer,
     LargeBinary,
     MetaData,
@@ -363,3 +366,150 @@ class VehicleVariant(Base):
     trim_level: Mapped[str | None] = mapped_column(String(64))
     epa_vehicle_id: Mapped[int | None] = mapped_column(Integer, unique=True)
     source_note: Mapped[str] = mapped_column(String(200))
+
+
+class EvidenceSource(Base):
+    """External source of trusted facts, with the terms that permit its use."""
+
+    __tablename__ = "evidence_sources"
+    __table_args__ = (
+        CheckConstraint(
+            "slug ~ '^[a-z0-9][a-z0-9_]{0,63}$'",
+            name="slug_format",
+        ),
+        CheckConstraint(
+            "char_length(name) BETWEEN 1 AND 120 AND name !~ '[[:cntrl:]]'",
+            name="name_format",
+        ),
+        CheckConstraint(
+            "char_length(publisher) BETWEEN 1 AND 120 AND publisher !~ '[[:cntrl:]]'",
+            name="publisher_format",
+        ),
+        CheckConstraint(
+            "url ~ '^https://[^[:space:][:cntrl:]]+$'",
+            name="url_https",
+        ),
+        CheckConstraint(
+            "terms_url ~ '^https://[^[:space:][:cntrl:]]+$'",
+            name="terms_url_https",
+        ),
+        CheckConstraint(
+            "char_length(terms_note) BETWEEN 1 AND 300 AND terms_note !~ '[[:cntrl:]]'",
+            name="terms_note_format",
+        ),
+    )
+
+    # Explicit IDs keep references stable across every environment.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    slug: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
+    publisher: Mapped[str] = mapped_column(String(120))
+    url: Mapped[str] = mapped_column(String(300))
+    terms_url: Mapped[str] = mapped_column(String(300))
+    terms_note: Mapped[str] = mapped_column(String(300))
+    terms_checked_on: Mapped[date] = mapped_column(Date)
+
+
+class RecallCampaign(Base):
+    """One NHTSA safety recall as last retrieved; written only by ingestion."""
+
+    __tablename__ = "recall_campaigns"
+    __table_args__ = (
+        # NHTSA vehicle campaigns look like 19V497000: year, 'V', six digits.
+        CheckConstraint(
+            "campaign_number ~ '^[0-9]{2}V[0-9]{6}$'",
+            name="campaign_number_format",
+        ),
+        CheckConstraint(
+            "char_length(manufacturer) BETWEEN 1 AND 120 AND manufacturer !~ '[[:cntrl:]]'",
+            name="manufacturer_format",
+        ),
+        CheckConstraint(
+            "char_length(component) BETWEEN 1 AND 300 AND component !~ '[[:cntrl:]]'",
+            name="component_format",
+        ),
+        # Ingestion normalises whitespace; the database rejects anything it missed.
+        CheckConstraint(
+            "char_length(summary) BETWEEN 1 AND 4000 AND summary !~ '[[:cntrl:]]'",
+            name="summary_format",
+        ),
+        CheckConstraint(
+            "char_length(consequence) BETWEEN 1 AND 2000 AND consequence !~ '[[:cntrl:]]'",
+            name="consequence_format",
+        ),
+        CheckConstraint(
+            "char_length(remedy) BETWEEN 1 AND 2000 AND remedy !~ '[[:cntrl:]]'",
+            name="remedy_format",
+        ),
+        CheckConstraint(
+            "notes IS NULL OR (char_length(notes) BETWEEN 1 AND 2000 AND notes !~ '[[:cntrl:]]')",
+            name="notes_format",
+        ),
+        CheckConstraint(
+            "octet_length(record_sha256) = 32",
+            name="record_sha256_length",
+        ),
+        CheckConstraint(
+            "first_seen_at <= content_updated_at AND content_updated_at <= last_seen_at",
+            name="seen_times_ordered",
+        ),
+        UniqueConstraint(
+            "source_id",
+            "campaign_number",
+            name="uq_recall_campaigns_source_campaign",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True), primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("app.evidence_sources.id", ondelete="RESTRICT"),
+    )
+    campaign_number: Mapped[str] = mapped_column(String(9))
+    report_received_on: Mapped[date] = mapped_column(Date)
+    manufacturer: Mapped[str] = mapped_column(String(120))
+    component: Mapped[str] = mapped_column(String(300))
+    summary: Mapped[str] = mapped_column(String(4000))
+    consequence: Mapped[str] = mapped_column(String(2000))
+    remedy: Mapped[str] = mapped_column(String(2000))
+    notes: Mapped[str | None] = mapped_column(String(2000))
+    # NHTSA's "do not drive" and "park outside" flags drive safety escalation.
+    park_it: Mapped[bool] = mapped_column(Boolean)
+    park_outside: Mapped[bool] = mapped_column(Boolean)
+    over_the_air_update: Mapped[bool] = mapped_column(Boolean)
+    # SHA-256 of the upstream record, so re-ingestion can detect real changes.
+    record_sha256: Mapped[bytes] = mapped_column(LargeBinary)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    content_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RecallApplicability(Base):
+    """Model year a campaign is listed for; NHTSA's listing, not a per-VIN result."""
+
+    __tablename__ = "recall_applicability"
+    __table_args__ = (
+        CheckConstraint(
+            "make = 'MAZDA'",
+            name="make_supported",
+        ),
+        CheckConstraint(
+            "model = 'MAZDA6'",
+            name="model_supported",
+        ),
+        CheckConstraint(
+            "model_year BETWEEN 2018 AND 2021",
+            name="model_year_supported",
+        ),
+    )
+
+    campaign_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("app.recall_campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Spelled as NHTSA lists them; deliberately not linked to vehicle_variants,
+    # because a model-year listing does not say which configurations are affected.
+    make: Mapped[str] = mapped_column(String(16), primary_key=True)
+    model: Mapped[str] = mapped_column(String(16), primary_key=True)
+    model_year: Mapped[int] = mapped_column(SmallInteger, primary_key=True)

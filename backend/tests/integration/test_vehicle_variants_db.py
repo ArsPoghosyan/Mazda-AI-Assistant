@@ -1,11 +1,9 @@
 """Vehicle-variant catalogue seed data, constraints and grants on guarded PostgreSQL."""
 
-from collections.abc import Iterator
-
 import pytest
 from psycopg.errors import CheckViolation, InsufficientPrivilege, UniqueViolation
-from sqlalchemy import delete, insert, select, text, update
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy import delete, insert, select, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from app.models import VehicleVariant
@@ -24,18 +22,6 @@ VALID: dict[str, object] = {
     "epa_vehicle_id": None,
     "source_note": "Synthetic integration-test row",
 }
-
-
-@pytest.fixture
-def owner_connection(integration_engine: Engine) -> Iterator[Connection]:
-    """Write as the migration role, which owns the table, and roll back."""
-    with integration_engine.connect() as connection:
-        transaction = connection.begin()
-        try:
-            connection.execute(text("SET LOCAL ROLE askm6_migrator"))
-            yield connection
-        finally:
-            transaction.rollback()
 
 
 def test_seed_contains_the_ten_verified_configurations(app_connection: Connection) -> None:

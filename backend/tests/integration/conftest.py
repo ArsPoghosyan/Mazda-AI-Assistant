@@ -84,6 +84,19 @@ def app_connection(integration_engine: Engine) -> Iterator[Connection]:
 
 
 @pytest.fixture
+def owner_connection(integration_engine: Engine) -> Iterator[Connection]:
+    """Write reference data as the migration role, which owns it, and roll back."""
+    with integration_engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+            connection.execute(text("SET LOCAL ROLE askm6_migrator"))
+            yield connection
+        finally:
+            transaction.rollback()
+
+
+@pytest.fixture
 def async_app_connection_factory(
     integration_engine: Engine,
 ) -> Callable[[], AbstractAsyncContextManager[AsyncConnection]]:
