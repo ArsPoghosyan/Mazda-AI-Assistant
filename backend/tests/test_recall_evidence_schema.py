@@ -21,9 +21,12 @@ def ddl(table: object) -> str:
     return str(CreateTable(table).compile(dialect=DIALECT))  # type: ignore[arg-type]
 
 
-def test_only_campaign_notes_are_optional() -> None:
-    for table in (SOURCES, LISTINGS):
-        assert not [column.name for column in table.c if column.nullable]
+def test_only_campaign_notes_and_legacy_listing_dates_are_optional() -> None:
+    assert not [column.name for column in SOURCES.c if column.nullable]
+    assert {column.name for column in LISTINGS.c if column.nullable} == {
+        "first_listed_at",
+        "last_listed_at",
+    }
     assert {column.name for column in CAMPAIGNS.c if column.nullable} == {"notes"}
 
 
@@ -82,5 +85,8 @@ def test_model_year_checks_are_keyed_per_source_and_year() -> None:
 
 def test_each_listing_keeps_its_own_listed_times() -> None:
     assert {"first_listed_at", "last_listed_at"} <= set(LISTINGS.c.keys())
-    assert not LISTINGS.c.last_listed_at.nullable
-    assert "CHECK (first_listed_at <= last_listed_at)" in ddl(LISTINGS)
+    assert (
+        "CHECK ((first_listed_at IS NULL AND last_listed_at IS NULL) OR "
+        "(first_listed_at IS NOT NULL AND last_listed_at IS NOT NULL "
+        "AND first_listed_at <= last_listed_at))"
+    ) in ddl(LISTINGS)

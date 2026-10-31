@@ -112,7 +112,7 @@ def test_previously_listed_campaign_is_dated_and_not_presented_as_current() -> N
         "as of 2026-10-29."
     )
     assert (
-        "1 recall campaign listed earlier was not in the latest listing: "
+        "1 recall campaign listed earlier was not confirmed by the latest listing: "
         "19V497000 (last listed 2026-10-01). That does not show it was withdrawn or fixed."
     ) in statement
     assert "NHTSA lists 1 recall" not in statement
@@ -137,3 +137,19 @@ def test_reduced_listing_counts_only_current_campaigns() -> None:
 def test_previously_listed_park_flag_still_requires_urgency() -> None:
     dropped_fire = replace(FACT, park_outside=True, last_listed_at=EARLIER)
     assert evidence(previously_listed=(dropped_fire,)).requires_urgent_safety_message is True
+
+
+def test_unknown_listing_date_is_admitted_not_invented() -> None:
+    legacy = replace(FACT, last_listed_at=None)
+    statement = listing_statement(evidence(previously_listed=(legacy,)))
+    assert "19V497000 (last-listed date unknown)" in statement
+    assert "NHTSA lists 1 recall" not in statement
+
+
+def test_inconsistent_stored_data_says_nothing_until_reimported() -> None:
+    legacy = replace(FACT, last_listed_at=None)
+    statement = listing_statement(evidence(status="unverified", previously_listed=(legacy,)))
+    assert "is incomplete and must be re-imported" in statement
+    assert "as of" not in statement
+    assert "showed no recall campaigns" not in statement
+    assert not FALSE_ALL_CLEAR.search(statement)

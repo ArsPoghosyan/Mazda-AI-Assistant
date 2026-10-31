@@ -501,8 +501,11 @@ class RecallApplicability(Base):
             "model_year BETWEEN 2018 AND 2021",
             name="model_year_supported",
         ),
+        # Both unknown (listed before per-year dates existed) or both known and ordered.
         CheckConstraint(
-            "first_listed_at <= last_listed_at",
+            "(first_listed_at IS NULL AND last_listed_at IS NULL) OR "
+            "(first_listed_at IS NOT NULL AND last_listed_at IS NOT NULL "
+            "AND first_listed_at <= last_listed_at)",
             name="listed_times_ordered",
         ),
     )
@@ -518,8 +521,9 @@ class RecallApplicability(Base):
     model: Mapped[str] = mapped_column(String(16), primary_key=True)
     model_year: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     # Per model year: a campaign can stay listed for one year and drop from another.
-    first_listed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_listed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # NULL means listed before these dates were recorded; never treated as current.
+    first_listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RecallModelYearCheck(Base):

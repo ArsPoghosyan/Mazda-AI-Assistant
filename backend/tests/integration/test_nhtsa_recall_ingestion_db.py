@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -275,7 +275,9 @@ def test_batch_without_model_years_is_refused(owner_connection: Connection) -> N
         apply_recall_batch(owner_connection, merge_model_years([], {}), seen_at=FIRST_RUN)
 
 
-def listed_times(connection: Connection) -> dict[tuple[str, int], tuple[datetime, datetime]]:
+def listed_times(
+    connection: Connection,
+) -> dict[tuple[str, int], tuple[datetime | None, datetime | None]]:
     rows = connection.execute(
         select(
             RecallCampaign.campaign_number,
@@ -298,4 +300,21 @@ def test_only_listed_pairs_get_a_new_last_listed_time(owner_connection: Connecti
         ("19V497000", 2018): (FIRST_RUN, LATER_RUN),
         ("19V497000", 2019): (FIRST_RUN, FIRST_RUN),
         ("21V875000", 2018): (FIRST_RUN, LATER_RUN),
+    }
+
+
+def test_reimport_dates_listings_whose_dates_were_unknown(owner_connection: Connection) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    # Simulate listings recorded before per-year dates existed.
+    owner_connection.execute(
+        update(RecallApplicability).values(first_listed_at=None, last_listed_at=None)
+    )
+    batch = recorded_batch()
+    batch.listings["19V497000"] = frozenset({2018})  # 2019 not confirmed again
+
+    apply_recall_batch(owner_connection, batch, seen_at=LATER_RUN)
+    assert listed_times(owner_connection) == {
+        ("19V497000", 2018): (LATER_RUN, LATER_RUN),
+        ("19V497000", 2019): (None, None),
+        ("21V875000", 2018): (LATER_RUN, LATER_RUN),
     }

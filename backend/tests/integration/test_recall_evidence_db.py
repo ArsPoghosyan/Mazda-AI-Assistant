@@ -237,6 +237,8 @@ def test_deleting_a_campaign_removes_its_listings(owner_connection: Connection) 
         ("model_year", 2017, "model_year_supported"),
         ("model_year", 2022, "model_year_supported"),
         ("first_listed_at", SEEN + timedelta(seconds=1), "listed_times_ordered"),
+        ("first_listed_at", None, "listed_times_ordered"),
+        ("last_listed_at", None, "listed_times_ordered"),
     ],
 )
 def test_invalid_listings_are_rejected(
@@ -335,3 +337,16 @@ def test_model_year_check_requires_a_known_source(owner_connection: Connection) 
             )
         )
     assert isinstance(caught.value.orig, ForeignKeyViolation)
+
+
+def test_listing_with_both_dates_unknown_is_allowed(owner_connection: Connection) -> None:
+    campaign_id = add_campaign(owner_connection)
+    owner_connection.execute(
+        insert(RecallApplicability).values(campaign_id=campaign_id, model_year=2021, **LISTING)
+    )
+    stored = owner_connection.execute(
+        select(RecallApplicability.first_listed_at, RecallApplicability.last_listed_at).where(
+            RecallApplicability.campaign_id == campaign_id
+        )
+    ).one()
+    assert tuple(stored) == (None, None)

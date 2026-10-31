@@ -18,27 +18,23 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Date each campaign/model-year listing so dropped listings are not shown as current."""
+    """Date each campaign/model-year listing so dropped listings are not shown as current.
+
+    Existing listings start with unknown dates. Campaign-level times cannot say
+    which model years were confirmed, so the next import supplies real dates.
+    """
     for column in ("first_listed_at", "last_listed_at"):
         op.add_column(
             "recall_applicability",
             sa.Column(column, sa.DateTime(timezone=True), nullable=True),
             schema="app",
         )
-    # Existing rows only know their campaign's times; the next import refines them.
-    op.execute(
-        "UPDATE app.recall_applicability AS listing "
-        "SET first_listed_at = campaign.first_seen_at, "
-        "last_listed_at = campaign.last_seen_at "
-        "FROM app.recall_campaigns AS campaign "
-        "WHERE campaign.id = listing.campaign_id"
-    )
-    for column in ("first_listed_at", "last_listed_at"):
-        op.alter_column("recall_applicability", column, nullable=False, schema="app")
     op.create_check_constraint(
         op.f("ck_recall_applicability_listed_times_ordered"),
         "recall_applicability",
-        "first_listed_at <= last_listed_at",
+        "(first_listed_at IS NULL AND last_listed_at IS NULL) OR "
+        "(first_listed_at IS NOT NULL AND last_listed_at IS NOT NULL "
+        "AND first_listed_at <= last_listed_at)",
         schema="app",
     )
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -173,12 +173,21 @@ def apply_recall_batch(
             (listing["campaign_id"], listing["model_year"]) not in existing for listing in listings
         )
         # Only pairs listed in this batch get a new last-listed time; dropped ones keep theirs.
+        # Listings with unknown dates (recorded before per-year dates) gain them here.
         upsert = pg_insert(RecallApplicability).values(listings)
         connection.execute(
             upsert.on_conflict_do_update(
                 index_elements=["campaign_id", "make", "model", "model_year"],
-                set_={"last_listed_at": upsert.excluded.last_listed_at},
-                where=RecallApplicability.last_listed_at <= upsert.excluded.last_listed_at,
+                set_={
+                    "first_listed_at": func.coalesce(
+                        RecallApplicability.first_listed_at, upsert.excluded.first_listed_at
+                    ),
+                    "last_listed_at": upsert.excluded.last_listed_at,
+                },
+                where=or_(
+                    RecallApplicability.last_listed_at.is_(None),
+                    RecallApplicability.last_listed_at <= upsert.excluded.last_listed_at,
+                ),
             )
         )
 

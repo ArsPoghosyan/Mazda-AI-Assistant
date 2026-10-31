@@ -23,7 +23,7 @@ LIMITATION = (
     "car by its VIN at https://www.nhtsa.gov/recalls."
 )
 
-ListingStatus = Literal["campaigns_listed", "none_listed", "not_checked"]
+ListingStatus = Literal["campaigns_listed", "none_listed", "not_checked", "unverified"]
 
 
 class UnknownVehicleVariant(LookupError):
@@ -43,8 +43,9 @@ class RecallFact:
     park_outside: bool
     over_the_air_update: bool
     nhtsa_url: str
-    # When NHTSA last listed this campaign for this model year.
-    last_listed_at: datetime
+    # When NHTSA last listed this campaign for this model year; None if listed
+    # before per-year dates were recorded and not confirmed since.
+    last_listed_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ class RecallEvidence:
     source_name: str
     source_publisher: str
     source_url: str
-    # Listed by an earlier check but not the latest; kept, never shown as current.
+    # Not confirmed by the latest check (or date unknown); kept, never shown as current.
     previously_listed: tuple[RecallFact, ...] = ()
     limitation: str = LIMITATION
 
@@ -135,31 +136,49 @@ def find_recall_evidence(connection: Connection, variant_id: int) -> RecallEvide
         for row in rows
     ]
 
-    checked_at = connection.scalar(
-        select(RecallModelYearCheck.checked_at).where(
+    check = connection.execute(
+        select(RecallModelYearCheck.checked_at, RecallModelYearCheck.campaigns_listed).where(
             RecallModelYearCheck.source_id == source.id,
             RecallModelYearCheck.make == MAKE,
             RecallModelYearCheck.model == MODEL,
             RecallModelYearCheck.model_year == model_year,
         )
-    )
-    # A listing counts as current only if the latest check of this year confirmed it.
-    campaigns = tuple(
-        fact for fact in facts if checked_at is None or fact.last_listed_at >= checked_at
-    )
+    ).one_or_none()
+    checked_at = check.checked_at if check is not None else None
+
+    # A listing counts as current only if the latest check of this year confirmed
+    # it; an unknown date is never assumed to be current.
+    def confirmed(fact: RecallFact) -> bool:
+        return (
+            checked_at is not None
+            and fact.last_listed_at is not None
+            and fact.last_listed_at >= checked_at
+        )
+
+    current = [fact for fact in facts if confirmed(fact)]
+    status: ListingStatus
+    if check is None:
+        status = "not_checked"
+    elif len(current) != check.campaigns_listed:
+        # Stored listings disagree with what the check recorded (for example dates
+        # still unknown from before per-year dates); say nothing until re-imported.
+        status = "unverified"
+    elif current:
+        status = "campaigns_listed"
+    else:
+        status = "none_listed"
+
+    campaigns = tuple(current) if status == "campaigns_listed" else ()
     previously_listed = tuple(
         sorted(
             (fact for fact in facts if fact not in campaigns),
-            key=lambda fact: (-fact.last_listed_at.timestamp(), fact.campaign_number),
+            key=lambda fact: (
+                fact.last_listed_at is None,
+                -(fact.last_listed_at.timestamp() if fact.last_listed_at else 0),
+                fact.campaign_number,
+            ),
         )
     )
-    status: ListingStatus
-    if campaigns:
-        status = "campaigns_listed"
-    elif checked_at is not None:
-        status = "none_listed"
-    else:
-        status = "not_checked"
 
     return RecallEvidence(
         model_year=model_year,
@@ -178,16 +197,18 @@ def _previous_statement(previous: tuple[RecallFact, ...]) -> str:
         return ""
     details = ", ".join(
         f"{fact.campaign_number} (last listed {fact.last_listed_at.date().isoformat()})"
+        if fact.last_listed_at is not None
+        else f"{fact.campaign_number} (last-listed date unknown)"
         for fact in previous
     )
     if len(previous) == 1:
         return (
-            f" 1 recall campaign listed earlier was not in the latest listing: {details}. "
-            "That does not show it was withdrawn or fixed."
+            " 1 recall campaign listed earlier was not confirmed by the latest listing: "
+            f"{details}. That does not show it was withdrawn or fixed."
         )
     return (
-        f" {len(previous)} recall campaigns listed earlier were not in the latest listing: "
-        f"{details}. That does not show they were withdrawn or fixed."
+        f" {len(previous)} recall campaigns listed earlier were not confirmed by the latest "
+        f"listing: {details}. That does not show they were withdrawn or fixed."
     )
 
 
@@ -210,6 +231,11 @@ def listing_statement(evidence: RecallEvidence) -> str:
         return (
             f"NHTSA's model-year listing showed no recall campaigns for the {vehicle} "
             f"{as_of}.{previous} That is not proof that no recalls apply. {LIMITATION}"
+        )
+    if evidence.status == "unverified":
+        return (
+            f"Stored NHTSA recall data for the {vehicle} is incomplete and must be "
+            f"re-imported before anything can be said about recalls. {LIMITATION}"
         )
     return (
         f"NHTSA recall data for the {vehicle} has not been checked yet, so nothing can "
