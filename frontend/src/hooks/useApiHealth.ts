@@ -27,6 +27,8 @@ export function useApiHealth() {
     function finish(next: ApiStatus) {
       window.clearTimeout(timeout)
       window.clearTimeout(retryTimer)
+      // Also ends a still-pending wake request, which has no timeout of its own.
+      controller.abort()
       if (active) setStatus(next)
     }
 

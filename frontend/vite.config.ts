@@ -17,6 +17,8 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     restoreMocks: true,
+    // Tests opt in explicitly; a developer's local wake URL must not leak in.
+    env: { VITE_API_WAKE_URL: '' },
   },
   server: {
     port: 5173,

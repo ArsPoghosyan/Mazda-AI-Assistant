@@ -112,7 +112,7 @@ test.each([
   ['unset', undefined],
   ['invalid', 'http://backend.example.test/api/v1/health'],
 ] as const)('%s wake URL keeps the previous fail-fast behaviour', async (_name, value) => {
-  if (value !== undefined) vi.stubEnv('VITE_API_WAKE_URL', value)
+  vi.stubEnv('VITE_API_WAKE_URL', value ?? '')
   const fetchMock = stubFetch(asleep)
   const { result } = renderHook(() => useApiHealth())
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
@@ -150,4 +150,34 @@ test('unmounting cancels the wake request and pending retries', async () => {
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
   expect(fetchMock.mock.calls.every(([, options]) => options?.signal?.aborted)).toBe(true)
+})
+
+function stubPendingWake(health: () => Response | Promise<Response>) {
+  const fetchMock = vi.fn<typeof fetch>().mockImplementation((url, options) => {
+    if (url === WAKE) {
+      // A wake request that never answers on its own, like a stalled backend.
+      return new Promise<Response>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      })
+    }
+    if (url === '/api/v1/health') return Promise.resolve(health())
+    return Promise.reject(new Error('Unexpected request'))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+test.each([
+  ['success', healthy, 'connected'],
+  ['early failure', () => new Response(null, { status: 404 }), 'unavailable'],
+] as const)('a pending wake request is cancelled after %s', async (_name, health, expected) => {
+  vi.stubEnv('VITE_API_WAKE_URL', WAKE)
+  const fetchMock = stubPendingWake(health)
+  const { result } = renderHook(() => useApiHealth())
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+  expect(result.current.status).toBe(expected)
+  const [wake] = fetchMock.mock.calls.filter(([url]) => url === WAKE)
+  expect(wake?.[1]?.signal?.aborted).toBe(true)
+  expect(vi.getTimerCount()).toBe(0)
 })
