@@ -463,6 +463,14 @@ these browser controls. Hosted guest first-use verification and cookie reuse
 after reload have been manually confirmed.
 A frontend build does not provide an API server.
 
+A Free Render backend sleeps after about 15 idle minutes, and requests through
+the Pages proxy then receive an immediate `502` without waking it. Setting
+`VITE_API_WAKE_URL` to the backend's own `https://…/api/v1/health` URL makes the
+page send one request there without cookies or referrer, then retry the proxied
+health check every five seconds (only for `502`/`503`/`504` or network errors)
+until the existing 75-second deadline. The URL is public build configuration;
+the backend still enforces its own authentication, origin and rate-limit checks.
+
 Render uses root directory `backend`, build command `uv sync --locked --no-dev`,
 and start command `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-proxy-headers`.
 Provide the database CA as secret file `supabase-ca.crt`, referenced through
