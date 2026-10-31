@@ -27,7 +27,9 @@ FACT = RecallFact(
     park_outside=False,
     over_the_air_update=False,
     nhtsa_url=nhtsa_recall_url("19V497000"),
+    last_listed_at=CHECKED,
 )
+EARLIER = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 
 
 def evidence(**changes: object) -> RecallEvidence:
@@ -100,3 +102,38 @@ def test_every_result_carries_the_vin_limitation() -> None:
     assert evidence().limitation == LIMITATION
     assert "not by individual vehicle" in LIMITATION
     assert "https://www.nhtsa.gov/recalls" in LIMITATION
+
+
+def test_previously_listed_campaign_is_dated_and_not_presented_as_current() -> None:
+    dropped = replace(FACT, last_listed_at=EARLIER)
+    statement = listing_statement(evidence(previously_listed=(dropped,)))
+    assert statement.startswith(
+        "NHTSA's model-year listing showed no recall campaigns for the 2021 Mazda 6 "
+        "as of 2026-10-29."
+    )
+    assert (
+        "1 recall campaign listed earlier was not in the latest listing: "
+        "19V497000 (last listed 2026-10-01). That does not show it was withdrawn or fixed."
+    ) in statement
+    assert "NHTSA lists 1 recall" not in statement
+    assert not FALSE_ALL_CLEAR.search(statement)
+
+
+def test_reduced_listing_counts_only_current_campaigns() -> None:
+    current = replace(FACT, campaign_number="21V875000")
+    dropped = replace(FACT, last_listed_at=EARLIER)
+    statement = listing_statement(
+        evidence(
+            model_year=2018,
+            status="campaigns_listed",
+            campaigns=(current,),
+            previously_listed=(dropped,),
+        )
+    )
+    assert "NHTSA lists 1 recall campaign for the 2018 Mazda 6 as of 2026-10-29." in statement
+    assert "19V497000 (last listed 2026-10-01)" in statement
+
+
+def test_previously_listed_park_flag_still_requires_urgency() -> None:
+    dropped_fire = replace(FACT, park_outside=True, last_listed_at=EARLIER)
+    assert evidence(previously_listed=(dropped_fire,)).requires_urgent_safety_message is True

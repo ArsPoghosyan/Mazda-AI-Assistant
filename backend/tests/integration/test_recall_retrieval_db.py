@@ -1,7 +1,7 @@
 """Recall retrieval as the website role, against guarded local PostgreSQL."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ pytestmark = pytest.mark.integration
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "nhtsa"
 CHECKED = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+LATER = CHECKED + timedelta(days=7)
 # Catalogue IDs from the vehicle_variants seed.
 NA_2018_MANUAL, NA_2019_AUTO, NA_2020_AUTO, FAMILY_2021 = 1, 5, 7, 9
 
@@ -132,3 +133,46 @@ def test_website_cannot_write_check_records(app_connection: Connection) -> None:
             )
         )
     assert isinstance(caught.value.orig, InsufficientPrivilege)
+
+
+def test_fully_emptied_year_keeps_old_campaign_only_as_previous(
+    owner_connection: Connection,
+) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=CHECKED)
+    # A newer check of 2019 lists nothing.
+    apply_recall_batch(owner_connection, merge_model_years([2019], {2019: []}), seen_at=LATER)
+    evidence = find_recall_evidence(as_website(owner_connection), NA_2019_AUTO)
+
+    assert (evidence.status, evidence.campaigns, evidence.checked_at) == (
+        "none_listed",
+        (),
+        LATER,
+    )
+    assert [(fact.campaign_number, fact.last_listed_at) for fact in evidence.previously_listed] == [
+        ("19V497000", CHECKED)
+    ]
+    statement = listing_statement(evidence)
+    assert "NHTSA lists 1 recall" not in statement
+    assert "as of 2026-11-05" in statement
+    assert "19V497000 (last listed 2026-10-29)" in statement
+
+
+def test_partially_reduced_year_separates_current_and_previous(
+    owner_connection: Connection,
+) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=CHECKED)
+    newer = recorded_batch()
+    newer.listings["19V497000"] = frozenset({2019})  # dropped from 2018 only
+    apply_recall_batch(owner_connection, newer, seen_at=LATER)
+    website = as_website(owner_connection)
+
+    reduced = find_recall_evidence(website, NA_2018_MANUAL)
+    assert [fact.campaign_number for fact in reduced.campaigns] == ["21V875000"]
+    assert reduced.campaigns[0].last_listed_at == LATER
+    assert [fact.campaign_number for fact in reduced.previously_listed] == ["19V497000"]
+    assert "NHTSA lists 1 recall campaign for the 2018 Mazda 6" in listing_statement(reduced)
+
+    # The same campaign is still current where NHTSA still lists it.
+    still_listed = find_recall_evidence(website, NA_2019_AUTO)
+    assert [fact.campaign_number for fact in still_listed.campaigns] == ["19V497000"]
+    assert still_listed.previously_listed == ()

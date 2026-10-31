@@ -501,6 +501,10 @@ class RecallApplicability(Base):
             "model_year BETWEEN 2018 AND 2021",
             name="model_year_supported",
         ),
+        CheckConstraint(
+            "first_listed_at <= last_listed_at",
+            name="listed_times_ordered",
+        ),
     )
 
     campaign_id: Mapped[int] = mapped_column(
@@ -513,6 +517,9 @@ class RecallApplicability(Base):
     make: Mapped[str] = mapped_column(String(16), primary_key=True)
     model: Mapped[str] = mapped_column(String(16), primary_key=True)
     model_year: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    # Per model year: a campaign can stay listed for one year and drop from another.
+    first_listed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_listed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class RecallModelYearCheck(Base):

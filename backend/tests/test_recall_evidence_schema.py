@@ -78,3 +78,9 @@ def test_model_year_checks_are_keyed_per_source_and_year() -> None:
     assert source_fk.target_fullname == "app.evidence_sources.id"
     assert source_fk.ondelete == "RESTRICT"
     assert "CHECK (campaigns_listed BETWEEN 0 AND 100)" in ddl(CHECKS)
+
+
+def test_each_listing_keeps_its_own_listed_times() -> None:
+    assert {"first_listed_at", "last_listed_at"} <= set(LISTINGS.c.keys())
+    assert not LISTINGS.c.last_listed_at.nullable
+    assert "CHECK (first_listed_at <= last_listed_at)" in ddl(LISTINGS)

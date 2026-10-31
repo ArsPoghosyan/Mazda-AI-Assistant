@@ -44,6 +44,7 @@ CAMPAIGN: dict[str, object] = {
     "last_seen_at": SEEN,
 }
 LISTING = {"make": "MAZDA", "model": "MAZDA6"}
+LISTED_TIMES = {"first_listed_at": SEEN, "last_listed_at": SEEN}
 
 
 def add_campaign(connection: Connection, **overrides: object) -> int:
@@ -57,7 +58,7 @@ def add_campaign(connection: Connection, **overrides: object) -> int:
 def add_listing(connection: Connection, campaign_id: int, model_year: int) -> None:
     connection.execute(
         insert(RecallApplicability).values(
-            campaign_id=campaign_id, model_year=model_year, **LISTING
+            campaign_id=campaign_id, model_year=model_year, **LISTING, **LISTED_TIMES
         )
     )
 
@@ -107,7 +108,9 @@ def test_recall_tables_start_empty(app_connection: Connection) -> None:
         insert(RecallCampaign).values(**CAMPAIGN),
         update(RecallCampaign).values(summary="Changed"),
         delete(RecallCampaign),
-        insert(RecallApplicability).values(campaign_id=1, model_year=2021, **LISTING),
+        insert(RecallApplicability).values(
+            campaign_id=1, model_year=2021, **LISTING, **LISTED_TIMES
+        ),
         delete(RecallApplicability),
     ],
     ids=[
@@ -233,13 +236,20 @@ def test_deleting_a_campaign_removes_its_listings(owner_connection: Connection) 
         ("model", "MAZDA 6", "model_supported"),
         ("model_year", 2017, "model_year_supported"),
         ("model_year", 2022, "model_year_supported"),
+        ("first_listed_at", SEEN + timedelta(seconds=1), "listed_times_ordered"),
     ],
 )
 def test_invalid_listings_are_rejected(
     owner_connection: Connection, column: str, value: object, constraint: str
 ) -> None:
     campaign_id = add_campaign(owner_connection)
-    listing = {"campaign_id": campaign_id, "model_year": 2021, **LISTING, column: value}
+    listing = {
+        "campaign_id": campaign_id,
+        "model_year": 2021,
+        **LISTING,
+        **LISTED_TIMES,
+        column: value,
+    }
     with pytest.raises(IntegrityError) as caught:
         owner_connection.execute(insert(RecallApplicability).values(**listing))
     assert isinstance(caught.value.orig, CheckViolation)

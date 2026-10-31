@@ -146,20 +146,40 @@ def apply_recall_batch(
         )
 
     listings = [
-        {"campaign_id": campaign_ids[number], "make": MAKE, "model": MODEL, "model_year": year}
+        {
+            "campaign_id": campaign_ids[number],
+            "make": MAKE,
+            "model": MODEL,
+            "model_year": year,
+            "first_listed_at": seen_at,
+            "last_listed_at": seen_at,
+        }
         for number, years in sorted(batch.listings.items())
         for year in sorted(years)
     ]
     listings_added = 0
     if listings:
-        # RETURNING lists only rows actually inserted; rowcount is unreliable here.
-        listings_added = len(
-            connection.execute(
-                pg_insert(RecallApplicability)
-                .values(listings)
-                .on_conflict_do_nothing()
-                .returning(RecallApplicability.campaign_id)
-            ).all()
+        existing = {
+            (campaign_id, model_year)
+            for campaign_id, model_year in connection.execute(
+                select(RecallApplicability.campaign_id, RecallApplicability.model_year).where(
+                    RecallApplicability.campaign_id.in_(campaign_ids.values()),
+                    RecallApplicability.make == MAKE,
+                    RecallApplicability.model == MODEL,
+                )
+            )
+        }
+        listings_added = sum(
+            (listing["campaign_id"], listing["model_year"]) not in existing for listing in listings
+        )
+        # Only pairs listed in this batch get a new last-listed time; dropped ones keep theirs.
+        upsert = pg_insert(RecallApplicability).values(listings)
+        connection.execute(
+            upsert.on_conflict_do_update(
+                index_elements=["campaign_id", "make", "model", "model_year"],
+                set_={"last_listed_at": upsert.excluded.last_listed_at},
+                where=RecallApplicability.last_listed_at <= upsert.excluded.last_listed_at,
+            )
         )
 
     # Record every requested year, empty ones included, so "none listed as of"

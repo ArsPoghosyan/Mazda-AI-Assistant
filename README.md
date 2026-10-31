@@ -205,8 +205,8 @@ on both local databases with unchanged grants. Google initiation throttling requ
 require this head. The local website now has Terms setup enabled for controlled
 manual flow checks. The hosted database has not received this Terms migration;
 hosted authentication remains disabled. The vehicle catalogue and recall evidence
-migrations (`c3f1a9d2e7b4`, `d8e2b6c4a1f9`, `f4a7c2d9b351`, `a9c4e1f7b2d6`) are verified on both
-local databases only.
+migrations (`c3f1a9d2e7b4`, `d8e2b6c4a1f9`, `f4a7c2d9b351`, `a9c4e1f7b2d6`,
+`c7e2d5a8f1b3`) are verified on both local databases only.
 
 To load NHTSA recall listings into a local database, run from `backend` with
 `MIGRATION_DATABASE_URL` set to the local `mazda6` database and the `askm6_migrator`

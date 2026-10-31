@@ -273,3 +273,29 @@ def test_newer_empty_check_makes_an_older_batch_stale(owner_connection: Connecti
 def test_batch_without_model_years_is_refused(owner_connection: Connection) -> None:
     with pytest.raises(ValueError, match="at least one model year"):
         apply_recall_batch(owner_connection, merge_model_years([], {}), seen_at=FIRST_RUN)
+
+
+def listed_times(connection: Connection) -> dict[tuple[str, int], tuple[datetime, datetime]]:
+    rows = connection.execute(
+        select(
+            RecallCampaign.campaign_number,
+            RecallApplicability.model_year,
+            RecallApplicability.first_listed_at,
+            RecallApplicability.last_listed_at,
+        ).join(RecallApplicability)
+    ).all()
+    return {(row[0], row[1]): (row[2], row[3]) for row in rows}
+
+
+def test_only_listed_pairs_get_a_new_last_listed_time(owner_connection: Connection) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    batch = recorded_batch()
+    batch.listings["19V497000"] = frozenset({2018})  # no longer listed for 2019
+
+    report = apply_recall_batch(owner_connection, batch, seen_at=LATER_RUN)
+    assert report.listings_added == 0
+    assert listed_times(owner_connection) == {
+        ("19V497000", 2018): (FIRST_RUN, LATER_RUN),
+        ("19V497000", 2019): (FIRST_RUN, FIRST_RUN),
+        ("21V875000", 2018): (FIRST_RUN, LATER_RUN),
+    }
