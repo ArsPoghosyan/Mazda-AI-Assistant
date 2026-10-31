@@ -14,6 +14,7 @@ DIALECT = create_mock_engine("postgresql+psycopg://", reject_execution).dialect
 SOURCES = Base.metadata.tables["app.evidence_sources"]
 CAMPAIGNS = Base.metadata.tables["app.recall_campaigns"]
 LISTINGS = Base.metadata.tables["app.recall_applicability"]
+CHECKS = Base.metadata.tables["app.recall_model_year_checks"]
 
 
 def ddl(table: object) -> str:
@@ -63,3 +64,17 @@ def test_database_enforces_evidence_rules() -> None:
     listings = ddl(LISTINGS)
     assert "CHECK (model = 'MAZDA6')" in listings
     assert "CHECK (model_year BETWEEN 2018 AND 2021)" in listings
+
+
+def test_model_year_checks_are_keyed_per_source_and_year() -> None:
+    assert [column.name for column in CHECKS.primary_key.columns] == [
+        "source_id",
+        "make",
+        "model",
+        "model_year",
+    ]
+    assert not [column.name for column in CHECKS.c if column.nullable]
+    (source_fk,) = CHECKS.c.source_id.foreign_keys
+    assert source_fk.target_fullname == "app.evidence_sources.id"
+    assert source_fk.ondelete == "RESTRICT"
+    assert "CHECK (campaigns_listed BETWEEN 0 AND 100)" in ddl(CHECKS)

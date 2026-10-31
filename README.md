@@ -28,7 +28,7 @@ for new deployments.
 | Session security | ES256 JWT verification, bounded signing-key cache, live provider-session checks for sign-in/cookie authentication, encrypted token refresh, transaction/expiry guards |
 | Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
 | Vehicle catalogue | Read-only database table of the ten US Mazda 6 configurations (2018–2021) listed in US EPA fueleconomy.gov data; not yet exposed through the API |
-| Recall evidence | Read-only database tables for evidence sources, NHTSA recall campaigns and the model years they list, plus a manual, local-only import command for Mazda 6 model years 2018–2021 (dry run by default); not yet exposed through the API or chat |
+| Recall evidence | Read-only database tables for evidence sources, NHTSA recall campaigns, the model years they list and when each model year was last checked, plus a manual, local-only import command for Mazda 6 model years 2018–2021 (dry run by default) and an internal lookup by catalogue vehicle that returns dated, source-attributed results with a VIN-check limitation; not yet exposed through the API or chat |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
@@ -205,7 +205,7 @@ on both local databases with unchanged grants. Google initiation throttling requ
 require this head. The local website now has Terms setup enabled for controlled
 manual flow checks. The hosted database has not received this Terms migration;
 hosted authentication remains disabled. The vehicle catalogue and recall evidence
-migrations (`c3f1a9d2e7b4`, `d8e2b6c4a1f9`, `f4a7c2d9b351`) are verified on both
+migrations (`c3f1a9d2e7b4`, `d8e2b6c4a1f9`, `f4a7c2d9b351`, `a9c4e1f7b2d6`) are verified on both
 local databases only.
 
 To load NHTSA recall listings into a local database, run from `backend` with

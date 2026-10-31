@@ -513,3 +513,42 @@ class RecallApplicability(Base):
     make: Mapped[str] = mapped_column(String(16), primary_key=True)
     model: Mapped[str] = mapped_column(String(16), primary_key=True)
     model_year: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+
+
+class RecallModelYearCheck(Base):
+    """When a source was last checked for a model year, including empty results.
+
+    Without this record an empty listing has no date, and "none listed as of"
+    could not be stated honestly.
+    """
+
+    __tablename__ = "recall_model_year_checks"
+    __table_args__ = (
+        CheckConstraint(
+            "make = 'MAZDA'",
+            name="make_supported",
+        ),
+        CheckConstraint(
+            "model = 'MAZDA6'",
+            name="model_supported",
+        ),
+        CheckConstraint(
+            "model_year BETWEEN 2018 AND 2021",
+            name="model_year_supported",
+        ),
+        CheckConstraint(
+            "campaigns_listed BETWEEN 0 AND 100",
+            name="campaigns_listed_range",
+        ),
+    )
+
+    source_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("app.evidence_sources.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    make: Mapped[str] = mapped_column(String(16), primary_key=True)
+    model: Mapped[str] = mapped_column(String(16), primary_key=True)
+    model_year: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    campaigns_listed: Mapped[int] = mapped_column(SmallInteger)

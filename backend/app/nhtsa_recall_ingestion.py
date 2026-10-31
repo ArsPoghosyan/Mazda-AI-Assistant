@@ -7,7 +7,12 @@ from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
-from app.models import EvidenceSource, RecallApplicability, RecallCampaign
+from app.models import (
+    EvidenceSource,
+    RecallApplicability,
+    RecallCampaign,
+    RecallModelYearCheck,
+)
 from app.nhtsa_recalls import MAKE, MODEL, RecallBatch, RecallRecord
 
 SOURCE_SLUG = "nhtsa_recalls"
@@ -57,11 +62,14 @@ def apply_recall_batch(
     """
     if seen_at.tzinfo is None:
         raise ValueError("seen_at must be timezone-aware.")
+    if not batch.model_years:
+        raise ValueError("A batch must cover at least one model year.")
 
     # One import at a time; readers are not blocked.
     connection.execute(
         text(
-            "LOCK TABLE app.recall_campaigns, app.recall_applicability IN SHARE ROW EXCLUSIVE MODE"
+            "LOCK TABLE app.recall_campaigns, app.recall_applicability, "
+            "app.recall_model_year_checks IN SHARE ROW EXCLUSIVE MODE"
         )
     )
     source_id = connection.execute(
@@ -70,8 +78,24 @@ def apply_recall_batch(
 
     # Under the lock: refuse a batch fetched before the newest stored evidence,
     # so a slow import cannot overwrite newer content or safety flags.
-    newest = connection.scalar(
-        select(func.max(RecallCampaign.last_seen_at)).where(RecallCampaign.source_id == source_id)
+    newest = max(
+        (
+            moment
+            for moment in (
+                connection.scalar(
+                    select(func.max(RecallCampaign.last_seen_at)).where(
+                        RecallCampaign.source_id == source_id
+                    )
+                ),
+                connection.scalar(
+                    select(func.max(RecallModelYearCheck.checked_at)).where(
+                        RecallModelYearCheck.source_id == source_id
+                    )
+                ),
+            )
+            if moment is not None
+        ),
+        default=None,
     )
     if newest is not None and newest > seen_at:
         raise StaleBatchError("A newer import already ran; this batch is out of date.")
@@ -137,6 +161,32 @@ def apply_recall_batch(
                 .returning(RecallApplicability.campaign_id)
             ).all()
         )
+
+    # Record every requested year, empty ones included, so "none listed as of"
+    # always has a date behind it.
+    checks = pg_insert(RecallModelYearCheck).values(
+        [
+            {
+                "source_id": source_id,
+                "make": MAKE,
+                "model": MODEL,
+                "model_year": year,
+                "checked_at": seen_at,
+                "campaigns_listed": sum(year in years for years in batch.listings.values()),
+            }
+            for year in batch.model_years
+        ]
+    )
+    connection.execute(
+        checks.on_conflict_do_update(
+            index_elements=["source_id", "make", "model", "model_year"],
+            set_={
+                "checked_at": checks.excluded.checked_at,
+                "campaigns_listed": checks.excluded.campaigns_listed,
+            },
+            where=RecallModelYearCheck.checked_at <= checks.excluded.checked_at,
+        )
+    )
 
     listed_now = {(number, year) for number, years in batch.listings.items() for year in years}
     stored_listings = connection.execute(

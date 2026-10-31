@@ -15,7 +15,12 @@ from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 
-from app.models import EvidenceSource, RecallApplicability, RecallCampaign
+from app.models import (
+    EvidenceSource,
+    RecallApplicability,
+    RecallCampaign,
+    RecallModelYearCheck,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -283,3 +288,40 @@ def test_invalid_sources_are_rejected(
         owner_connection.execute(insert(EvidenceSource).values(**source))
     assert isinstance(caught.value.orig, CheckViolation)
     assert caught.value.orig.diag.constraint_name == f"ck_evidence_sources_{constraint}"
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "constraint"),
+    [
+        ("make", "Mazda", "make_supported"),
+        ("model", "MAZDA3", "model_supported"),
+        ("model_year", 2017, "model_year_supported"),
+        ("campaigns_listed", -1, "campaigns_listed_range"),
+        ("campaigns_listed", 101, "campaigns_listed_range"),
+    ],
+)
+def test_invalid_model_year_checks_are_rejected(
+    owner_connection: Connection, column: str, value: object, constraint: str
+) -> None:
+    check = {
+        "source_id": 1,
+        "model_year": 2021,
+        "checked_at": SEEN,
+        "campaigns_listed": 0,
+        **LISTING,
+        column: value,
+    }
+    with pytest.raises(IntegrityError) as caught:
+        owner_connection.execute(insert(RecallModelYearCheck).values(**check))
+    assert isinstance(caught.value.orig, CheckViolation)
+    assert caught.value.orig.diag.constraint_name == f"ck_recall_model_year_checks_{constraint}"
+
+
+def test_model_year_check_requires_a_known_source(owner_connection: Connection) -> None:
+    with pytest.raises(IntegrityError) as caught:
+        owner_connection.execute(
+            insert(RecallModelYearCheck).values(
+                source_id=999, model_year=2021, checked_at=SEEN, campaigns_listed=0, **LISTING
+            )
+        )
+    assert isinstance(caught.value.orig, ForeignKeyViolation)

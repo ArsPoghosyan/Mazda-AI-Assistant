@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.models import RecallApplicability, RecallCampaign
+from app.models import RecallApplicability, RecallCampaign, RecallModelYearCheck
 from app.nhtsa_recall_import import ImportTargetError, apply_in_transaction
 from app.nhtsa_recall_ingestion import IngestionReport, StaleBatchError, apply_recall_batch
 from app.nhtsa_recalls import RecallBatch, fingerprint, merge_model_years, parse_model_year_response
@@ -228,3 +228,48 @@ def test_unexpected_identity_stops_before_writing(
     with pytest.raises(ImportTargetError):
         run_dry_import(integration_engine, role=role, database=database)
     assert stored_campaigns(integration_engine) == 0
+
+
+def stored_checks(connection: Connection) -> list[tuple[int, datetime, int]]:
+    rows = connection.execute(
+        select(
+            RecallModelYearCheck.model_year,
+            RecallModelYearCheck.checked_at,
+            RecallModelYearCheck.campaigns_listed,
+        ).order_by(RecallModelYearCheck.model_year)
+    ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+def test_every_requested_year_is_recorded_as_checked(owner_connection: Connection) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    assert stored_checks(owner_connection) == [
+        (2018, FIRST_RUN, 2),
+        (2019, FIRST_RUN, 1),
+        (2020, FIRST_RUN, 0),
+        (2021, FIRST_RUN, 0),
+    ]
+
+
+def test_a_later_run_moves_only_the_years_it_checked(owner_connection: Connection) -> None:
+    apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    apply_recall_batch(owner_connection, merge_model_years([2021], {2021: []}), seen_at=LATER_RUN)
+    assert stored_checks(owner_connection) == [
+        (2018, FIRST_RUN, 2),
+        (2019, FIRST_RUN, 1),
+        (2020, FIRST_RUN, 0),
+        (2021, LATER_RUN, 0),
+    ]
+
+
+def test_newer_empty_check_makes_an_older_batch_stale(owner_connection: Connection) -> None:
+    # Only a check record exists for the newer run; no campaign was touched.
+    apply_recall_batch(owner_connection, merge_model_years([2021], {2021: []}), seen_at=LATER_RUN)
+    with pytest.raises(StaleBatchError):
+        apply_recall_batch(owner_connection, recorded_batch(), seen_at=FIRST_RUN)
+    assert stored_checks(owner_connection) == [(2021, LATER_RUN, 0)]
+
+
+def test_batch_without_model_years_is_refused(owner_connection: Connection) -> None:
+    with pytest.raises(ValueError, match="at least one model year"):
+        apply_recall_batch(owner_connection, merge_model_years([], {}), seen_at=FIRST_RUN)
