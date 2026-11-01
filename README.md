@@ -29,6 +29,7 @@ for new deployments.
 | Abuse controls | Recovery/sign-in/sign-up/confirmation/reset/guest-creation/Google-start throttling; optional scheduled expired-auth-record cleanup |
 | Vehicle catalogue | Read-only database table of the ten US Mazda 6 configurations (2018–2021) listed in US EPA fueleconomy.gov data; not yet exposed through the API |
 | Recall evidence | Read-only database tables for evidence sources, NHTSA recall campaigns, the model years they list and when each model year was last checked, plus a manual, local-only import command for Mazda 6 model years 2018–2021 (dry run by default) and an internal lookup by catalogue vehicle that returns dated, source-attributed results with a VIN-check limitation; not yet exposed through the API or chat |
+| Evaluation set | 37 written test questions (recalls, vehicle facts, missing evidence, clarification, refusals, safety escalation, prompt injection) with expected behaviour and evidence; integration tests check recall expectations against recorded NHTSA responses and vehicle expectations against the EPA-sourced vehicle catalogue, while answer grading waits for the chat |
 | Validation | Offline API/component tests, guarded PostgreSQL integration tests, lint/types/build and GitHub Actions |
 
 **Not implemented:** chat, conversation persistence, vehicle selection, retrieval,
